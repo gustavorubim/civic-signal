@@ -266,6 +266,7 @@ The simulation layer converts ensemble point estimates into joint outcome distri
 It generates race-option draws with:
 
 - National correlated error.
+- Residual-covariance geography error when a learned covariance artifact is available.
 - Region correlated error.
 - Office-type correlated error.
 - Race/local heavy-tailed error.
@@ -280,6 +281,7 @@ share_0_draw =
   clamp(
     ensemble_share_0
     + national_error_draw
+    + residual_covariance_geography_draw
     + region_error_draw
     + office_error_draw
     + local_error_race_draw,
@@ -292,10 +294,13 @@ share_1_draw = 1 - share_0_draw
 winner = argmax(share_0_draw, share_1_draw)
 ```
 
-The current correlation structure is a structured factor model, not a learned
-state-by-state covariance matrix. It is materially better than independent race draws,
-but it should be replaced by a residual covariance model once enough historical races
-are available.
+The current residual covariance model is intentionally conservative. It estimates
+geography residuals from rolling-origin forecast errors at each scored `as_of` cut,
+then shrinks the empirical covariance toward a structured regional target and projects
+the matrix to positive semidefinite form. If there are fewer than two residual
+observations, the covariance artifact is withheld and simulation falls back to the
+national/region/office factor model. This avoids treating a single residual as a
+covariance estimate.
 
 Control forecasts are derived from draw-level winners by control body and party. This is
 important because control probabilities are not independent race probabilities; they are
@@ -303,6 +308,11 @@ functions of correlated race outcomes. Control probabilities are evaluated again
 configured control thresholds when available; otherwise they fall back to a majority of
 modeled seats. Tipping-point races are ranked by simulated pivotal rate: how often
 flipping that race changes whether the party reaches the threshold.
+
+The `seats` field represents the unit counted by `control_body`: House seats for House
+races, Senate seats for Senate races, and Electoral College votes for presidential
+state races. The presidential threshold of `270` is therefore evaluated against summed
+state electoral votes.
 
 Ecosystem forecasts use draw-level outcomes to estimate:
 
@@ -318,7 +328,7 @@ administrative-risk model.
 
 ## 6. Backtesting And Calibration
 
-Backtesting uses historical prediction fixtures and component columns:
+Backtesting uses rolling-origin component refits and component columns:
 
 ```text
 baseline_probability
@@ -337,6 +347,11 @@ Metrics:
 - Expected calibration error.
 - Interval coverage.
 
+The default backtest date sweep evaluates `T-90`, `T-60`, `T-30`, `T-7`, and `T-1`
+days before Election Day when source rows exist by that `as_of`. Sparse fixture data may
+score only later cuts. The baseline prior uses configurable previous-share uncertainty
+and can switch to an empirical sigma once enough prior residual rows are available.
+
 Reward use:
 
 - `R4_calibration` confirms calibration metrics are reported.
@@ -352,8 +367,7 @@ coverage or poor probability calibration should not be treated as trusted.
 
 The fixture-backed implementation reports metrics and plots but does not certify
 baseline competition, component admission, or uncertainty quality. Those rewards remain
-red until the production backtest runner fits on prior cycles and evaluates on held-out
-cycles with enough race rows.
+red until the rolling-origin sample reaches the configured minimum row count.
 
 ## 7. Historical Result Comparison
 

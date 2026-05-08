@@ -139,12 +139,15 @@ Important config contracts:
   trusted-component flags, uncertainty settings, performance settings, and reward
   thresholds.
 - `configs/tiers.yaml`: Tier A/B/C thresholds and sparse-race policy.
-- `configs/backtests.yaml`: rolling-origin settings, metrics, and baselines.
+- `configs/backtests.yaml`: rolling-origin settings, as-of date sweep, metrics, and
+  baselines.
 
 Current implementation note: the repo runs a rolling-origin component refit harness and
 writes `rolling_predictions.parquet`, `component_admission.json`, and
-`residual_covariance.parquet`. It must not certify `R5`, `R6`, or `R8` until the
-historical race store reaches the configured sample threshold.
+`residual_covariance.parquet`. The rolling-origin harness evaluates multiple pre-election
+as-of cuts when data exists (`T-90/T-60/T-30/T-7/T-1` by default). It must not certify
+`R5`, `R6`, or `R8` until the historical race store reaches the configured sample
+threshold.
 
 ## Modeling Specification
 
@@ -163,15 +166,17 @@ Component models:
 - Polling model: sample-size inverse-variance style polling estimates with methodology,
   population, sponsor, time-decay, house-effect hooks, and posterior uncertainty proxy.
 - Fundamentals model: historical vote share, partisan lean, incumbency, finance, economy,
-  demographics, turnout history, and election type.
+  demographics, turnout history, and election type through a standardized ridge fit when
+  enough prior-cycle rows exist, otherwise explicit defaults.
 - Market model: public read-only market probabilities adjusted for liquidity and spread,
   then mapped to vote-share proxy through a configurable normal inverse-CDF scale.
 - Public-signal model: news/pageview/official-release features, experimental by default.
 - Ensemble: weighted blend of trusted components with vote-share normalization by race
   and unnormalized marginal win-probability reporting.
-- Simulation: structured-factor election-error draws with national, region, and office
-  factors plus heavy-tailed local error, race-level winners, vote shares, turnout,
-  recount risk, certification-risk proxy, and thresholded control outcomes.
+- Simulation: structured-factor election-error draws with national, residual-covariance,
+  region, and office factors plus heavy-tailed local error, race-level winners, vote
+  shares, turnout, recount risk, certification-risk proxy, and thresholded control
+  outcomes.
 - Performance: two-option race draw generation uses a Numba parallel kernel with a Python
   fallback, while table transforms should stay vectorized through Polars/DuckDB.
 
@@ -180,8 +185,9 @@ Planned statistical upgrade path:
 - Replace deterministic polling component with a hierarchical Bayesian model using
   `cmdstanpy` or NumPyro behind the same component/artifact schema.
 - Calibrate component weights with rolling-origin backtests rather than static config.
-- Replace the current national/region/office factor error model with a
-  geography-by-geography covariance matrix estimated from historical residuals.
+- Expand the current residual-covariance shrinkage model with a deeper historical
+  state/down-ballot residual panel; single-observation covariance must be withheld rather
+  than invented.
 - Extend live source adapters while preserving raw-source hash and curated-table
   contracts.
 - Extend Numba kernels to multi-option/ranked-choice simulation and score aggregation when

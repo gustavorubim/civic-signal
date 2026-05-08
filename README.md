@@ -151,6 +151,9 @@ The current `backtest run` command refits components by held-out cycle and write
 component admission plus residual covariance artifacts. The bundled fixture lake is
 still too small to certify `R5`, `R6`, or `R8`; those rewards remain false until the
 historical race store meets the configured sample threshold.
+Backtests now evaluate a date sweep when data exists: `T-90`, `T-60`, `T-30`, `T-7`,
+and `T-1` days before the election. Sparse fixtures may only score later cuts because
+feature rows are filtered by `as_of`.
 
 ## 2024 Presidential Historical Comparison
 
@@ -192,6 +195,12 @@ uv run election-outcomes results compare \
   --cycle 2024 \
   --office-type president
 ```
+
+Interpretation for the current fixture-backed 2024 benchmark: Wisconsin is the only
+modeled presidential state and the one-month pre-election forecast currently misses the
+actual winner. Treat that as a failing benchmark signal, not as a reason to tune against
+the answer. The next real-data milestone is to expand the 2024 state panel and improve
+the model until the holdout result improves without future-result leakage.
 
 Comparison output:
 
@@ -365,7 +374,9 @@ The `silver_benchmark.json` and `silver_benchmark.html` artifacts compare the cu
 engine to public Nate Silver / FiveThirtyEight methodology dimensions: polling
 inclusion, pollster weighting, fundamentals, rolling-origin validation, correlated
 simulation, Electoral College reporting, and driver explainability. This is a
-methodology/readiness benchmark, not a claim to reproduce proprietary forecasts.
+methodology/readiness benchmark, not a claim to reproduce proprietary forecasts. Scores
+use four honest tiers: `absent`, `scaffold`, `functional`, and `production`, so an
+implemented but undertrained path no longer receives full credit.
 
 List plot outputs:
 
