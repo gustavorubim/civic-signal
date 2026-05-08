@@ -375,6 +375,10 @@ Projection plots:
 - `topline_electoral_swarm.png`: 538-inspired representative simulation swarm with
   modeled-scope labeling.
 
+`diagnostics.html` now puts these projection/distribution charts at the top of the
+report and uses the modeled Electoral College/control winner in the hero rather than the
+highest-probability candidate from one safe state.
+
 Trajectory and stability plots:
 
 - `polling_kalman_trajectories.png`: Kalman latent vote-share paths with uncertainty
@@ -417,6 +421,26 @@ manifest = json.loads(
 )
 print(json.dumps(manifest, indent=2))
 PY
+```
+
+Run a same-date historical benchmark sweep:
+
+```bash
+for cycle in 2008 2012 2016 2020 2024; do
+  PYTHONPATH=src uv run election-outcomes forecast run \
+    --scenario president_${cycle}_state \
+    --as-of ${cycle}-10-05 \
+    --run-id eval-${cycle}-oct5 \
+    --data-dir data/cycle-eval \
+    --artifacts-dir artifacts/cycle-eval
+  PYTHONPATH=src uv run election-outcomes results compare \
+    --forecast-run-id eval-${cycle}-oct5 \
+    --comparison-id actuals \
+    --cycle $cycle \
+    --office-type president \
+    --data-dir data/cycle-eval \
+    --artifacts-dir artifacts/cycle-eval
+done
 ```
 
 ## Performance Run

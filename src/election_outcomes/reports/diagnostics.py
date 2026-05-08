@@ -23,7 +23,7 @@ class DiagnosticsReport:
     ) -> str:
         rewards = (reward_card or {}).get("rewards", {})
         methodology_benchmark = methodology_benchmark or {}
-        top = self._topline(race_forecasts)
+        top = self._topline(race_forecasts, control_forecasts)
         css = self._css()
         metric_cards = "\n".join(
             [
@@ -71,6 +71,14 @@ class DiagnosticsReport:
     {insight_strip}
   </section>
 
+  <section class="panel topline-plots">
+    <div class="section-head">
+      <p class="eyebrow">Top-line forecast</p>
+      <h2>Distribution And Probability View</h2>
+    </div>
+    {self._plot_sections(plot_manifest or {}, categories=["projection"])}
+  </section>
+
   <section class="panel">
     <div class="section-head">
       <p class="eyebrow">Current forecast</p>
@@ -116,9 +124,9 @@ class DiagnosticsReport:
   <section class="panel">
     <div class="section-head">
       <p class="eyebrow">Visual diagnostics</p>
-      <h2>Charts</h2>
+      <h2>Calibration, Stability, And Model Checks</h2>
     </div>
-    {self._plot_sections(plot_manifest or {})}
+    {self._plot_sections(plot_manifest or {}, exclude_categories=["projection"])}
   </section>
 
   <section class="panel compact">
@@ -134,7 +142,30 @@ class DiagnosticsReport:
 """
 
     @staticmethod
-    def _topline(race_forecasts: pl.DataFrame) -> dict[str, Any]:
+    def _topline(
+        race_forecasts: pl.DataFrame, control_forecasts: pl.DataFrame | None = None
+    ) -> dict[str, Any]:
+        if control_forecasts is not None and not control_forecasts.is_empty():
+            president = control_forecasts.filter(pl.col("control_body") == "president")
+            if not president.is_empty():
+                top_control = president.sort("control_probability", descending=True).row(
+                    0, named=True
+                )
+                party = str(top_control["party"])
+                probability = float(top_control["control_probability"])
+                mean_ev = float(top_control["seat_count_mean"])
+                threshold = int(top_control.get("control_threshold") or 270)
+                return {
+                    "headline": f"{party} leads Electoral College forecast",
+                    "lede": (
+                        f"Mean simulated Electoral College count is {mean_ev:.1f}; "
+                        f"control threshold is {threshold}. Distribution plots below show "
+                        "the simulated paths and uncertainty."
+                    ),
+                    "winner_name": f"{party} EC win",
+                    "probability": probability,
+                    "margin": f"{mean_ev - threshold:+.1f} EV vs threshold",
+                }
         frame = race_forecasts.filter(pl.col("winner_probability").is_not_null())
         if frame.is_empty():
             return {
@@ -386,9 +417,19 @@ class DiagnosticsReport:
         )
 
     @staticmethod
-    def _plot_sections(plot_manifest: dict[str, list[dict[str, str]]]) -> str:
+    def _plot_sections(
+        plot_manifest: dict[str, list[dict[str, str]]],
+        categories: list[str] | None = None,
+        exclude_categories: list[str] | None = None,
+    ) -> str:
         sections = []
+        category_filter = set(categories or [])
+        excluded = set(exclude_categories or [])
         for category, entries in plot_manifest.items():
+            if category_filter and category not in category_filter:
+                continue
+            if category in excluded:
+                continue
             figures = []
             for entry in entries:
                 title = html.escape(entry["title"])
