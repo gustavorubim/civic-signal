@@ -72,8 +72,11 @@ class ForecastPipeline:
         residual_covariance = self._load_residual_covariance(scenario_obj)
         source_manifest = pl.read_parquet(self.context.curated_dir / "source_manifest.parquet")
         fundamentals_model = FundamentalsModel(model_config).fit(training_bundle)
+        polling_model = PollingModel(model_config, as_of=as_of)
+        polling_estimates = polling_model.run(bundle)
+        poll_trajectory = polling_model.trajectory(bundle)
         component_estimates = [
-            PollingModel(model_config, as_of=as_of).run(bundle),
+            polling_estimates,
             fundamentals_model.run(bundle),
             MarketModel(model_config).run(bundle),
             PublicSignalModel(
@@ -97,6 +100,7 @@ class ForecastPipeline:
         write_parquet(outputs.draws, out_dir / "forecast_draws.parquet")
         write_parquet(outputs.control_forecasts, out_dir / "control_forecasts.parquet")
         write_parquet(outputs.ecosystem_forecasts, out_dir / "ecosystem_forecasts.parquet")
+        write_parquet(poll_trajectory, out_dir / "poll_trajectory.parquet")
         write_json(outputs.performance, out_dir / "performance.json")
         write_parquet(
             source_manifest.with_columns(pl.lit("forecast_artifacts").alias("downstream_usage")),
@@ -118,6 +122,7 @@ class ForecastPipeline:
             backtest_payload=backtest_payload,
             residual_covariance=benchmark_covariance,
             source_manifest=source_manifest,
+            poll_trajectory=poll_trajectory,
         )
         plot_generator = PlotGenerator()
         plot_manifest = plot_generator.render_all(
@@ -132,8 +137,14 @@ class ForecastPipeline:
             else full_bundle.backtest_predictions,
             backtest_payload,
             silver_benchmark,
+            poll_trajectory=poll_trajectory,
         )
         plot_generator.write_manifest(plot_manifest, out_dir)
+        stability_metrics = self._stability_metrics(
+            backtest_artifacts.rolling_predictions,
+            scenario_obj.family if scenario_obj else None,
+        )
+        write_json(stability_metrics, out_dir / "stability_metrics.json")
         methodology = MethodologySnapshot().render(
             run_id, as_of, model_config, source_manifest.height
         )
@@ -149,6 +160,7 @@ class ForecastPipeline:
             residual_covariance=residual_covariance,
             source_manifest=source_manifest,
             runtime_metadata={"fundamentals": fundamentals_model.fit_summary()},
+            pollster_house_effects=polling_model.cached_house_effects,
         )
         write_text(model_card, out_dir / "model_card.md")
         self._write_reproducibility_fingerprint(out_dir, previous_fingerprint)
@@ -246,6 +258,11 @@ class ForecastPipeline:
         forecast_draws = pl.read_parquet(out_dir / "forecast_draws.parquet")
         control_forecasts = pl.read_parquet(out_dir / "control_forecasts.parquet")
         ecosystem_forecasts = pl.read_parquet(out_dir / "ecosystem_forecasts.parquet")
+        poll_trajectory = (
+            pl.read_parquet(out_dir / "poll_trajectory.parquet")
+            if (out_dir / "poll_trajectory.parquet").exists()
+            else pl.DataFrame()
+        )
         backtest_artifacts = BacktestRunner(self.context)._evaluate()
         backtest_payload = backtest_artifacts.payload
         latest_covariance = self._read_latest_covariance(None)
@@ -261,6 +278,7 @@ class ForecastPipeline:
             backtest_payload=backtest_payload,
             residual_covariance=benchmark_covariance,
             source_manifest=source_manifest,
+            poll_trajectory=poll_trajectory,
         )
         backtest_predictions = (
             backtest_artifacts.rolling_predictions
@@ -278,6 +296,7 @@ class ForecastPipeline:
             backtest_predictions,
             backtest_payload,
             silver_benchmark,
+            poll_trajectory=poll_trajectory,
         )
         plot_generator.write_manifest(plot_manifest, out_dir)
         reward_card_path = out_dir / "reward_card.json"
@@ -438,12 +457,14 @@ class ForecastPipeline:
                 "forecast_draws.parquet",
                 "control_forecasts.parquet",
                 "ecosystem_forecasts.parquet",
+                "poll_trajectory.parquet",
                 "source_manifest.parquet",
                 "methodology_snapshot.md",
                 "model_card.md",
                 "silver_benchmark.html",
                 "silver_benchmark.json",
                 "plot_manifest.json",
+                "stability_metrics.json",
                 "performance.json",
             ]
         }
@@ -485,3 +506,56 @@ class ForecastPipeline:
         else:
             payload = path.read_text(encoding="utf-8")
         return hashlib.sha256(payload.encode()).hexdigest()
+
+    @staticmethod
+    def _stability_metrics(
+        rolling_predictions: pl.DataFrame, scenario_family: str | None
+    ) -> dict[str, Any]:
+        if (
+            rolling_predictions.is_empty()
+            or "ensemble_probability" not in rolling_predictions.columns
+        ):
+            return {
+                "scenario_family": scenario_family,
+                "available": False,
+                "reason": "no rolling-origin probabilities available",
+                "mean_absolute_probability_change": None,
+                "max_probability_change": None,
+                "row_count": rolling_predictions.height,
+            }
+        ordered = rolling_predictions.sort(["cycle", "race_id", "option_id", "as_of_offset_days"])
+        changes = ordered.with_columns(
+            pl.col("ensemble_probability")
+            .diff()
+            .over(["cycle", "race_id", "option_id"])
+            .abs()
+            .alias("absolute_probability_change")
+        ).filter(pl.col("absolute_probability_change").is_not_null())
+        if changes.is_empty():
+            return {
+                "scenario_family": scenario_family,
+                "available": False,
+                "reason": "only one as-of point per race/option",
+                "mean_absolute_probability_change": None,
+                "max_probability_change": None,
+                "row_count": rolling_predictions.height,
+            }
+        by_offset = (
+            changes.group_by("as_of_offset_days")
+            .agg(
+                pl.col("absolute_probability_change").mean().alias("mean_absolute_change"),
+                pl.col("absolute_probability_change").max().alias("max_absolute_change"),
+            )
+            .sort("as_of_offset_days", descending=True)
+            .to_dicts()
+        )
+        return {
+            "scenario_family": scenario_family,
+            "available": True,
+            "row_count": rolling_predictions.height,
+            "mean_absolute_probability_change": float(
+                changes["absolute_probability_change"].mean()
+            ),
+            "max_probability_change": float(changes["absolute_probability_change"].max()),
+            "by_as_of_offset_days": by_offset,
+        }

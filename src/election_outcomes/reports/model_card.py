@@ -19,6 +19,7 @@ class ModelCard:
         residual_covariance: pl.DataFrame | None,
         source_manifest: pl.DataFrame,
         runtime_metadata: dict[str, Any] | None = None,
+        pollster_house_effects: dict[tuple[str, str | None], Any] | None = None,
     ) -> str:
         covariance_rows = 0 if residual_covariance is None else residual_covariance.height
         runtime_metadata = runtime_metadata or {}
@@ -45,8 +46,12 @@ class ModelCard:
             )
             method = str(method_values[0]) if method_values else "learned from rolling residuals"
             covariance_status = f"{method}; sample_size={sample_size}; matrix_rank={matrix_rank}"
+        house_effect_rows = self._house_effect_rows(pollster_house_effects or {})
         fit_status = {
-            "polling": "deterministic aggregator; NumPyro hierarchical model planned",
+            "polling": (
+                "deterministic Gaussian state-space Kalman filter with empirical-Bayes "
+                f"pollster house-effect shrinkage; learned_effects={len(house_effect_rows)}"
+            ),
             "fundamentals": fundamentals_status,
             "markets": "configured public-market inversion; calibration artifact planned",
             "public_signals": "experimental unless admission artifact proves value",
@@ -88,6 +93,12 @@ class ModelCard:
 {json.dumps(fit_status, indent=2, sort_keys=True)}
 ```
 
+## Pollster House Effects
+
+```json
+{json.dumps(house_effect_rows[:50], indent=2, sort_keys=True)}
+```
+
 ## Backtest Summary
 
 ```json
@@ -122,3 +133,24 @@ class ModelCard:
         }
 ```
 """
+
+    @staticmethod
+    def _house_effect_rows(
+        house_effects: dict[tuple[str, str | None], Any],
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for (_pollster, _option_id), estimate in house_effects.items():
+            if hasattr(estimate, "__dict__"):
+                payload = dict(estimate.__dict__)
+            else:
+                payload = {
+                    "pollster": getattr(estimate, "pollster", None),
+                    "option_id": getattr(estimate, "option_id", None),
+                    "effect": getattr(estimate, "effect", None),
+                    "raw_effect": getattr(estimate, "raw_effect", None),
+                    "prior_effect": getattr(estimate, "prior_effect", None),
+                    "shrinkage": getattr(estimate, "shrinkage", None),
+                    "poll_count": getattr(estimate, "poll_count", None),
+                }
+            rows.append(payload)
+        return sorted(rows, key=lambda row: (str(row.get("pollster")), str(row.get("option_id"))))

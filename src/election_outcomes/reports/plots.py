@@ -44,12 +44,15 @@ class PlotGenerator:
         backtest_predictions: pl.DataFrame,
         backtest_payload: dict[str, Any],
         methodology_benchmark: dict[str, Any] | None = None,
+        poll_trajectory: pl.DataFrame | None = None,
     ) -> dict[str, list[dict[str, str]]]:
         plot_dir = artifact_dir / "plots"
         plot_dir.mkdir(parents=True, exist_ok=True)
         manifest: dict[str, list[dict[str, str]]] = {
             "calibration": [],
             "projection": [],
+            "trajectory": [],
+            "stability": [],
             "benchmark": [],
         }
         self._add(
@@ -111,6 +114,26 @@ class PlotGenerator:
             "projection",
             self._electoral_college_swarm(plot_dir, race_catalog, forecast_draws),
             "Top-line Electoral College simulation swarm",
+        )
+        self._add(
+            manifest,
+            "trajectory",
+            self._polling_state_trajectory(
+                plot_dir, poll_trajectory if poll_trajectory is not None else pl.DataFrame()
+            ),
+            "Kalman polling trajectories with uncertainty",
+        )
+        self._add(
+            manifest,
+            "trajectory",
+            self._polling_trajectory(plot_dir, backtest_predictions),
+            "Polling trajectory from rolling-origin cuts",
+        )
+        self._add(
+            manifest,
+            "stability",
+            self._simulation_probability_convergence(plot_dir, forecast_draws),
+            "Simulation probability convergence",
         )
         self._add(
             manifest,
@@ -504,6 +527,169 @@ class PlotGenerator:
         )
         self._style_axis(ax)
         return self._save(fig, plot_dir / "silver_methodology_benchmark.png")
+
+    def _polling_trajectory(self, plot_dir: Path, frame: pl.DataFrame) -> Path | None:
+        required = {"race_id", "option_id", "polls_probability"}
+        if frame.is_empty() or not required.issubset(set(frame.columns)):
+            return None
+        time_column = (
+            "as_of_offset_days"
+            if "as_of_offset_days" in frame.columns
+            else "as_of"
+            if "as_of" in frame.columns
+            else None
+        )
+        if time_column is None:
+            return None
+        plot_frame = frame.filter(pl.col("polls_probability").is_not_null())
+        if "actual_winner" in plot_frame.columns:
+            plot_frame = plot_frame.filter(pl.col("actual_winner"))
+        if plot_frame.is_empty():
+            return None
+        sort_columns = ["race_id", time_column]
+        plot_frame = plot_frame.sort(sort_columns)
+        series_keys = (
+            plot_frame.select(["race_id", "option_id"])
+            .unique(maintain_order=True)
+            .head(8)
+            .to_dicts()
+        )
+        fig, ax = plt.subplots(figsize=(8.8, 5.2), dpi=150)
+        for index, key in enumerate(series_keys):
+            series = plot_frame.filter(
+                (pl.col("race_id") == key["race_id"]) & (pl.col("option_id") == key["option_id"])
+            ).sort(time_column)
+            if series.height < 1:
+                continue
+            x_values = series[time_column].to_list()
+            y_values = series["polls_probability"].to_list()
+            label = f"{key['race_id']} / {str(key['option_id']).split('-')[-1]}"
+            color = list(PARTY_COLORS.values())[index % len(PARTY_COLORS)]
+            ax.plot(x_values, y_values, marker="o", linewidth=2.0, color=color, label=label)
+        ax.axhline(0.5, color=MUTED_COLOR, linestyle="--", linewidth=1)
+        ax.set_ylim(0, 1)
+        ax.set_ylabel("Polling component win probability")
+        if time_column == "as_of_offset_days":
+            ax.set_xlabel("Days before election")
+            ax.invert_xaxis()
+        else:
+            ax.set_xlabel("As-of date")
+        ax.set_title("Polling Probability Trajectory", loc="left", fontweight="bold")
+        ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+        ax.legend(loc="best", frameon=False, fontsize=8)
+        self._style_axis(ax)
+        return self._save(fig, plot_dir / "polling_probability_trajectory.png")
+
+    def _polling_state_trajectory(self, plot_dir: Path, frame: pl.DataFrame) -> Path | None:
+        required = {
+            "race_id",
+            "option_id",
+            "trajectory_date",
+            "latent_vote_share",
+            "latent_sigma",
+        }
+        if frame.is_empty() or not required.issubset(set(frame.columns)):
+            return None
+        final_rows = (
+            frame.sort("trajectory_date")
+            .group_by(["race_id", "option_id"], maintain_order=True)
+            .tail(1)
+            .with_columns((pl.col("latent_vote_share") - 0.5).abs().alias("_distance"))
+            .sort("_distance")
+            .head(8)
+        )
+        if final_rows.is_empty():
+            return None
+        selected = frame.join(
+            final_rows.select(["race_id", "option_id"]),
+            on=["race_id", "option_id"],
+            how="inner",
+        ).sort(["race_id", "option_id", "trajectory_date"])
+        fig, ax = plt.subplots(figsize=(9.2, 5.4), dpi=150)
+        colors = list(PARTY_COLORS.values())
+        for index, key in enumerate(
+            final_rows.select(["race_id", "option_id"]).iter_rows(named=True)
+        ):
+            series = selected.filter(
+                (pl.col("race_id") == key["race_id"]) & (pl.col("option_id") == key["option_id"])
+            )
+            if series.is_empty():
+                continue
+            x_values = series["trajectory_date"].to_list()
+            mean = np.array(series["latent_vote_share"].to_list(), dtype=float)
+            sigma = np.array(series["latent_sigma"].to_list(), dtype=float)
+            lower = np.clip(mean - 1.645 * sigma, 0.0, 1.0)
+            upper = np.clip(mean + 1.645 * sigma, 0.0, 1.0)
+            color = colors[index % len(colors)]
+            label = f"{key['race_id']} / {str(key['option_id']).split('-')[-1]}"
+            ax.plot(x_values, mean, linewidth=2.0, color=color, label=label)
+            ax.fill_between(x_values, lower, upper, color=color, alpha=0.12, linewidth=0)
+            if {"poll_count", "mean_observed_share"}.issubset(set(series.columns)):
+                poll_rows = series.filter(
+                    (pl.col("poll_count") > 0) & pl.col("mean_observed_share").is_not_null()
+                )
+                if not poll_rows.is_empty():
+                    ax.scatter(
+                        poll_rows["trajectory_date"].to_list(),
+                        poll_rows["mean_observed_share"].to_list(),
+                        color=color,
+                        edgecolors=AXIS_COLOR,
+                        linewidths=0.7,
+                        s=32,
+                        zorder=4,
+                    )
+        ax.axhline(0.5, color=MUTED_COLOR, linestyle="--", linewidth=1)
+        ax.set_ylim(0.35, 0.65)
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Latent vote share")
+        ax.set_title("Kalman Polling Trajectories", loc="left", fontweight="bold")
+        ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+        ax.legend(loc="best", frameon=False, fontsize=7)
+        self._style_axis(ax)
+        return self._save(fig, plot_dir / "polling_kalman_trajectories.png")
+
+    def _simulation_probability_convergence(
+        self, plot_dir: Path, forecast_draws: pl.DataFrame
+    ) -> Path | None:
+        required = {"draw_id", "race_id", "option_id", "winner"}
+        if forecast_draws.is_empty() or not required.issubset(set(forecast_draws.columns)):
+            return None
+        probabilities = (
+            forecast_draws.group_by(["race_id", "option_id"])
+            .agg(pl.col("winner").mean().alias("final_probability"))
+            .filter(pl.col("final_probability").is_not_null())
+            .sort("final_probability", descending=True)
+            .head(8)
+        )
+        if probabilities.is_empty():
+            return None
+        selected = forecast_draws.join(
+            probabilities.select(["race_id", "option_id"]),
+            on=["race_id", "option_id"],
+            how="inner",
+        )
+        fig, ax = plt.subplots(figsize=(8.8, 5.2), dpi=150)
+        for index, row in enumerate(probabilities.iter_rows(named=True)):
+            series = selected.filter(
+                (pl.col("race_id") == row["race_id"]) & (pl.col("option_id") == row["option_id"])
+            ).sort("draw_id")
+            wins = series["winner"].cast(pl.Int8).to_numpy()
+            if wins.size == 0:
+                continue
+            cumulative = np.cumsum(wins) / np.arange(1, wins.size + 1)
+            draw_ids = np.arange(1, wins.size + 1)
+            label = f"{row['race_id']} / {str(row['option_id']).split('-')[-1]}"
+            color = list(PARTY_COLORS.values())[index % len(PARTY_COLORS)]
+            ax.plot(draw_ids, cumulative, linewidth=1.8, color=color, label=label)
+            ax.axhline(float(row["final_probability"]), color=color, alpha=0.22, linewidth=1)
+        ax.set_ylim(0, 1)
+        ax.set_xlabel("Simulation draws consumed")
+        ax.set_ylabel("Cumulative winner probability")
+        ax.set_title("Simulation Probability Convergence", loc="left", fontweight="bold")
+        ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+        ax.legend(loc="best", frameon=False, fontsize=8)
+        self._style_axis(ax)
+        return self._save(fig, plot_dir / "simulation_probability_convergence.png")
 
     @staticmethod
     def _option_label(row: dict[str, Any]) -> str:
