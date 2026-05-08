@@ -376,8 +376,8 @@ Projection plots:
   modeled-scope labeling.
 
 `diagnostics.html` now puts these projection/distribution charts at the top of the
-report and uses the modeled Electoral College/control winner in the hero rather than the
-highest-probability candidate from one safe state.
+report beside the summary boxes and uses the modeled Electoral College/control winner
+in the hero rather than the highest-probability candidate from one safe state.
 
 Trajectory and stability plots:
 
@@ -387,6 +387,14 @@ Trajectory and stability plots:
   by as-of cut when `polls_probability` and time-cut columns are available.
 - `simulation_probability_convergence.png`: cumulative winner probability as simulation
   draws accumulate, generated when forecast draw rows are available.
+
+Model quality plots:
+
+- `electoral_college_chain_traces.png`: MCMC-style split-chain traces over posterior
+  simulation draws for each party's Electoral College total. These are simulation
+  chains, not a separate MCMC sampler.
+- `kalman_posterior_uncertainty.png`: Kalman posterior standard deviation over time for
+  the most uncertain selected race/options.
 
 Benchmark plots:
 

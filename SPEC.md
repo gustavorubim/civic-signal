@@ -27,7 +27,8 @@ Every `forecast run` must create `artifacts/runs/<run_id>/` with:
   support, recount risk, and certification-risk probabilities.
 - `source_manifest.parquet`: source ids, URLs/paths, retrieval timestamps, content hashes,
   parser versions, license/terms notes, status, and downstream usage.
-- `diagnostics.html`: scorecards, reward status, source coverage, and embedded plots.
+- `diagnostics.html`: top-line summary, Electoral College distribution, scorecards,
+  reward status, source coverage, model-quality section, and embedded plots.
 - `reward_card.json`: machine-readable reward checks.
 - `methodology_snapshot.md`: model version, config, source coverage, and limitations.
 - `model_card.md`: learned/configured/placeholder parameter status, component admission,
@@ -37,7 +38,8 @@ Every `forecast run` must create `artifacts/runs/<run_id>/` with:
   the explicit four-tier `absent`/`scaffold`/`functional`/`production` scale.
 - `reproducibility_fingerprint.json`: stable artifact hashes excluding volatile
   retrieval/status fields, with same-run-id comparison status when available.
-- `plot_manifest.json`: calibration, projection, and benchmark plot index.
+- `plot_manifest.json`: projection, calibration, trajectory, stability, model-quality,
+  and benchmark plot index.
 - `plots/`: static PNG diagnostics.
 - `performance.json`: requested acceleration engine, actual engine, parallel mode,
   Numba availability, thread count, and simulation count.
@@ -206,9 +208,13 @@ Every forecast run must emit calibration and projection visuals:
 - Seat/control projections.
 - Turnout/recount-risk projections.
 - Forecast coverage by tier.
+- Electoral College distribution and representative simulation swarm for presidential
+  scenarios.
 - Polling probability trajectories when rolling-origin polling probability and as-of
   cut columns are available.
 - Simulation probability convergence when draw-level winner rows are available.
+- MCMC-style posterior simulation chain traces for Electoral College totals.
+- Kalman posterior uncertainty traces for state-space polling fits.
 
 Plots are generated from local artifacts and do not require API credentials.
 

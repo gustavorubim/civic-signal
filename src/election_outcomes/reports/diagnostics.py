@@ -40,6 +40,18 @@ class DiagnosticsReport:
         insight_strip = self._insight_strip(
             race_catalog, control_forecasts, ecosystem_forecasts, backtest_payload
         )
+        ec_distribution = self._single_plot_card(
+            plot_manifest or {}, "electoral_college_distribution.png"
+        )
+        projection_plots = self._plot_sections(
+            plot_manifest or {},
+            categories=["projection"],
+            exclude_paths=["plots/electoral_college_distribution.png"],
+        )
+        model_quality_plots = self._plot_sections(
+            plot_manifest or {},
+            categories=["model_quality", "calibration", "trajectory", "stability", "benchmark"],
+        )
         return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -63,12 +75,18 @@ class DiagnosticsReport:
     </div>
   </header>
 
-  <section class="card-grid">
-    {metric_cards}
-  </section>
-
-  <section class="insight-strip">
-    {insight_strip}
+  <section class="summary-layout">
+    <div class="summary-cards">
+      <div class="card-grid">
+        {metric_cards}
+      </div>
+      <div class="insight-strip">
+        {insight_strip}
+      </div>
+    </div>
+    <div class="summary-plot">
+      {ec_distribution}
+    </div>
   </section>
 
   <section class="panel topline-plots">
@@ -76,7 +94,7 @@ class DiagnosticsReport:
       <p class="eyebrow">Top-line forecast</p>
       <h2>Distribution And Probability View</h2>
     </div>
-    {self._plot_sections(plot_manifest or {}, categories=["projection"])}
+    {projection_plots}
   </section>
 
   <section class="panel">
@@ -123,10 +141,14 @@ class DiagnosticsReport:
 
   <section class="panel">
     <div class="section-head">
-      <p class="eyebrow">Visual diagnostics</p>
-      <h2>Calibration, Stability, And Model Checks</h2>
+      <p class="eyebrow">Model quality</p>
+      <h2>Model Quality</h2>
     </div>
-    {self._plot_sections(plot_manifest or {}, exclude_categories=["projection"])}
+    <p class="muted model-quality-note">
+      Chain traces are MCMC-style split posterior simulation draws. The polling fit is a
+      deterministic Kalman/state-space posterior, not a full MCMC sampler.
+    </p>
+    {model_quality_plots}
   </section>
 
   <section class="panel compact">
@@ -421,10 +443,12 @@ class DiagnosticsReport:
         plot_manifest: dict[str, list[dict[str, str]]],
         categories: list[str] | None = None,
         exclude_categories: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
     ) -> str:
         sections = []
         category_filter = set(categories or [])
         excluded = set(exclude_categories or [])
+        excluded_paths = set(exclude_paths or [])
         for category, entries in plot_manifest.items():
             if category_filter and category not in category_filter:
                 continue
@@ -434,17 +458,34 @@ class DiagnosticsReport:
             for entry in entries:
                 title = html.escape(entry["title"])
                 path = html.escape(entry["path"])
+                if entry["path"] in excluded_paths:
+                    continue
                 figures.append(
                     '<figure class="plot-card">'
                     f'<img src="{path}" alt="{title}">'
                     f"<figcaption>{title}</figcaption></figure>"
                 )
             if figures:
+                category_label = category.replace("_", " ").title()
                 sections.append(
-                    f'<div class="plot-section"><h3>{html.escape(category.title())}</h3>'
+                    f'<div class="plot-section"><h3>{html.escape(category_label)}</h3>'
                     f'<div class="plot-grid">{"".join(figures)}</div></div>'
                 )
         return "\n".join(sections) if sections else '<p class="muted">No plots generated.</p>'
+
+    @staticmethod
+    def _single_plot_card(plot_manifest: dict[str, list[dict[str, str]]], filename: str) -> str:
+        for entries in plot_manifest.values():
+            for entry in entries:
+                if str(entry.get("path", "")).endswith(filename):
+                    title = html.escape(str(entry.get("title") or filename))
+                    path = html.escape(str(entry["path"]))
+                    return (
+                        '<figure class="plot-card summary-plot-card">'
+                        f'<img src="{path}" alt="{title}">'
+                        f"<figcaption>{title}</figcaption></figure>"
+                    )
+        return '<p class="muted">Electoral College distribution plot was not generated.</p>'
 
     @staticmethod
     def _audit_summary(
@@ -541,6 +582,21 @@ h3 { margin: 0 0 8px; }
 .metric-card { padding: 16px; }
 .metric-card strong { display: block; font-size: 28px; margin: 6px 0; }
 .metric-card span:last-child { color: var(--muted); font-size: 13px; }
+.summary-layout {
+  display: grid;
+  grid-template-columns: minmax(0, .95fr) minmax(420px, 1.05fr);
+  gap: 18px;
+  align-items: stretch;
+  margin-bottom: 18px;
+}
+.summary-cards .card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.summary-cards .insight-strip {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 0;
+}
+.summary-plot { min-width: 0; }
+.summary-plot-card { height: 100%; }
+.summary-plot-card img { max-height: 470px; object-fit: contain; }
 .insight-strip {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -604,6 +660,7 @@ td span { display: block; color: var(--muted); font-size: 12px; }
 .reward.fail { border-left: 4px solid var(--gold); }
 .reward.neutral { border-left: 4px solid #8d8d8d; }
 .callout { background: #fff4dd; border-left: 4px solid var(--gold); padding: 10px 12px; }
+.model-quality-note { margin-top: -6px; margin-bottom: 18px; }
 .benchmark-score { font-size: 42px; font-weight: 800; margin: 0; }
 .plot-section h3 { border-top: 1px solid var(--rule); padding-top: 16px; color: var(--muted); }
 .plot-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
@@ -615,7 +672,8 @@ a { color: var(--blue); }
 .muted { color: var(--muted); }
 @media (max-width: 860px) {
   h1 { font-size: 38px; }
-  .hero, .two-col, .card-grid, .insight-strip, .plot-grid { grid-template-columns: 1fr; }
+  .hero, .two-col, .card-grid, .insight-strip, .plot-grid, .summary-layout,
+  .summary-cards .card-grid, .summary-cards .insight-strip { grid-template-columns: 1fr; }
   .hero-score { max-width: none; }
 }
 """

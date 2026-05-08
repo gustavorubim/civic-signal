@@ -53,6 +53,7 @@ class PlotGenerator:
             "projection": [],
             "trajectory": [],
             "stability": [],
+            "model_quality": [],
             "benchmark": [],
         }
         self._add(
@@ -134,6 +135,20 @@ class PlotGenerator:
             "stability",
             self._simulation_probability_convergence(plot_dir, forecast_draws),
             "Simulation probability convergence",
+        )
+        self._add(
+            manifest,
+            "model_quality",
+            self._electoral_college_chain_trace(plot_dir, race_catalog, forecast_draws),
+            "Posterior simulation chain traces",
+        )
+        self._add(
+            manifest,
+            "model_quality",
+            self._kalman_posterior_uncertainty(
+                plot_dir, poll_trajectory if poll_trajectory is not None else pl.DataFrame()
+            ),
+            "Kalman posterior uncertainty",
         )
         self._add(
             manifest,
@@ -505,6 +520,74 @@ class PlotGenerator:
         self._style_axis(ax)
         return self._save(fig, plot_dir / "topline_electoral_swarm.png")
 
+    def _electoral_college_chain_trace(
+        self, plot_dir: Path, race_catalog: pl.DataFrame, forecast_draws: pl.DataFrame
+    ) -> Path | None:
+        seat_counts = self._presidential_seat_counts(race_catalog, forecast_draws)
+        if seat_counts.is_empty():
+            return None
+        parties = seat_counts["party"].unique().sort().to_list()
+        if not parties:
+            return None
+        chain_count = 4
+        fig, axes = plt.subplots(
+            len(parties),
+            1,
+            figsize=(9.2, max(3.6, 2.6 * len(parties))),
+            dpi=150,
+            sharex=True,
+        )
+        axes_array = np.atleast_1d(axes)
+        for axis, party in zip(axes_array, parties, strict=False):
+            party_frame = (
+                seat_counts.filter(pl.col("party") == party)
+                .with_columns((pl.col("draw_id") % chain_count).alias("chain"))
+                .sort("draw_id")
+            )
+            color = PARTY_COLORS.get(str(party), "#999999")
+            for chain in range(chain_count):
+                values = party_frame.filter(pl.col("chain") == chain)["electoral_votes"].to_numpy()
+                if values.size == 0:
+                    continue
+                axis.plot(
+                    np.arange(values.size),
+                    values,
+                    linewidth=1.1,
+                    alpha=0.78,
+                    color=color,
+                    label=f"chain {chain + 1}",
+                )
+            mean_value = float(party_frame["electoral_votes"].mean())
+            axis.axhline(mean_value, color=TEXT_COLOR, linewidth=1.0, linestyle="--")
+            axis.text(
+                0.01,
+                0.88,
+                f"{party} mean={mean_value:.1f} EV",
+                transform=axis.transAxes,
+                color=TEXT_COLOR,
+                fontsize=9,
+                va="top",
+            )
+            axis.set_ylabel("EV")
+            self._style_axis(axis)
+        axes_array[0].set_title(
+            "Posterior Simulation Chain Traces",
+            loc="left",
+            fontweight="bold",
+        )
+        axes_array[-1].set_xlabel("Draw index within split chain")
+        axes_array[0].text(
+            0.01,
+            1.04,
+            "MCMC-style split chains from posterior simulations, not a separate MCMC sampler.",
+            transform=axes_array[0].transAxes,
+            color=MUTED_COLOR,
+            fontsize=9,
+            va="bottom",
+        )
+        axes_array[0].legend(loc="upper right", frameon=False, ncol=2, fontsize=8)
+        return self._save(fig, plot_dir / "electoral_college_chain_traces.png")
+
     def _methodology_benchmark(
         self, plot_dir: Path, methodology_benchmark: dict[str, Any]
     ) -> Path | None:
@@ -647,6 +730,51 @@ class PlotGenerator:
         ax.legend(loc="best", frameon=False, fontsize=7)
         self._style_axis(ax)
         return self._save(fig, plot_dir / "polling_kalman_trajectories.png")
+
+    def _kalman_posterior_uncertainty(self, plot_dir: Path, frame: pl.DataFrame) -> Path | None:
+        required = {"race_id", "option_id", "trajectory_date", "latent_sigma"}
+        if frame.is_empty() or not required.issubset(set(frame.columns)):
+            return None
+        final_rows = (
+            frame.sort("trajectory_date")
+            .group_by(["race_id", "option_id"], maintain_order=True)
+            .tail(1)
+            .sort("latent_sigma", descending=True)
+            .head(8)
+        )
+        if final_rows.is_empty():
+            return None
+        selected = frame.join(
+            final_rows.select(["race_id", "option_id"]),
+            on=["race_id", "option_id"],
+            how="inner",
+        ).sort(["race_id", "option_id", "trajectory_date"])
+        fig, ax = plt.subplots(figsize=(9.2, 5.2), dpi=150)
+        colors = list(PARTY_COLORS.values())
+        for index, key in enumerate(
+            final_rows.select(["race_id", "option_id"]).iter_rows(named=True)
+        ):
+            series = selected.filter(
+                (pl.col("race_id") == key["race_id"]) & (pl.col("option_id") == key["option_id"])
+            )
+            if series.is_empty():
+                continue
+            color = colors[index % len(colors)]
+            label = f"{key['race_id']} / {str(key['option_id']).split('-')[-1]}"
+            ax.plot(
+                series["trajectory_date"].to_list(),
+                series["latent_sigma"].to_list(),
+                linewidth=1.9,
+                color=color,
+                label=label,
+            )
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Posterior SD")
+        ax.set_title("Kalman Posterior Uncertainty", loc="left", fontweight="bold")
+        ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+        ax.legend(loc="best", frameon=False, fontsize=7)
+        self._style_axis(ax)
+        return self._save(fig, plot_dir / "kalman_posterior_uncertainty.png")
 
     def _simulation_probability_convergence(
         self, plot_dir: Path, forecast_draws: pl.DataFrame

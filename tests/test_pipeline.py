@@ -191,8 +191,10 @@ def test_forecast_run_writes_required_artifacts_and_rewards(tmp_path: Path) -> N
     assert len(plot_manifest["projection"]) >= 4
     assert len(plot_manifest["trajectory"]) >= 1
     assert len(plot_manifest["stability"]) >= 1
+    assert len(plot_manifest["model_quality"]) >= 1
     assert len(plot_manifest["benchmark"]) >= 1
     assert all(path.exists() and path.stat().st_size > 0 for path in plot_paths)
+    assert (out_dir / "plots" / "kalman_posterior_uncertainty.png").stat().st_size > 0
     benchmark = json.loads((out_dir / "silver_benchmark.json").read_text(encoding="utf-8"))
     assert "Silver/FiveThirtyEight" in benchmark["benchmark_name"]
     assert benchmark["tier_scale"] == {
@@ -211,6 +213,9 @@ def test_forecast_run_writes_required_artifacts_and_rewards(tmp_path: Path) -> N
     assert trajectory_row["tier"] == "functional"
     diagnostics = (out_dir / "diagnostics.html").read_text(encoding="utf-8")
     assert "Scenario Scope" in diagnostics
+    assert "Distribution And Probability View" in diagnostics
+    assert "Model Quality" in diagnostics
+    assert "MCMC-style split posterior simulation draws" in diagnostics
     assert "Model Drivers" in diagnostics
     assert "Silver/FiveThirtyEight Benchmark" in diagnostics
     forecasts = pl.read_parquet(out_dir / "race_forecasts.parquet")
@@ -329,6 +334,7 @@ def test_presidential_scenario_writes_ec_plot_and_latest_backtest_artifacts(
     assert race_catalog.height == 51
     assert race_catalog["seats"].sum() == 538
     assert (out_dir / "plots" / "electoral_college_distribution.png").stat().st_size > 0
+    assert (out_dir / "plots" / "electoral_college_chain_traces.png").stat().st_size > 0
     assert (out_dir / "plots" / "topline_electoral_swarm.png").stat().st_size > 0
     assert payload["row_count"] >= 30
     assert payload["sample_size_too_small"] is False
