@@ -30,9 +30,13 @@ Every `forecast run` must create `artifacts/runs/<run_id>/` with:
 - `diagnostics.html`: scorecards, reward status, source coverage, and embedded plots.
 - `reward_card.json`: machine-readable reward checks.
 - `methodology_snapshot.md`: model version, config, source coverage, and limitations.
+- `model_card.md`: learned/configured/placeholder parameter status, component admission,
+  backtest sample status, covariance status, and source coverage for the run.
+- `silver_benchmark.json` and `silver_benchmark.html`: methodology-readiness comparison
+  against public Silver/FiveThirtyEight forecast traits and source anchors.
 - `reproducibility_fingerprint.json`: stable artifact hashes excluding volatile
   retrieval/status fields, with same-run-id comparison status when available.
-- `plot_manifest.json`: calibration and projection plot index.
+- `plot_manifest.json`: calibration, projection, and benchmark plot index.
 - `plots/`: static PNG diagnostics.
 - `performance.json`: requested acceleration engine, actual engine, parallel mode,
   Numba availability, thread count, and simulation count.
@@ -128,16 +132,19 @@ election-outomes/
 Important config contracts:
 
 - `configs/sources.yaml`: default fixture source registry and parser metadata.
-- `configs/sources_live.yaml`: opt-in live source registry for HTTP CSV/API adapters.
+- `configs/sources_live.yaml`: opt-in live source overlay for HTTP CSV/API adapters.
+- `configs/scenarios.yaml`: scenario filters and defaults such as 2024 presidential
+  state-level runs.
 - `configs/model.yaml`: model version, seed, simulation count, component weights,
   trusted-component flags, uncertainty settings, performance settings, and reward
   thresholds.
 - `configs/tiers.yaml`: Tier A/B/C thresholds and sparse-race policy.
 - `configs/backtests.yaml`: rolling-origin settings, metrics, and baselines.
 
-Current implementation note: the repo ships a fixture scorecard to exercise metric and
-plot contracts. It must not certify `R5`, `R6`, or `R8` until a rolling-origin runner and
-larger historical race store are implemented.
+Current implementation note: the repo runs a rolling-origin component refit harness and
+writes `rolling_predictions.parquet`, `component_admission.json`, and
+`residual_covariance.parquet`. It must not certify `R5`, `R6`, or `R8` until the
+historical race store reaches the configured sample threshold.
 
 ## Modeling Specification
 
@@ -235,6 +242,7 @@ artifacts/runs/<forecast_run_id>/comparisons/<comparison_id>/
   result_comparison.parquet
   result_comparison_summary.json
   result_comparison.html
+  narrative.md
   plots/
 ```
 

@@ -46,6 +46,9 @@ artifacts/runs/full-forecast/
   diagnostics.html
   reward_card.json
   methodology_snapshot.md
+  model_card.md
+  silver_benchmark.json
+  silver_benchmark.html
   reproducibility_fingerprint.json
   performance.json
   plot_manifest.json
@@ -114,6 +117,9 @@ Backtest output:
 artifacts/backtests/full-backtest/
   scorecard.json
   scorecard.parquet
+  rolling_predictions.parquet
+  component_admission.json
+  residual_covariance.parquet
 ```
 
 Inspect backtest metrics:
@@ -131,9 +137,9 @@ print(json.dumps(scorecard["ablations"], indent=2, sort_keys=True))
 PY
 ```
 
-The forecast run also embeds backtest diagnostics in `diagnostics.html` and regenerates
-calibration plots from the current backtest fixture. For the richest diagnostic bundle,
-run both commands:
+The forecast run also embeds rolling-origin backtest diagnostics in `diagnostics.html`
+and regenerates calibration plots from the current backtest predictions. For the richest
+diagnostic bundle, run both commands:
 
 ```bash
 uv run election-outcomes forecast run --as-of 2026-05-08 --run-id full-diagnostic
@@ -141,10 +147,10 @@ uv run election-outcomes backtest run --run-id full-diagnostic-backtest
 open artifacts/runs/full-diagnostic/diagnostics.html
 ```
 
-The current `backtest run` command is a fixture scorecard, not a production
-rolling-origin fit/evaluate loop. It is useful for exercising metrics, plots, and
-artifact contracts; it does not certify model trust rewards until the historical race
-store is expanded.
+The current `backtest run` command refits components by held-out cycle and writes
+component admission plus residual covariance artifacts. The bundled fixture lake is
+still too small to certify `R5`, `R6`, or `R8`; those rewards remain false until the
+historical race store meets the configured sample threshold.
 
 ## 2024 Presidential Historical Comparison
 
@@ -154,12 +160,27 @@ the available 2024 presidential example is the Wisconsin presidential race
 `US-PRES-WI-2024`; live adapters will later expand this to all presidential states and
 Electoral College aggregation.
 
-Run the forecast as if it were October 1, 2024:
+Run the scenario forecast using the pre-election default date of November 4, 2024:
 
 ```bash
 uv sync
 chflags -R nohidden .venv
-uv run election-outcomes forecast run --as-of 2024-10-01 --run-id 2024-presidential
+uv run election-outcomes forecast run \
+  --scenario president_2024_state \
+  --run-id 2024-presidential
+```
+
+Run the same fixture-backed scenario as if the forecast were issued one month before
+Election Day:
+
+```bash
+PYTHONPATH=src uv run election-outcomes forecast run \
+  --scenario president_2024_state \
+  --as-of 2024-10-05 \
+  --run-id 2024-presidential-1mo \
+  --data-dir data/run-2024-presidential-1mo \
+  --artifacts-dir artifacts/run-2024-presidential-1mo
+open artifacts/run-2024-presidential-1mo/runs/2024-presidential-1mo/diagnostics.html
 ```
 
 Compare the forecast run with actual 2024 presidential results:
@@ -179,6 +200,7 @@ artifacts/runs/2024-presidential/comparisons/2024-presidential-actuals/
   result_comparison.parquet
   result_comparison_summary.json
   result_comparison.html
+  narrative.md
   plots/
     vote_share_forecast_vs_actual.png
     winner_probability_vs_actual.png
@@ -188,6 +210,15 @@ Open the comparison report:
 
 ```bash
 open artifacts/runs/2024-presidential/comparisons/2024-presidential-actuals/result_comparison.html
+```
+
+Run the presidential-state rolling-origin backtest directly:
+
+```bash
+uv run election-outcomes backtest run \
+  --scenario president_state \
+  --holdout-cycle 2024 \
+  --run-id president-2024-backtest
 ```
 
 Inspect the summary metrics:
@@ -294,13 +325,18 @@ Current live-source boundary:
 
 - Live data: 538 public presidential poll CSV stream, normalized to `polls`.
 - Fixture support data: race catalog, options, fundamentals, and actual result rows.
-- Not live yet: Civic race catalog, FEC finance, Census/FRED/BEA/BLS fundamentals,
-  public market adapters, GDELT, Wikimedia, and rolling-origin historical backtest
-  snapshots.
+- Not live yet: full Civic race catalog, FEC finance, Census/FRED/BEA/BLS fundamentals,
+  public market adapters, GDELT, Wikimedia, and broad historical backtest snapshots.
 
 ## Plots And Diagnostics
 
 Every forecast run writes `plot_manifest.json` plus PNG plots under `plots/`.
+`diagnostics.html` is the main readout: it combines the headline probability,
+projected margin, scenario-scope warnings, driver attribution, trust gates, backtest
+scorecards, the Silver/FiveThirtyEight methodology benchmark, and the plot gallery.
+The visual style is intentionally closer to public 538-style explanatory dashboards,
+but the benchmark remains methodological only; it does not claim to reproduce
+proprietary Silver Bulletin or FiveThirtyEight forecasts.
 
 Calibration plots:
 
@@ -310,11 +346,26 @@ Calibration plots:
 
 Projection plots:
 
-- `race_probability_bars.png`: winner probabilities by race and option.
-- `vote_share_intervals.png`: vote-share means with interval bands.
-- `control_projection.png`: modeled seat/control outcomes.
-- `turnout_recount_risk.png`: recount-risk projection by race.
-- `tier_coverage.png`: race coverage by Tier A/B/C.
+- `race_probability_bars.png`: sorted winner probabilities with a 50% favored line.
+- `vote_share_intervals.png`: vote-share means with 90% interval bands and win line.
+- `control_projection.png`: modeled seat/control outcomes with threshold context.
+- `turnout_recount_risk.png`: recount-risk projection by race with close-margin warning.
+- `tier_coverage.png`: race coverage by Tier A/B/C with count labels.
+- `electoral_college_distribution.png`: modeled presidential electoral-vote
+  distribution, including a warning when only a state slice is modeled.
+- `topline_electoral_swarm.png`: 538-inspired representative simulation swarm with
+  modeled-scope labeling.
+
+Benchmark plots:
+
+- `silver_methodology_benchmark.png`: readiness scorecard against public
+  Silver/FiveThirtyEight methodology traits.
+
+The `silver_benchmark.json` and `silver_benchmark.html` artifacts compare the current
+engine to public Nate Silver / FiveThirtyEight methodology dimensions: polling
+inclusion, pollster weighting, fundamentals, rolling-origin validation, correlated
+simulation, Electoral College reporting, and driver explainability. This is a
+methodology/readiness benchmark, not a claim to reproduce proprietary forecasts.
 
 List plot outputs:
 
@@ -389,7 +440,8 @@ The coverage gate is part of the project contract. Do not lower it.
 - `build-features`: normalize raw snapshots into curated Parquet tables and race tiers.
 - `forecast run`: refresh data, rebuild features, run models, simulate outcomes, emit
   artifacts, plots, rewards, diagnostics, and performance metadata.
-- `backtest run`: score historical forecast fixtures and component ablations.
+- `backtest run`: refit components by rolling-origin cycle, score baselines and
+  ablations, and emit admission/covariance artifacts.
 - `report build`: rebuild diagnostics and methodology files for an existing run.
 - `benchmark run`: measure simulation throughput using the configured performance engine.
 - `results compare`: compare an existing forecast run against known actual results.
