@@ -13,9 +13,11 @@ in `configs/sources_live.yaml`. Each source records:
 The fixture registry is intentionally shaped like public sources so live adapters can
 write the same raw manifest and curated tables. The default fixture registry includes a
 compact presidential state-cycle panel for 2000-2024. It is derived from public
-presidential returns made available through MIT Election Data and Science Lab-style
-state result files mirrored for deterministic offline testing; the 2024 rows include
-full 50-state-plus-DC Electoral College weights.
+presidential returns in a MIT Election Data and Science Lab-style schema, using a public
+Hugging Face mirror of `1976-2024-president-extended.csv` for deterministic offline
+testing. The production adapter should prefer official MIT Election Lab / Harvard
+Dataverse or FEC state-result releases when direct access is available. The 2024 fixture
+rows include full 50-state-plus-DC Electoral College weights.
 
 Current source modes:
 
