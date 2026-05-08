@@ -1,0 +1,8 @@
+race_id,cycle,election_date,geography_type,geography,office_type,race_type,stage,seats,control_body,measure_threshold
+US-SEN-AZ-2026,2026,2026-11-03,state,AZ,senate,candidate,general,1,senate,
+US-HOUSE-CA45-2026,2026,2026-11-03,district,CA-45,house,candidate,general,1,house,
+BALLOT-CA-PROP1-2026,2026,2026-11-03,state,CA,ballot_measure,ballot_measure,general,0,,0.5
+MAYOR-SPRINGFIELD-2026,2026,2026-11-03,local,Springfield,mayor,candidate,general,1,local,
+US-PRES-WI-2024,2024,2024-11-05,state,WI,president,candidate,general,1,president,
+US-SEN-NV-2022,2022,2022-11-08,state,NV,senate,candidate,general,1,senate,
+

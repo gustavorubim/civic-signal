@@ -1,0 +1,14 @@
+poll_id,race_id,pollster,start_date,end_date,population,sample_size,sponsor_class,methodology,option_id,pct
+P-AZ-1-D,US-SEN-AZ-2026,Desert Research,2026-04-10,2026-04-14,lv,900,nonpartisan,live_phone,US-SEN-AZ-2026-D,50.0
+P-AZ-1-R,US-SEN-AZ-2026,Desert Research,2026-04-10,2026-04-14,lv,900,nonpartisan,live_phone,US-SEN-AZ-2026-R,47.0
+P-AZ-2-D,US-SEN-AZ-2026,Southwest Polling,2026-04-20,2026-04-24,rv,1100,nonpartisan,online,US-SEN-AZ-2026-D,48.0
+P-AZ-2-R,US-SEN-AZ-2026,Southwest Polling,2026-04-20,2026-04-24,rv,1100,nonpartisan,online,US-SEN-AZ-2026-R,48.0
+P-PROP-1-Y,BALLOT-CA-PROP1-2026,Golden State Poll,2026-04-15,2026-04-18,lv,1200,nonpartisan,mixed,BALLOT-CA-PROP1-2026-YES,54.0
+P-PROP-1-N,BALLOT-CA-PROP1-2026,Golden State Poll,2026-04-15,2026-04-18,lv,1200,nonpartisan,mixed,BALLOT-CA-PROP1-2026-NO,41.0
+P-PROP-2-Y,BALLOT-CA-PROP1-2026,Pacific Survey,2026-04-25,2026-04-27,rv,1000,nonpartisan,online,BALLOT-CA-PROP1-2026-YES,52.0
+P-PROP-2-N,BALLOT-CA-PROP1-2026,Pacific Survey,2026-04-25,2026-04-27,rv,1000,nonpartisan,online,BALLOT-CA-PROP1-2026-NO,43.0
+P-WI-1-D,US-PRES-WI-2024,Lake Poll,2024-10-10,2024-10-12,lv,800,nonpartisan,live_phone,US-PRES-WI-2024-D,49.0
+P-WI-1-R,US-PRES-WI-2024,Lake Poll,2024-10-10,2024-10-12,lv,800,nonpartisan,live_phone,US-PRES-WI-2024-R,48.0
+P-NV-1-D,US-SEN-NV-2022,Silver State Poll,2022-10-15,2022-10-18,lv,850,nonpartisan,mixed,US-SEN-NV-2022-D,48.0
+P-NV-1-R,US-SEN-NV-2022,Silver State Poll,2022-10-15,2022-10-18,lv,850,nonpartisan,mixed,US-SEN-NV-2022-R,47.0
+

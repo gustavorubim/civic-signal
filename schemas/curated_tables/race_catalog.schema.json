@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "required": ["race_id", "cycle", "election_date", "race_type", "tier", "tier_reason"],
+  "properties": {
+    "race_id": {"type": "string"},
+    "cycle": {"type": "integer"},
+    "election_date": {"type": "string"},
+    "race_type": {"type": "string"},
+    "tier": {"type": "string"},
+    "tier_reason": {"type": "string"}
+  }
+}
+

@@ -1,0 +1,16 @@
+rolling_origin:
+  holdout_cycles: [2022, 2024]
+  min_races: 2
+metrics:
+  - brier
+  - log_score
+  - calibration
+  - expected_calibration_error
+  - interval_coverage
+baselines:
+  - historical_partisan_lean
+  - polling_average
+  - market_implied
+  - incumbent_party_prior
+  - previous_cycle_swing
+

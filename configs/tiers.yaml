@@ -1,0 +1,11 @@
+tier_a:
+  min_polls: 2
+  min_pollsters: 2
+  min_market_quotes: 1
+  min_fundamental_rows: 1
+tier_b:
+  min_any_signal_rows: 1
+  require_fundamentals_or_history: true
+tier_c:
+  reason: "Insufficient validated data for a trusted probability."
+

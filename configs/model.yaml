@@ -1,0 +1,33 @@
+model_version: "0.1.0-hybrid-fixture"
+seed: 20260508
+simulation_count: 1000
+performance:
+  engine: numba
+  parallel: true
+  numba_threads: 0
+  benchmark_draws: 10000
+  benchmark_repeats: 3
+trusted_components:
+  polling: true
+  fundamentals: true
+  markets: true
+  public_signals: false
+component_weights:
+  polling: 0.45
+  fundamentals: 0.30
+  markets: 0.20
+  public_signals: 0.05
+uncertainty:
+  tier_a_sigma: 0.035
+  tier_b_sigma: 0.075
+  heavy_tail_df: 5
+market_adjustments:
+  min_open_interest: 1000
+  max_spread: 0.18
+public_signal_admission:
+  max_brier_delta_vs_baseline: 0.0
+  leakage_check_required: true
+reward_thresholds:
+  provenance_min_share: 1.0
+  interval_coverage_tolerance: 0.12
+  reproducibility_required: true
