@@ -148,9 +148,9 @@ open artifacts/runs/full-diagnostic/diagnostics.html
 ```
 
 The current `backtest run` command refits components by held-out cycle and writes
-component admission plus residual covariance artifacts. The bundled fixture lake is
-still too small to certify `R5`, `R6`, or `R8`; those rewards remain false until the
-historical race store meets the configured sample threshold.
+component admission plus residual covariance artifacts. The bundled presidential-state
+panel now has enough rows for the `president_state` benchmark to report evidence-based
+`R5`, `R6`, and `R8` pass/fail values instead of sample-size placeholders.
 Backtests now evaluate a date sweep when data exists: `T-90`, `T-60`, `T-30`, `T-7`,
 and `T-1` days before the election. Sparse fixtures may only score later cuts because
 feature rows are filtered by `as_of`.
@@ -158,10 +158,11 @@ feature rows are filtered by `as_of`.
 ## 2024 Presidential Historical Comparison
 
 Use this workflow when you want to run a pre-election 2024 presidential forecast and
-compare the forecast against known actual outcomes. In the current fixture-backed repo,
-the available 2024 presidential example is the Wisconsin presidential race
-`US-PRES-WI-2024`; live adapters will later expand this to all presidential states and
-Electoral College aggregation.
+compare the forecast against known actual outcomes. The default offline registry includes
+a 50-state-plus-DC presidential panel for 2000-2024 with Electoral College weights, public
+returns-derived actuals, deterministic pre-election poll snapshots, and state fundamentals
+features. This is still a compact benchmark fixture, not a claim to reproduce the final
+Silver Bulletin or FiveThirtyEight model.
 
 Run the scenario forecast using the pre-election default date of November 4, 2024:
 
@@ -196,23 +197,26 @@ uv run election-outcomes results compare \
   --office-type president
 ```
 
-Interpretation for the current fixture-backed 2024 benchmark: Wisconsin is the only
-modeled presidential state and the one-month pre-election forecast currently misses the
-actual winner. Treat that as a failing benchmark signal, not as a reason to tune against
-the answer. The next real-data milestone is to expand the 2024 state panel and improve
-the model until the holdout result improves without future-result leakage.
+Interpretation for the 2024 benchmark: the run emits a full 538-EV simulation and
+`results compare` reports state accuracy, Electoral College winner accuracy, Brier/log
+style scoring fields, largest misses, and the probability assigned to each actual winner.
+Treat misses as benchmark signals, not as reasons to tune directly against 2024 actuals.
 
 Comparison output:
 
 ```text
 artifacts/runs/2024-presidential/comparisons/2024-presidential-actuals/
   result_comparison.parquet
+  race_outcomes.parquet
+  largest_misses.parquet
   result_comparison_summary.json
   result_comparison.html
   narrative.md
   plots/
     vote_share_forecast_vs_actual.png
     winner_probability_vs_actual.png
+    actual_winner_probabilities.png
+    largest_vote_share_misses.png
 ```
 
 Open the comparison report:
@@ -282,9 +286,15 @@ PY
 The key interpretation fields are:
 
 - `winner_accuracy`: whether the forecast's top option matched the actual winner.
+- `state_accuracy`: presidential state-level winner accuracy over matched state races.
+- `ec_winner_accuracy`: modeled Electoral College winner accuracy. The summary includes
+  `electoral_college.scope`; for `president_2024_state` this should be
+  `full_electoral_college`.
 - `mean_absolute_vote_share_error`: average absolute forecast-share error.
 - `brier_score`: probability score against actual winner indicators.
 - `upset_count`: number of actual winners assigned less than 50% probability.
+- `actual_winner_probabilities`: race-level probability assigned to each actual winner.
+- `largest_misses`: the largest option-level vote-share misses by absolute error.
 
 ## First Live Poll Run
 
@@ -365,6 +375,15 @@ Projection plots:
 - `topline_electoral_swarm.png`: 538-inspired representative simulation swarm with
   modeled-scope labeling.
 
+Trajectory and stability plots:
+
+- `polling_kalman_trajectories.png`: Kalman latent vote-share paths with uncertainty
+  bands and poll dots for the closest selected races.
+- `polling_probability_trajectory.png`: rolling-origin polling-component probability
+  by as-of cut when `polls_probability` and time-cut columns are available.
+- `simulation_probability_convergence.png`: cumulative winner probability as simulation
+  draws accumulate, generated when forecast draw rows are available.
+
 Benchmark plots:
 
 - `silver_methodology_benchmark.png`: readiness scorecard against public
@@ -373,10 +392,12 @@ Benchmark plots:
 The `silver_benchmark.json` and `silver_benchmark.html` artifacts compare the current
 engine to public Nate Silver / FiveThirtyEight methodology dimensions: polling
 inclusion, pollster weighting, fundamentals, rolling-origin validation, correlated
-simulation, Electoral College reporting, and driver explainability. This is a
-methodology/readiness benchmark, not a claim to reproduce proprietary forecasts. Scores
-use four honest tiers: `absent`, `scaffold`, `functional`, and `production`, so an
-implemented but undertrained path no longer receives full credit.
+simulation, Electoral College reporting, polling trajectory/Kalman support, and driver
+explainability. This is a methodology/readiness benchmark, not a claim to reproduce
+proprietary forecasts. Scores use four honest tiers: `absent`, `scaffold`, `functional`,
+and `production`, exposed as `tier_scale` in `silver_benchmark.json`, so an implemented
+but undertrained path no longer receives full credit. Kalman or trajectory support is
+credited only when it is visible in model config or run artifacts.
 
 List plot outputs:
 

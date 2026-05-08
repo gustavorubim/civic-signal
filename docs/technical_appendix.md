@@ -393,6 +393,8 @@ The comparison table includes:
 - Actual vote share.
 - Actual winner flag.
 - Predicted winner flag.
+- Race-level predicted and actual winner ids/parties.
+- Actual-winner probability for each race.
 - Vote-share error.
 - Absolute vote-share error.
 - Brier contribution.
@@ -400,14 +402,19 @@ The comparison table includes:
 Summary metrics:
 
 - Winner accuracy.
+- Presidential state accuracy when the comparison covers state-level presidential races.
+- Modeled Electoral College winner accuracy with `full_electoral_college` versus
+  `modeled_state_slice` scope.
 - Mean absolute vote-share error.
 - Brier score.
 - Upset count.
+- Largest vote-share misses.
+- Actual-winner probability list.
 
-In the current fixture-backed implementation, the 2024 presidential example covers
-`US-PRES-WI-2024`. A full presidential production run should extend the same comparison
-contract across all state-level presidential races, then add Electoral College outcome
-comparison once live results and state-level race metadata are ingested.
+The bundled presidential benchmark now covers all 50 states plus DC for 2000-2024.
+For `president_2024_state`, the comparison contract evaluates all 538 electoral votes
+and labels the EC scope as `full_electoral_college`. Any smaller custom scenario is
+still labeled as a modeled state slice rather than a national winner claim.
 
 ```mermaid
 flowchart TD

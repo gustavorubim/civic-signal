@@ -33,7 +33,8 @@ Every `forecast run` must create `artifacts/runs/<run_id>/` with:
 - `model_card.md`: learned/configured/placeholder parameter status, component admission,
   backtest sample status, covariance status, and source coverage for the run.
 - `silver_benchmark.json` and `silver_benchmark.html`: methodology-readiness comparison
-  against public Silver/FiveThirtyEight forecast traits and source anchors.
+  against public Silver/FiveThirtyEight forecast traits and source anchors, scored on
+  the explicit four-tier `absent`/`scaffold`/`functional`/`production` scale.
 - `reproducibility_fingerprint.json`: stable artifact hashes excluding volatile
   retrieval/status fields, with same-run-id comparison status when available.
 - `plot_manifest.json`: calibration, projection, and benchmark plot index.
@@ -205,6 +206,9 @@ Every forecast run must emit calibration and projection visuals:
 - Seat/control projections.
 - Turnout/recount-risk projections.
 - Forecast coverage by tier.
+- Polling probability trajectories when rolling-origin polling probability and as-of
+  cut columns are available.
+- Simulation probability convergence when draw-level winner rows are available.
 
 Plots are generated from local artifacts and do not require API credentials.
 
@@ -246,6 +250,8 @@ Comparison output:
 ```text
 artifacts/runs/<forecast_run_id>/comparisons/<comparison_id>/
   result_comparison.parquet
+  race_outcomes.parquet
+  largest_misses.parquet
   result_comparison_summary.json
   result_comparison.html
   narrative.md
@@ -253,7 +259,10 @@ artifacts/runs/<forecast_run_id>/comparisons/<comparison_id>/
 ```
 
 The comparison reports winner accuracy, mean absolute vote-share error, Brier score, and
-upset count over the filtered races/options.
+upset count over the filtered races/options. Presidential comparisons also report
+state-level winner accuracy, modeled Electoral College winner accuracy with an explicit
+`full_electoral_college` or `modeled_state_slice` scope, actual-winner probabilities,
+and the largest option-level vote-share misses.
 
 ## API Credentials
 

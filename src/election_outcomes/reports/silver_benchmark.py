@@ -10,6 +10,12 @@ import polars as pl
 class SilverStyleBenchmark:
     """Compare the current engine with public Silver/FiveThirtyEight methodology traits."""
 
+    TIER_SCALE: ClassVar[dict[str, float]] = {
+        "absent": 0.0,
+        "scaffold": 0.33,
+        "functional": 0.66,
+        "production": 1.0,
+    }
     SOURCES: ClassVar[list[dict[str, str]]] = [
         {
             "name": "Silver Bulletin polling averages methodology",
@@ -41,10 +47,17 @@ class SilverStyleBenchmark:
         backtest_payload: dict[str, Any],
         residual_covariance: pl.DataFrame | None,
         source_manifest: pl.DataFrame,
+        poll_trajectory: pl.DataFrame | None = None,
     ) -> dict[str, Any]:
         covariance_sample = self._covariance_sample_size(residual_covariance)
         modeled_ev = self._modeled_presidential_seats(race_catalog)
         sample_too_small = bool(backtest_payload.get("sample_size_too_small"))
+        trajectory_support = self._trajectory_support(
+            model_config=model_config,
+            race_forecasts=race_forecasts,
+            backtest_payload=backtest_payload,
+            poll_trajectory=poll_trajectory,
+        )
         rows = [
             self._row(
                 "Poll inclusion and provenance",
@@ -67,6 +80,12 @@ class SilverStyleBenchmark:
                     "Current polling has recency/sample weighting; learned pollster effects "
                     "are pending."
                 ),
+            ),
+            self._row(
+                "Polling trajectory/Kalman support",
+                "State-space or trajectory-aware polling updates with auditable artifacts.",
+                trajectory_support["tier"],
+                trajectory_support["current"],
             ),
             self._row(
                 "Fundamentals layer",
@@ -137,6 +156,7 @@ class SilverStyleBenchmark:
             "benchmark_name": "Silver/FiveThirtyEight public-methodology benchmark",
             "summary_score": score,
             "status": self._status(score),
+            "tier_scale": self.TIER_SCALE,
             "rows": rows,
             "sources": self.SOURCES,
             "note": (
@@ -162,6 +182,9 @@ class SilverStyleBenchmark:
             f": {html.escape(source['used_for'])}</li>"
             for source in payload["sources"]
         )
+        scale = ", ".join(
+            f"{tier}={score}" for tier, score in payload.get("tier_scale", {}).items()
+        )
         return f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Silver/FiveThirtyEight Benchmark</title></head>
@@ -169,6 +192,7 @@ class SilverStyleBenchmark:
 <h1>{html.escape(payload["benchmark_name"])}</h1>
 <p>Status: <strong>{html.escape(payload["status"])}</strong></p>
 <p>Summary score: {payload["summary_score"]:.3f}</p>
+<p>Tier scale: {html.escape(scale)}</p>
 <p>{html.escape(payload["note"])}</p>
 <table>
 <thead>
@@ -184,18 +208,12 @@ class SilverStyleBenchmark:
 
     @staticmethod
     def _row(dimension: str, target: str, tier: str, current: str) -> dict[str, Any]:
-        score_by_tier = {
-            "absent": 0.0,
-            "scaffold": 0.33,
-            "functional": 0.66,
-            "production": 1.0,
-        }
-        normalized_tier = tier if tier in score_by_tier else "absent"
+        normalized_tier = tier if tier in SilverStyleBenchmark.TIER_SCALE else "absent"
         return {
             "dimension": dimension,
             "target": target,
             "tier": normalized_tier,
-            "score": score_by_tier[normalized_tier],
+            "score": SilverStyleBenchmark.TIER_SCALE[normalized_tier],
             "current": current,
         }
 
@@ -229,6 +247,113 @@ class SilverStyleBenchmark:
     def _has_driver_columns(race_forecasts: pl.DataFrame) -> bool:
         required = {"top_drivers", "component_contributions", "uncertainty_explanation"}
         return not race_forecasts.is_empty() and required.issubset(set(race_forecasts.columns))
+
+    @classmethod
+    def _trajectory_support(
+        cls,
+        model_config: dict[str, Any],
+        race_forecasts: pl.DataFrame,
+        backtest_payload: dict[str, Any],
+        poll_trajectory: pl.DataFrame | None = None,
+    ) -> dict[str, str]:
+        keywords = ("kalman", "trajectory", "state_space", "state-space", "dynamic_poll")
+        polling_config = dict(model_config.get("polling", {}))
+        config_matches = cls._matching_paths(polling_config, keywords)
+        config_enabled = cls._truthy_matching_paths(polling_config, keywords)
+        payload_matches = cls._matching_paths(backtest_payload, keywords, prefix="backtest")
+        if poll_trajectory is not None and not poll_trajectory.is_empty():
+            return {
+                "tier": "functional",
+                "current": (
+                    "Run artifacts include poll_trajectory rows with Kalman/trajectory "
+                    f"columns; rows={poll_trajectory.height}."
+                ),
+            }
+        artifact_columns = [
+            column
+            for column in race_forecasts.columns
+            if any(keyword in column.lower() for keyword in keywords)
+        ]
+        if artifact_columns:
+            return {
+                "tier": "functional",
+                "current": (
+                    "Trajectory/Kalman forecast artifact columns are visible: "
+                    f"{', '.join(sorted(artifact_columns))}."
+                ),
+            }
+        if config_enabled:
+            return {
+                "tier": "functional",
+                "current": (
+                    "Polling trajectory/Kalman support is enabled in config at "
+                    f"{', '.join(config_enabled)}; no separate forecast artifact column is visible."
+                ),
+            }
+        if config_matches or payload_matches:
+            visible = ", ".join([*config_matches, *payload_matches])
+            return {
+                "tier": "scaffold",
+                "current": (
+                    "Trajectory/Kalman hooks are visible but not active as auditable forecast "
+                    f"artifacts: {visible}."
+                ),
+            }
+        return {
+            "tier": "absent",
+            "current": (
+                "No Kalman, state-space, or polling-trajectory support is visible in config "
+                "or run artifacts; polling remains a deterministic weighted average."
+            ),
+        }
+
+    @classmethod
+    def _matching_paths(
+        cls, payload: Any, keywords: tuple[str, ...], prefix: str = "polling"
+    ) -> list[str]:
+        paths: list[str] = []
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                path = f"{prefix}.{key}" if prefix else str(key)
+                key_lower = str(key).lower()
+                if any(keyword in key_lower for keyword in keywords):
+                    paths.append(path)
+                paths.extend(cls._matching_paths(value, keywords, path))
+        elif isinstance(payload, list):
+            for index, value in enumerate(payload):
+                paths.extend(cls._matching_paths(value, keywords, f"{prefix}[{index}]"))
+        return paths
+
+    @classmethod
+    def _truthy_matching_paths(
+        cls, payload: Any, keywords: tuple[str, ...], prefix: str = "polling"
+    ) -> list[str]:
+        paths: list[str] = []
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                path = f"{prefix}.{key}" if prefix else str(key)
+                key_lower = str(key).lower()
+                if any(keyword in key_lower for keyword in keywords) and cls._truthy(value):
+                    paths.append(path)
+                paths.extend(cls._truthy_matching_paths(value, keywords, path))
+        elif isinstance(payload, list):
+            for index, value in enumerate(payload):
+                paths.extend(cls._truthy_matching_paths(value, keywords, f"{prefix}[{index}]"))
+        return paths
+
+    @classmethod
+    def _truthy(cls, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int | float):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() not in {"", "0", "false", "none", "disabled"}
+        if isinstance(value, dict):
+            return any(cls._truthy(child) for child in value.values())
+        if isinstance(value, list):
+            return any(cls._truthy(child) for child in value)
+        return value is not None
 
     @staticmethod
     def _modeled_presidential_seats(race_catalog: pl.DataFrame) -> int:

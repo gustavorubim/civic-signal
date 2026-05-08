@@ -48,7 +48,9 @@ class ResultComparator:
         output_dir = forecast_run_dir / "comparisons" / comparison_id
         output_dir.mkdir(parents=True, exist_ok=True)
         write_parquet(comparison, output_dir / "result_comparison.parquet")
+        insight_artifacts = self._write_insight_tables(comparison, output_dir)
         plot_manifest = self._write_plots(comparison, output_dir)
+        summary["insight_artifacts"] = insight_artifacts
         summary["plot_manifest"] = plot_manifest
         write_json(summary, output_dir / "result_comparison_summary.json")
         write_text(
@@ -79,6 +81,8 @@ class ResultComparator:
                 "geography",
                 "office_type",
                 "race_type",
+                "seats",
+                "control_body",
                 "tier",
                 "tier_reason",
             ]
@@ -100,13 +104,6 @@ class ResultComparator:
         if comparison.is_empty():
             return comparison
         comparison = comparison.with_columns(
-            pl.col("winner_probability").max().over("race_id").alias("max_winner_probability")
-        )
-        return comparison.with_columns(
-            pl.when(pl.col("winner_probability").is_not_null())
-            .then(pl.col("winner_probability") == pl.col("max_winner_probability"))
-            .otherwise(False)
-            .alias("predicted_winner"),
             (pl.col("vote_share_mean") - pl.col("actual_vote_share")).alias("vote_share_error"),
             (pl.col("vote_share_mean") - pl.col("actual_vote_share"))
             .abs()
@@ -114,7 +111,31 @@ class ResultComparator:
             (pl.col("winner_probability") - pl.col("actual_winner").cast(pl.Float64))
             .pow(2)
             .alias("brier_contribution"),
-        ).drop("max_winner_probability")
+        )
+        race_outcomes = self._race_outcome_frame(comparison)
+        outcome_columns = [
+            column
+            for column in race_outcomes.columns
+            if column
+            in {
+                "race_id",
+                "predicted_winner_option_id",
+                "predicted_winner_name",
+                "predicted_winner_party",
+                "predicted_winner_probability",
+                "actual_winner_option_id",
+                "actual_winner_name",
+                "actual_winner_party",
+                "actual_winner_probability",
+                "race_winner_correct",
+            }
+        ]
+        comparison = comparison.join(
+            race_outcomes.select(outcome_columns), on="race_id", how="left"
+        )
+        return comparison.with_columns(
+            (pl.col("option_id") == pl.col("predicted_winner_option_id")).alias("predicted_winner")
+        )
 
     @staticmethod
     def _apply_filters(
@@ -154,35 +175,288 @@ class ResultComparator:
             return {
                 **base,
                 "winner_accuracy": None,
+                "state_accuracy": None,
+                "state_accuracy_n": 0,
+                "ec_winner_accuracy": None,
+                "electoral_college": self._empty_electoral_college_summary(),
                 "mean_absolute_vote_share_error": None,
                 "brier_score": None,
                 "upset_count": 0,
+                "actual_winner_probabilities": [],
+                "largest_misses": [],
+                "race_outcomes": [],
             }
-        actual_winners = comparison.filter(pl.col("actual_winner")).select(
-            ["race_id", pl.col("option_id").alias("actual_winner_option_id")]
+        race_outcomes = self._race_outcome_frame(comparison)
+        winner_accuracy = self._mean_bool_or_none(race_outcomes, "race_winner_correct")
+        presidential_states = race_outcomes.filter(
+            (pl.col("office_type") == "president") & (pl.col("geography_type") == "state")
         )
-        predicted_winners = comparison.filter(pl.col("predicted_winner")).select(
-            ["race_id", pl.col("option_id").alias("predicted_winner_option_id")]
-        )
-        winner_eval = predicted_winners.join(actual_winners, on="race_id", how="inner")
-        winner_accuracy = (
-            winner_eval.select(
-                (pl.col("predicted_winner_option_id") == pl.col("actual_winner_option_id")).mean()
-            ).item()
-            if not winner_eval.is_empty()
-            else None
-        )
+        state_accuracy = self._mean_bool_or_none(presidential_states, "race_winner_correct")
+        electoral_college = self._electoral_college_summary(presidential_states)
         actual_winner_rows = comparison.filter(pl.col("actual_winner"))
         upset_count = actual_winner_rows.filter(pl.col("winner_probability") < 0.5).height
         return {
             **base,
             "winner_accuracy": None if winner_accuracy is None else float(winner_accuracy),
+            "state_accuracy": None if state_accuracy is None else float(state_accuracy),
+            "state_accuracy_n": presidential_states.height,
+            "ec_winner_accuracy": electoral_college["winner_accuracy"],
+            "electoral_college": electoral_college,
             "mean_absolute_vote_share_error": self._mean_or_none(
                 comparison, "absolute_vote_share_error"
             ),
             "brier_score": self._mean_or_none(comparison, "brier_contribution"),
             "upset_count": upset_count,
+            "actual_winner_probabilities": self._actual_winner_probabilities(race_outcomes),
+            "largest_misses": self._largest_misses(comparison),
+            "race_outcomes": self._json_records(race_outcomes),
         }
+
+    def _write_insight_tables(self, comparison: pl.DataFrame, output_dir: Path) -> dict[str, str]:
+        artifacts: dict[str, str] = {}
+        race_outcomes = self._race_outcome_frame(comparison)
+        if not race_outcomes.is_empty():
+            write_parquet(race_outcomes, output_dir / "race_outcomes.parquet")
+            artifacts["race_outcomes"] = "race_outcomes.parquet"
+        largest_misses = self._largest_miss_frame(comparison, limit=25)
+        if not largest_misses.is_empty():
+            write_parquet(largest_misses, output_dir / "largest_misses.parquet")
+            artifacts["largest_misses"] = "largest_misses.parquet"
+        return artifacts
+
+    @staticmethod
+    def _race_outcome_frame(comparison: pl.DataFrame) -> pl.DataFrame:
+        schema = {
+            "race_id": pl.Utf8,
+            "cycle": pl.Int64,
+            "geography_type": pl.Utf8,
+            "geography": pl.Utf8,
+            "office_type": pl.Utf8,
+            "race_type": pl.Utf8,
+            "seats": pl.Int64,
+            "control_body": pl.Utf8,
+            "predicted_winner_option_id": pl.Utf8,
+            "predicted_winner_name": pl.Utf8,
+            "predicted_winner_party": pl.Utf8,
+            "predicted_winner_probability": pl.Float64,
+            "actual_winner_option_id": pl.Utf8,
+            "actual_winner_name": pl.Utf8,
+            "actual_winner_party": pl.Utf8,
+            "actual_winner_probability": pl.Float64,
+            "race_winner_correct": pl.Boolean,
+        }
+        if comparison.is_empty() or "race_id" not in comparison.columns:
+            return pl.DataFrame(schema=schema)
+
+        name_expr = pl.col("name") if "name" in comparison.columns else pl.lit(None)
+        party_expr = pl.col("party") if "party" in comparison.columns else pl.lit(None)
+        base_columns = [
+            column
+            for column in [
+                "race_id",
+                "cycle",
+                "geography_type",
+                "geography",
+                "office_type",
+                "race_type",
+                "seats",
+                "control_body",
+            ]
+            if column in comparison.columns
+        ]
+        sorted_forecast = comparison.with_columns(
+            pl.col("winner_probability").fill_null(-1.0).alias("_winner_probability_sort")
+        ).sort(
+            ["race_id", "_winner_probability_sort", "option_id"],
+            descending=[False, True, False],
+        )
+        predicted = (
+            sorted_forecast.group_by("race_id", maintain_order=True)
+            .head(1)
+            .select(
+                [
+                    *base_columns,
+                    pl.col("option_id").alias("predicted_winner_option_id"),
+                    name_expr.alias("predicted_winner_name"),
+                    party_expr.alias("predicted_winner_party"),
+                    pl.col("winner_probability").alias("predicted_winner_probability"),
+                ]
+            )
+        )
+        actual = (
+            comparison.filter(pl.col("actual_winner"))
+            .sort(["race_id", "option_id"])
+            .group_by("race_id", maintain_order=True)
+            .head(1)
+            .select(
+                [
+                    "race_id",
+                    pl.col("option_id").alias("actual_winner_option_id"),
+                    name_expr.alias("actual_winner_name"),
+                    party_expr.alias("actual_winner_party"),
+                    pl.col("winner_probability").alias("actual_winner_probability"),
+                ]
+            )
+        )
+        outcome = predicted.join(actual, on="race_id", how="left").with_columns(
+            (pl.col("predicted_winner_option_id") == pl.col("actual_winner_option_id")).alias(
+                "race_winner_correct"
+            )
+        )
+        for column, dtype in schema.items():
+            if column not in outcome.columns:
+                outcome = outcome.with_columns(pl.lit(None, dtype=dtype).alias(column))
+        return outcome.select(list(schema))
+
+    @staticmethod
+    def _largest_miss_frame(comparison: pl.DataFrame, limit: int = 10) -> pl.DataFrame:
+        columns = [
+            "race_id",
+            "geography",
+            "office_type",
+            "option_id",
+            "name",
+            "party",
+            "winner_probability",
+            "actual_winner_probability",
+            "vote_share_mean",
+            "actual_vote_share",
+            "vote_share_error",
+            "absolute_vote_share_error",
+            "actual_winner",
+            "predicted_winner",
+            "race_winner_correct",
+        ]
+        present = [column for column in columns if column in comparison.columns]
+        if comparison.is_empty() or "absolute_vote_share_error" not in comparison.columns:
+            return pl.DataFrame()
+        frame = comparison.filter(pl.col("absolute_vote_share_error").is_not_null())
+        if frame.is_empty():
+            return pl.DataFrame()
+        return frame.sort("absolute_vote_share_error", descending=True).head(limit).select(present)
+
+    @classmethod
+    def _largest_misses(cls, comparison: pl.DataFrame, limit: int = 10) -> list[dict[str, Any]]:
+        return cls._json_records(cls._largest_miss_frame(comparison, limit=limit))
+
+    @classmethod
+    def _actual_winner_probabilities(cls, race_outcomes: pl.DataFrame) -> list[dict[str, Any]]:
+        columns = [
+            "race_id",
+            "geography",
+            "office_type",
+            "seats",
+            "actual_winner_option_id",
+            "actual_winner_name",
+            "actual_winner_party",
+            "actual_winner_probability",
+            "race_winner_correct",
+        ]
+        present = [column for column in columns if column in race_outcomes.columns]
+        if race_outcomes.is_empty():
+            return []
+        return cls._json_records(race_outcomes.select(present).sort("race_id"))
+
+    @classmethod
+    def _electoral_college_summary(cls, race_outcomes: pl.DataFrame) -> dict[str, Any]:
+        if race_outcomes.is_empty() or "seats" not in race_outcomes.columns:
+            return cls._empty_electoral_college_summary()
+        frame = race_outcomes.filter(
+            (pl.col("seats").is_not_null())
+            & (pl.col("seats") > 0)
+            & pl.col("actual_winner_party").is_not_null()
+            & pl.col("predicted_winner_party").is_not_null()
+        )
+        if frame.is_empty():
+            return cls._empty_electoral_college_summary()
+        modeled_votes = int(frame["seats"].sum())
+        full_ec = modeled_votes >= 270
+        threshold = 270.0 if full_ec else modeled_votes / 2.0
+        predicted_counts = cls._party_vote_counts(frame, "predicted_winner_party")
+        actual_counts = cls._party_vote_counts(frame, "actual_winner_party")
+        predicted_winner = cls._party_with_most_votes(predicted_counts, threshold, full_ec)
+        actual_winner = cls._party_with_most_votes(actual_counts, threshold, full_ec)
+        winner_correct = (
+            None
+            if predicted_winner is None or actual_winner is None
+            else predicted_winner == actual_winner
+        )
+        return {
+            "available": True,
+            "scope": "full_electoral_college" if full_ec else "modeled_state_slice",
+            "modeled_electoral_votes": modeled_votes,
+            "state_count": frame.height,
+            "threshold": threshold,
+            "winner_accuracy": None if winner_correct is None else float(winner_correct),
+            "winner_correct": winner_correct,
+            "predicted_winner_party": predicted_winner,
+            "actual_winner_party": actual_winner,
+            "predicted_party_electoral_votes": predicted_counts,
+            "actual_party_electoral_votes": actual_counts,
+        }
+
+    @staticmethod
+    def _empty_electoral_college_summary() -> dict[str, Any]:
+        return {
+            "available": False,
+            "scope": "not_applicable",
+            "modeled_electoral_votes": 0,
+            "state_count": 0,
+            "threshold": None,
+            "winner_accuracy": None,
+            "winner_correct": None,
+            "predicted_winner_party": None,
+            "actual_winner_party": None,
+            "predicted_party_electoral_votes": [],
+            "actual_party_electoral_votes": [],
+        }
+
+    @classmethod
+    def _party_vote_counts(cls, frame: pl.DataFrame, party_column: str) -> list[dict[str, Any]]:
+        counts = (
+            frame.group_by(party_column)
+            .agg(pl.col("seats").sum().alias("electoral_votes"))
+            .rename({party_column: "party"})
+            .sort("electoral_votes", descending=True)
+        )
+        return cls._json_records(counts)
+
+    @staticmethod
+    def _party_with_most_votes(
+        counts: list[dict[str, Any]], threshold: float, require_threshold: bool
+    ) -> str | None:
+        if not counts:
+            return None
+        top = counts[0]
+        votes = float(top.get("electoral_votes") or 0)
+        if len(counts) > 1 and votes == float(counts[1].get("electoral_votes") or 0):
+            return None
+        if require_threshold and votes < threshold:
+            return None
+        return str(top.get("party"))
+
+    @staticmethod
+    def _mean_bool_or_none(frame: pl.DataFrame, column: str) -> float | None:
+        if frame.is_empty() or column not in frame.columns:
+            return None
+        value = frame.select(pl.col(column).cast(pl.Float64).mean()).item()
+        return None if value is None else float(value)
+
+    @classmethod
+    def _json_records(cls, frame: pl.DataFrame) -> list[dict[str, Any]]:
+        return [
+            {key: cls._json_value(value) for key, value in row.items()} for row in frame.to_dicts()
+        ]
+
+    @staticmethod
+    def _json_value(value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, float) and np.isnan(value):
+            return None
+        if hasattr(value, "item"):
+            return value.item()
+        return value
 
     @staticmethod
     def _mean_or_none(frame: pl.DataFrame, column: str) -> float | None:
@@ -206,6 +480,16 @@ class ResultComparator:
             manifest,
             self._winner_probability_plot(comparison, plot_dir),
             "Winner probability versus actual outcome",
+        )
+        self._add_plot(
+            manifest,
+            self._actual_winner_probability_plot(comparison, plot_dir),
+            "Actual-winner probabilities",
+        )
+        self._add_plot(
+            manifest,
+            self._largest_misses_plot(comparison, plot_dir),
+            "Largest vote-share misses",
         )
         return manifest
 
@@ -251,6 +535,58 @@ class ResultComparator:
         ax.set_title("Winner Probability vs Actual Outcome")
         return self._save(fig, plot_dir / "winner_probability_vs_actual.png")
 
+    def _actual_winner_probability_plot(
+        self, comparison: pl.DataFrame, plot_dir: Path
+    ) -> Path | None:
+        race_outcomes = self._race_outcome_frame(comparison)
+        if race_outcomes.is_empty():
+            return None
+        frame = race_outcomes.filter(pl.col("actual_winner_probability").is_not_null()).sort(
+            "actual_winner_probability"
+        )
+        if frame.is_empty():
+            return None
+        labels = [
+            f"{row['geography'] or row['race_id']}\n{row['actual_winner_party']}"
+            for row in frame.iter_rows(named=True)
+        ]
+        values = frame["actual_winner_probability"].to_list()
+        colors = [
+            "#59a14f" if bool(row["race_winner_correct"]) else "#e15759"
+            for row in frame.iter_rows(named=True)
+        ]
+        fig, ax = plt.subplots(figsize=(8, max(3.8, len(labels) * 0.46)), dpi=140)
+        ax.barh(labels, values, color=colors)
+        ax.axvline(0.5, color="#777777", linestyle="--", linewidth=1)
+        for idx, value in enumerate(values):
+            ax.text(min(0.98, float(value) + 0.02), idx, f"{float(value):.1%}", va="center")
+        ax.set_xlim(0, 1)
+        ax.set_xlabel("Forecast probability assigned to actual winner")
+        ax.set_title("Actual-Winner Probability by Race")
+        return self._save(fig, plot_dir / "actual_winner_probabilities.png")
+
+    def _largest_misses_plot(self, comparison: pl.DataFrame, plot_dir: Path) -> Path | None:
+        frame = self._largest_miss_frame(comparison, limit=12)
+        if frame.is_empty():
+            return None
+        frame = frame.sort("absolute_vote_share_error")
+        labels = [
+            f"{row.get('name') or row['option_id']}\n{row['race_id']}"
+            for row in frame.iter_rows(named=True)
+        ]
+        values = frame["absolute_vote_share_error"].to_list()
+        colors = [
+            "#e15759" if bool(row.get("actual_winner")) else "#4c78a8"
+            for row in frame.iter_rows(named=True)
+        ]
+        fig, ax = plt.subplots(figsize=(8.4, max(4.0, len(labels) * 0.5)), dpi=140)
+        ax.barh(labels, values, color=colors)
+        for idx, value in enumerate(values):
+            ax.text(float(value) + 0.002, idx, f"{float(value):.1%}", va="center", fontsize=9)
+        ax.set_xlabel("Absolute vote-share error")
+        ax.set_title("Largest Vote-Share Misses")
+        return self._save(fig, plot_dir / "largest_vote_share_misses.png")
+
     @staticmethod
     def _save(fig: plt.Figure, path: Path) -> Path:
         fig.tight_layout()
@@ -261,24 +597,38 @@ class ResultComparator:
     @staticmethod
     def _html_report(summary: dict[str, Any], comparison: pl.DataFrame) -> str:
         rows = ""
+        row_columns = [
+            "race_id",
+            "option_id",
+            "winner_probability",
+            "actual_winner_probability",
+            "vote_share_mean",
+            "actual_vote_share",
+            "actual_winner",
+            "predicted_winner",
+            "race_winner_correct",
+            "absolute_vote_share_error",
+        ]
         if not comparison.is_empty():
-            for row in comparison.select(
-                [
-                    "race_id",
-                    "option_id",
-                    "winner_probability",
-                    "vote_share_mean",
-                    "actual_vote_share",
-                    "actual_winner",
-                    "predicted_winner",
-                    "absolute_vote_share_error",
-                ]
-            ).iter_rows(named=True):
+            present = [column for column in row_columns if column in comparison.columns]
+            for row in comparison.select(present).iter_rows(named=True):
                 rows += (
                     "<tr>"
-                    + "".join(f"<td>{html.escape(str(value))}</td>" for value in row.values())
+                    + "".join(
+                        f"<td>{html.escape(ResultComparator._format_cell(value))}</td>"
+                        for value in row.values()
+                    )
                     + "</tr>"
                 )
+        plot_figures = "".join(
+            '<figure><img src="'
+            f'{html.escape(entry["path"])}" width="800" alt="{html.escape(entry["title"])}">'
+            f"<figcaption>{html.escape(entry['title'])}</figcaption></figure>"
+            for entry in summary.get("plot_manifest", {}).get("comparison", [])
+        )
+        header_cells = "".join(
+            f"<th>{html.escape(column.replace('_', ' ').title())}</th>" for column in row_columns
+        )
         return f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Result Comparison</title></head>
@@ -287,14 +637,10 @@ class ResultComparator:
 <h2>Summary</h2>
 <pre>{html.escape(json.dumps(summary, indent=2, sort_keys=True))}</pre>
 <h2>Plots</h2>
-<figure><img src="plots/vote_share_forecast_vs_actual.png" width="800"
-alt="Forecast vote share versus actual vote share"></figure>
-<figure><img src="plots/winner_probability_vs_actual.png" width="800"
-alt="Winner probability versus actual outcome"></figure>
+{plot_figures}
 <h2>Rows</h2>
 <table>
-<thead><tr><th>Race</th><th>Option</th><th>Win Prob</th><th>Forecast Share</th>
-<th>Actual Share</th><th>Actual Winner</th><th>Predicted Winner</th><th>Abs Error</th></tr></thead>
+<thead><tr>{header_cells}</tr></thead>
 <tbody>{rows}</tbody>
 </table>
 </body>
@@ -323,11 +669,36 @@ alt="Winner probability versus actual outcome"></figure>
             )
             + "."
         )
+        actual_probability_rows = ResultComparator._markdown_records(
+            summary["actual_winner_probabilities"],
+            [
+                "race_id",
+                "actual_winner_party",
+                "actual_winner_probability",
+                "race_winner_correct",
+            ],
+        )
+        largest_miss_rows = ResultComparator._markdown_records(
+            summary["largest_misses"],
+            [
+                "race_id",
+                "option_id",
+                "absolute_vote_share_error",
+                "actual_winner",
+                "predicted_winner",
+            ],
+        )
+        state_accuracy = summary["state_accuracy"]
+        state_count = summary["state_accuracy_n"]
+        ec_accuracy = summary["ec_winner_accuracy"]
+        ec_scope = summary["electoral_college"]["scope"]
         return f"""# Forecast Comparison Narrative
 
 - Compared races: `{summary["race_count"]}`
 - Matched rows: `{summary["row_count"]}`
 - Winner accuracy: `{summary["winner_accuracy"]}`
+- Presidential state accuracy: `{state_accuracy}` over `{state_count}` state races
+- Electoral College winner accuracy: `{ec_accuracy}` ({ec_scope})
 - Mean absolute vote-share error: `{summary["mean_absolute_vote_share_error"]}`
 - Brier score: `{summary["brier_score"]}`
 - Upset count: `{summary["upset_count"]}`
@@ -337,4 +708,30 @@ alt="Winner probability versus actual outcome"></figure>
 Largest vote-share error: `{largest_error["race_id"]}` / `{largest_error["option_id"]}`.
 
 Absolute error: `{largest_error["absolute_vote_share_error"]}`.
+
+Actual-winner probabilities:
+
+{actual_probability_rows}
+
+Largest misses:
+
+{largest_miss_rows}
 """
+
+    @staticmethod
+    def _format_cell(value: Any) -> str:
+        if value is None:
+            return "n/a"
+        if isinstance(value, float):
+            return f"{value:.4f}"
+        return str(value)
+
+    @staticmethod
+    def _markdown_records(records: list[dict[str, Any]], columns: list[str]) -> str:
+        if not records:
+            return "- n/a"
+        lines = []
+        for record in records:
+            parts = [f"{column}={record.get(column)}" for column in columns]
+            lines.append("- " + "; ".join(parts))
+        return "\n".join(lines)
