@@ -81,21 +81,32 @@ class CycleEvaluationReport:
             return []
         plot_dir = output_dir / "plots"
         plot_dir.mkdir(parents=True, exist_ok=True)
+        chamber = self._chamber_label(frame)
+        outcome_label = self._outcome_label(frame)
+        race_label = self._race_unit_label(frame)
         plots: list[dict[str, str]] = []
         for path, title in [
             (
-                self._ec_probability_plot(frame, plot_dir),
-                "Electoral College winner probability by cycle",
+                self._ec_probability_plot(frame, plot_dir, chamber, outcome_label),
+                f"{chamber} {outcome_label.lower()} probability by cycle",
             ),
-            (self._accuracy_plot(frame, plot_dir), "State accuracy and Brier score by cycle"),
-            (self._error_plot(frame, plot_dir), "Vote-share error and upset count by cycle"),
+            (
+                self._accuracy_plot(frame, plot_dir, chamber, race_label),
+                f"{race_label} accuracy and Brier score by cycle",
+            ),
+            (
+                self._error_plot(frame, plot_dir, chamber),
+                "Vote-share error and upset count by cycle",
+            ),
         ]:
             if path is not None:
                 plots.append({"path": str(path.relative_to(output_dir)), "title": title})
         return plots
 
     @staticmethod
-    def _ec_probability_plot(frame: pl.DataFrame, plot_dir: Path) -> Path | None:
+    def _ec_probability_plot(
+        frame: pl.DataFrame, plot_dir: Path, chamber: str, outcome_label: str
+    ) -> Path | None:
         required = {"cycle", "forecast_ec_winner_party", "forecast_ec_win_probability"}
         if not required.issubset(set(frame.columns)):
             return None
@@ -112,7 +123,11 @@ class CycleEvaluationReport:
         )
         ax.set_ylim(0, 1)
         ax.set_ylabel("Probability")
-        ax.set_title("EC Winner Probability By Cycle", loc="left", fontweight="bold")
+        ax.set_title(
+            f"{chamber} {outcome_label} Probability By Cycle",
+            loc="left",
+            fontweight="bold",
+        )
         ax.grid(axis="y", alpha=0.25)
         for spine in ("top", "right"):
             ax.spines[spine].set_visible(False)
@@ -123,7 +138,9 @@ class CycleEvaluationReport:
         return path
 
     @staticmethod
-    def _accuracy_plot(frame: pl.DataFrame, plot_dir: Path) -> Path | None:
+    def _accuracy_plot(
+        frame: pl.DataFrame, plot_dir: Path, chamber: str, race_label: str
+    ) -> Path | None:
         required = {"cycle", "state_accuracy", "brier_score"}
         if not required.issubset(set(frame.columns)):
             return None
@@ -136,12 +153,16 @@ class CycleEvaluationReport:
             rows["state_accuracy"].to_list(),
             marker="o",
             color="#245b8f",
-            label="State accuracy",
+            label=f"{race_label} accuracy",
         )
         ax.plot(x, rows["brier_score"].to_list(), marker="s", color="#9c6f19", label="Brier score")
         ax.set_xticks(list(x), x_labels)
         ax.set_ylim(0, 1)
-        ax.set_title("Accuracy And Calibration By Cycle", loc="left", fontweight="bold")
+        ax.set_title(
+            f"{chamber} Accuracy And Calibration By Cycle",
+            loc="left",
+            fontweight="bold",
+        )
         ax.grid(axis="y", alpha=0.25)
         ax.legend(frameon=False)
         for spine in ("top", "right"):
@@ -153,7 +174,7 @@ class CycleEvaluationReport:
         return path
 
     @staticmethod
-    def _error_plot(frame: pl.DataFrame, plot_dir: Path) -> Path | None:
+    def _error_plot(frame: pl.DataFrame, plot_dir: Path, chamber: str) -> Path | None:
         required = {"cycle", "mean_absolute_vote_share_error", "upset_count"}
         if not required.issubset(set(frame.columns)):
             return None
@@ -167,7 +188,11 @@ class CycleEvaluationReport:
         ax2 = ax.twinx()
         ax2.plot(x, rows["upset_count"].to_list(), color="#c43b3b", marker="o", label="Upsets")
         ax2.set_ylabel("Upset count")
-        ax.set_title("Error And Upsets By Cycle", loc="left", fontweight="bold")
+        ax.set_title(
+            f"{chamber} Error And Upsets By Cycle",
+            loc="left",
+            fontweight="bold",
+        )
         ax.grid(axis="y", alpha=0.25)
         for axis in (ax, ax2):
             for spine in ("top", "right"):
@@ -352,6 +377,40 @@ class CycleEvaluationReport:
             "senate": "U.S. Senate",
             "house": "U.S. House",
         }.get(body, body.title())
+
+    @staticmethod
+    def _outcome_label(frame: pl.DataFrame) -> str:
+        """Probability label for the chamber's headline metric."""
+        if frame.is_empty() or "control_body" not in frame.columns:
+            return "Winner"
+        bodies = [
+            value for value in frame["control_body"].drop_nulls().unique().to_list() if value
+        ]
+        if not bodies:
+            return "Winner"
+        body = str(bodies[0])
+        return {
+            "president": "EC Winner",
+            "senate": "Majority",
+            "house": "Majority",
+        }.get(body, "Winner")
+
+    @staticmethod
+    def _race_unit_label(frame: pl.DataFrame) -> str:
+        """Per-race accuracy label that matches the scenario's geography unit."""
+        if frame.is_empty() or "control_body" not in frame.columns:
+            return "Race"
+        bodies = [
+            value for value in frame["control_body"].drop_nulls().unique().to_list() if value
+        ]
+        if not bodies:
+            return "Race"
+        body = str(bodies[0])
+        return {
+            "president": "State",
+            "senate": "Senate seat",
+            "house": "House district",
+        }.get(body, "Race")
 
     @staticmethod
     def _threshold_label(frame: pl.DataFrame) -> str:

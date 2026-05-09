@@ -890,6 +890,11 @@ class CuratedDataBuilder:
         self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
     ) -> pl.DataFrame:
         base = self._house_district_panel_base(frame, set(), parser_version, parser_args)
+        era_expr = (
+            pl.col("redistricting_era").cast(pl.Utf8)
+            if "redistricting_era" in base.columns
+            else pl.lit(None, dtype=pl.Utf8)
+        )
         return base.select(
             "race_id",
             "cycle",
@@ -903,6 +908,7 @@ class CuratedDataBuilder:
             pl.lit(1, dtype=pl.Int64).alias("seats"),
             pl.lit("house").alias("control_body"),
             pl.lit(None, dtype=pl.Float64).alias("measure_threshold"),
+            era_expr.alias("redistricting_era"),
         )
 
     def _house_district_panel_options(

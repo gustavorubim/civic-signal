@@ -142,6 +142,7 @@ class BacktestRunner:
         for target_cycle in target_cycles:
             train_catalog = base_catalog.filter(pl.col("cycle") < target_cycle)
             test_catalog = base_catalog.filter(pl.col("cycle") == target_cycle)
+            train_catalog = self._restrict_to_era(train_catalog, test_catalog)
             if train_catalog.is_empty() or test_catalog.is_empty():
                 continue
             offsets = self._as_of_offsets(backtest_config)
@@ -257,6 +258,28 @@ class BacktestRunner:
             (str(row["race_id"]), str(row["option_id"])): float(row["uncertainty"])
             for row in frame.iter_rows(named=True)
         }
+
+    @staticmethod
+    def _restrict_to_era(
+        train_catalog: pl.DataFrame, test_catalog: pl.DataFrame
+    ) -> pl.DataFrame:
+        """Drop training rows from a different redistricting era than the holdout cycle.
+
+        Non-house scenarios don't carry a `redistricting_era` column or have it null,
+        which is treated as compatible with any era.
+        """
+        if (
+            "redistricting_era" not in train_catalog.columns
+            or "redistricting_era" not in test_catalog.columns
+        ):
+            return train_catalog
+        eras = test_catalog["redistricting_era"].drop_nulls().unique().to_list()
+        if not eras:
+            return train_catalog
+        return train_catalog.filter(
+            pl.col("redistricting_era").is_null()
+            | pl.col("redistricting_era").is_in(eras)
+        )
 
     @staticmethod
     def _as_of_offsets(backtest_config: dict[str, Any]) -> list[int]:

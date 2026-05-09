@@ -38,6 +38,7 @@ class Scenario:
 
     @property
     def holdovers(self) -> dict[str, int]:
+        """Raw holdover seats per declared party (IND kept as a separate key)."""
         raw = self.payload.get("holdovers")
         if not isinstance(raw, dict):
             return {}
@@ -48,6 +49,29 @@ class Scenario:
             except (TypeError, ValueError):
                 continue
             result[str(key).upper()] = count
+        return result
+
+    @property
+    def caucus_with(self) -> dict[str, str]:
+        """Optional caucus mapping (e.g. IND -> DEM). Defaults to identity."""
+        raw = self.payload.get("caucus_with")
+        if not isinstance(raw, dict):
+            return {}
+        return {str(key).upper(): str(value).upper() for key, value in raw.items()}
+
+    @property
+    def holdover_caucus_seats(self) -> dict[str, int]:
+        """Holdover seats credited to each caucus party.
+
+        IND seats fold into their declared caucus partner (e.g. King and Sanders
+        caucus with DEM). Used for control / majority math; the raw `holdovers`
+        property still reports per-party counts as declared in the scenario.
+        """
+        caucus_map = self.caucus_with
+        result: dict[str, int] = {}
+        for party, seats in self.holdovers.items():
+            target = caucus_map.get(party, party)
+            result[target] = result.get(target, 0) + seats
         return result
 
     def filter_catalog(self, catalog: pl.DataFrame, include_cycle: bool = True) -> pl.DataFrame:

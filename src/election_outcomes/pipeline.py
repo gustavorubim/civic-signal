@@ -95,7 +95,7 @@ class ForecastPipeline:
         outputs = SimulationEngine(
             model_config,
             residual_covariance=residual_covariance,
-            holdovers=scenario_obj.holdovers if scenario_obj else None,
+            holdovers=scenario_obj.holdover_caucus_seats if scenario_obj else None,
         ).run(bundle, ensemble)
         race_forecasts = self._attach_lineage(outputs.race_forecasts, model_config, source_manifest)
         race_catalog = self._attach_model_hash(bundle.race_catalog, model_config)
@@ -548,10 +548,16 @@ class ForecastPipeline:
             "dem_majority_probability": dem_row.get("majority_probability"),
             "rep_majority_probability": rep_row.get("majority_probability"),
             "ec_winner_accuracy": ec_winner_accuracy,
-            "state_accuracy": comparison.get("state_accuracy")
-            or comparison.get("winner_accuracy"),
-            "state_accuracy_n": comparison.get("state_accuracy_n")
-            or comparison.get("race_count"),
+            "state_accuracy": (
+                comparison["state_accuracy"]
+                if comparison.get("state_accuracy") is not None
+                else comparison.get("winner_accuracy")
+            ),
+            "state_accuracy_n": (
+                comparison["state_accuracy_n"]
+                if comparison.get("state_accuracy_n") is not None
+                else comparison.get("race_count")
+            ),
             "brier_score": comparison.get("brier_score"),
             "mean_absolute_vote_share_error": comparison.get("mean_absolute_vote_share_error"),
             "upset_count": comparison.get("upset_count"),
@@ -574,15 +580,16 @@ class ForecastPipeline:
         race_outcomes = comparison.get("race_outcomes") or []
         if not race_outcomes:
             return None
+        caucus_map = scenario.caucus_with
         seats_by_party: dict[str, int] = {}
         for row in race_outcomes:
             party = row.get("actual_winner_party")
             if not party:
                 continue
-            seats_by_party[str(party).upper()] = seats_by_party.get(
-                str(party).upper(), 0
-            ) + int(row.get("seats") or 1)
-        for party, holdovers in scenario.holdovers.items():
+            party = str(party).upper()
+            caucus = caucus_map.get(party, party)
+            seats_by_party[caucus] = seats_by_party.get(caucus, 0) + int(row.get("seats") or 1)
+        for party, holdovers in scenario.holdover_caucus_seats.items():
             seats_by_party[party] = seats_by_party.get(party, 0) + int(holdovers)
         threshold = (
             int(control["control_threshold"][0])
