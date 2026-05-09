@@ -200,6 +200,8 @@ def test_forecast_run_writes_required_artifacts_and_rewards(tmp_path: Path) -> N
         "performance.json",
         "reproducibility_fingerprint.json",
         "plots",
+        "race_detail_index.json",
+        "races",
     }
 
     assert {path.name for path in out_dir.iterdir()} == required

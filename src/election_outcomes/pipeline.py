@@ -33,6 +33,7 @@ from election_outcomes.reports import (
     MethodologySnapshot,
     ModelCard,
     PlotGenerator,
+    RaceDetailRenderer,
     SilverStyleBenchmark,
     benchmark_to_json,
 )
@@ -148,6 +149,17 @@ class ForecastPipeline:
             poll_trajectory=poll_trajectory,
         )
         plot_generator.write_manifest(plot_manifest, out_dir)
+        race_detail_paths = RaceDetailRenderer().render_all(
+            artifact_dir=out_dir,
+            race_catalog=race_catalog,
+            race_forecasts=race_forecasts,
+            forecast_draws=outputs.draws,
+            poll_trajectory=poll_trajectory,
+        )
+        write_json(
+            {"races": race_detail_paths},
+            out_dir / "race_detail_index.json",
+        )
         stability_metrics = self._stability_metrics(
             backtest_artifacts.rolling_predictions,
             scenario_obj.family if scenario_obj else None,

@@ -369,10 +369,17 @@ class DiagnosticsReport:
             high = row.get("vote_share_p95")
             bar_width = 0 if probability is None else max(0, min(100, float(probability) * 100))
             party = html.escape(str(row.get("party") or ""))
+            race_id = str(row.get("race_id") or "")
+            escaped_id = html.escape(race_id)
+            race_link = (
+                f"<a class='race-link' href='races/{escaped_id}.html'>{escaped_id}</a>"
+                if race_id
+                else "&mdash;"
+            )
             rows.append(
                 "<tr>"
                 f"<td><strong>{html.escape(str(row.get('name') or row.get('option_id')))}</strong>"
-                f"<span>{html.escape(str(row.get('race_id')))} · {party}</span></td>"
+                f"<span>{race_link} · {party}</span></td>"
                 f"<td>{cls._pct(probability)}</td>"
                 f"<td>{cls._pct(share)}</td>"
                 f"<td>{cls._pct(low)} to {cls._pct(high)}</td>"
