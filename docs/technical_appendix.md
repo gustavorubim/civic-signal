@@ -121,23 +121,26 @@ sample_size, sponsor_class, methodology, option_id, pct
 Current estimator:
 
 ```text
-weighted_share(option) =
-  sum(weight_poll * poll_pct_option) / sum(weight_poll)
+latent_vote_share_t =
+  latent_vote_share_{t-1} + daily_random_walk_error
 
-weight_poll =
-  sample_size
-  * population_weight
-  * methodology_weight
-  * sponsor_weight
-  * exp_time_decay
+observed_poll_share_t =
+  latent_vote_share_t
+  + pollster_house_effect
+  + sampling_error
+  + nonsampling_error
 ```
 
-Poll rows can also receive configured pollster/option house-effect adjustments. The
-component reports a posterior-uncertainty proxy from binomial sampling variance,
-weighted poll dispersion, and a nonsampling-error floor. Win probability is computed as:
+The deterministic Kalman filter initializes each race/option from
+`previous_vote_share` when available, otherwise from 50%. Observation variance is based
+on binomial sampling variance, an effective sample size adjusted for population,
+methodology, and sponsor class, and a nonsampling-error floor. Pollster house effects
+are estimated with empirical-Bayes shrinkage; the implementation iterates once from an
+initial residual estimate to time-aware residuals against the Kalman trajectory. Win
+probability is computed as:
 
 ```text
-poll_win_probability = Phi((weighted_share - 0.5) / posterior_sigma)
+poll_win_probability = Phi((kalman_state_mean - 0.5) / posterior_sigma)
 ```
 
 This is still not the full frontier polling model. It is a deterministic approximation

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -117,9 +118,10 @@ def test_component_models_and_ensemble_respect_admission(tmp_path: Path) -> None
     ctx, _sync, bundle = build_bundle(tmp_path)
     active = ForecastPipeline._active_bundle(bundle, "2026-05-08")
     model_config = ctx.read_yaml("model.yaml")
+    polling_model = PollingModel(model_config, as_of="2026-05-08")
 
     estimates = [
-        PollingModel(model_config, as_of="2026-05-08").run(active),
+        polling_model.run(active),
         FundamentalsModel(model_config).fit(bundle).run(active),
         MarketModel(model_config).run(active),
         PublicSignalModel(trusted=False).run(active),
@@ -130,6 +132,24 @@ def test_component_models_and_ensemble_respect_admission(tmp_path: Path) -> None
     assert "MAYOR-SPRINGFIELD-2026" not in ensemble["race_id"].to_list()
     public = estimates[-1]
     assert public.filter(pl.col("race_id") == "US-SEN-AZ-2026")["admitted"].sum() == 0
+    trajectory = polling_model.trajectory(active)
+    assert "initial_vote_share_prior" in trajectory.columns
+    prior_rows = trajectory.join(
+        active.options.select(["race_id", "option_id", "previous_vote_share"]),
+        on=["race_id", "option_id"],
+        how="inner",
+    ).filter(pl.col("previous_vote_share").is_not_null())
+    assert not prior_rows.is_empty()
+    assert (
+        prior_rows.select(
+            (pl.col("initial_vote_share_prior") - pl.col("previous_vote_share")).abs().max()
+        ).item()
+        < 1e-12
+    )
+    copied = replace(active, polls=active.polls.clone(), options=active.options.clone())
+    assert polling_model._bundle_fingerprint(copied) == polling_model._bundle_fingerprint(active)
+    changed = replace(active, polls=active.polls.with_columns((pl.col("pct") + 0.01).alias("pct")))
+    assert polling_model._bundle_fingerprint(changed) != polling_model._bundle_fingerprint(active)
 
 
 def test_simulation_outputs_forecasts_control_and_ecosystem(tmp_path: Path) -> None:
@@ -326,7 +346,13 @@ def test_cycle_eval_writes_consolidated_dashboard(tmp_path: Path) -> None:
 
     assert payload["cycle_count"] == 2
     assert summary.height == 2
-    assert {"forecast_ec_winner_party", "state_accuracy", "brier_score"}.issubset(summary.columns)
+    assert {
+        "actual_ec_winner_party",
+        "forecast_ec_winner_party",
+        "state_accuracy",
+        "state_topline_ec_winner_party",
+        "brier_score",
+    }.issubset(summary.columns)
     assert payload["aggregate"]["ec_winner_accuracy"] in {0.0, 0.5, 1.0}
     assert (out_dir / "cycle_summary.json").exists()
     assert (out_dir / "cycle_eval.html").read_text(encoding="utf-8").startswith("<!doctype html>")
@@ -343,6 +369,30 @@ def test_cycle_eval_writes_consolidated_dashboard(tmp_path: Path) -> None:
         / "actuals"
         / "result_comparison.html"
     ).exists()
+    reuse_payload = ForecastPipeline(ctx).run_cycle_eval(
+        cycles=[2020, 2024],
+        as_of_mm_dd="10-05",
+        run_id="cycle-smoke-reuse",
+        reuse_existing=True,
+    )
+    assert reuse_payload["aggregate"] == payload["aggregate"]
+
+
+def test_cycle_eval_preflights_dates_and_scenarios(tmp_path: Path) -> None:
+    pipeline = ForecastPipeline(context(tmp_path))
+    try:
+        pipeline.run_cycle_eval(cycles=[2023], as_of_mm_dd="02-29", run_id="bad-date")
+    except ValueError as exc:
+        assert "2023-02-29 is not a valid date" in str(exc)
+    else:  # pragma: no cover - assertion clarity
+        raise AssertionError("invalid per-cycle date should fail before forecasting")
+
+    try:
+        pipeline.run_cycle_eval(cycles=[2026], as_of_mm_dd="10-05", run_id="bad-scenario")
+    except ValueError as exc:
+        assert "unknown scenario 'president_2026_state'" in str(exc)
+    else:  # pragma: no cover - assertion clarity
+        raise AssertionError("unknown scenario should fail before forecasting")
 
 
 def test_presidential_scenario_writes_ec_plot_and_latest_backtest_artifacts(

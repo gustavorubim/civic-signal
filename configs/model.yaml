@@ -24,6 +24,7 @@ baseline:
 polling:
   half_life_days: 21
   min_nonsampling_error: 0.035
+  house_effect_iterations: 2
   pollster_house_effects: {}
 uncertainty:
   tier_a_sigma: 0.035

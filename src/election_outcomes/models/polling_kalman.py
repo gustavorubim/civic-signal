@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections import defaultdict
 from dataclasses import dataclass
@@ -53,6 +55,7 @@ class KalmanPollingModel:
         "latent_vote_share": pl.Float64,
         "latent_variance": pl.Float64,
         "latent_sigma": pl.Float64,
+        "initial_vote_share_prior": pl.Float64,
         "marginal_win_probability": pl.Float64,
         "poll_count": pl.Int64,
         "effective_sample_size": pl.Float64,
@@ -74,13 +77,14 @@ class KalmanPollingModel:
         self.initial_state_variance = float(polling_config.get("initial_state_variance", 0.08**2))
         self.default_sample_size = float(polling_config.get("default_sample_size", 600))
         self.house_effect_prior_polls = float(polling_config.get("house_effect_prior_polls", 5))
+        self.house_effect_iterations = max(int(polling_config.get("house_effect_iterations", 2)), 1)
         self.max_house_effect = float(polling_config.get("max_house_effect", 0.08))
         self.pollster_house_effects = {
             str(key): float(value)
             for key, value in dict(polling_config.get("pollster_house_effects", {})).items()
         }
         self.as_of = date.fromisoformat(as_of) if as_of else None
-        self._cache_key: tuple[int, date | None] | None = None
+        self._cache_key: tuple[str, date | None] | None = None
         self._cached_estimates: pl.DataFrame | None = None
         self._cached_trajectory: pl.DataFrame | None = None
         self._cached_house_effects: dict[tuple[str, str | None], HouseEffectEstimate] = {}
@@ -101,7 +105,7 @@ class KalmanPollingModel:
 
     def _ensure_fit(self, bundle: FeatureBundle) -> tuple[pl.DataFrame, pl.DataFrame]:
         as_of = self._resolve_as_of(bundle.polls)
-        cache_key = (id(bundle), as_of)
+        cache_key = (self._bundle_fingerprint(bundle), as_of)
         if (
             self._cache_key == cache_key
             and self._cached_estimates is not None
@@ -130,7 +134,8 @@ class KalmanPollingModel:
         if polls.is_empty():
             return normalize_rows([]), self._empty_trajectory(), {}
 
-        house_effects = self._estimate_house_effects(polls)
+        option_priors = self._option_priors(bundle.options)
+        house_effects = self._estimate_house_effects(polls, option_priors)
         estimate_rows: list[dict[str, object]] = []
         trajectory_rows: list[dict[str, object]] = []
 
@@ -153,6 +158,7 @@ class KalmanPollingModel:
                 str(option_id),
                 observations,
                 as_of,
+                option_priors.get((str(race_id), str(option_id)), 0.5),
                 trajectory_rows,
             )
             if final_state is None:
@@ -185,6 +191,7 @@ class KalmanPollingModel:
         option_id: str,
         observations: list[PollObservation],
         as_of: date,
+        initial_mean: float,
         trajectory_rows: list[dict[str, object]],
     ) -> tuple[float, float] | None:
         observations_by_date: dict[date, list[PollObservation]] = defaultdict(list)
@@ -195,7 +202,7 @@ class KalmanPollingModel:
         if start_date > as_of:
             return None
 
-        state_mean = 0.5
+        state_mean = clamp(initial_mean, 0.001, 0.999)
         state_variance = max(self.initial_state_variance, 1e-8)
         trajectory_date = start_date
         previous_date = start_date
@@ -220,6 +227,7 @@ class KalmanPollingModel:
                     as_of,
                     state_mean,
                     state_variance,
+                    initial_mean,
                     todays_observations,
                 )
             )
@@ -251,6 +259,7 @@ class KalmanPollingModel:
         as_of: date,
         state_mean: float,
         state_variance: float,
+        initial_mean: float,
         observations: list[PollObservation],
     ) -> dict[str, object]:
         poll_count = len(observations)
@@ -264,6 +273,7 @@ class KalmanPollingModel:
             "latent_vote_share": state_mean,
             "latent_variance": state_variance,
             "latent_sigma": math.sqrt(max(state_variance, 0.0)),
+            "initial_vote_share_prior": initial_mean,
             "marginal_win_probability": normal_cdf((state_mean - 0.5) / uncertainty),
             "poll_count": poll_count,
             "effective_sample_size": self._mean_or_zero(
@@ -316,6 +326,16 @@ class KalmanPollingModel:
         )
 
     def _estimate_house_effects(
+        self,
+        polls: pl.DataFrame,
+        option_priors: dict[tuple[str, str], float],
+    ) -> dict[tuple[str, str | None], HouseEffectEstimate]:
+        estimates = self._static_house_effects(polls)
+        for _iteration in range(self.house_effect_iterations - 1):
+            estimates = self._trajectory_house_effects(polls, option_priors, estimates)
+        return estimates
+
+    def _static_house_effects(
         self, polls: pl.DataFrame
     ) -> dict[tuple[str, str | None], HouseEffectEstimate]:
         rows = list(polls.iter_rows(named=True))
@@ -350,6 +370,87 @@ class KalmanPollingModel:
             residual_groups[(pollster, option_id)].append((residual, weight))
             residual_groups[(pollster, None)].append((residual, weight))
 
+        estimates: dict[tuple[str, str | None], HouseEffectEstimate] = {}
+        for (pollster, option_id), residuals in residual_groups.items():
+            weight_total = sum(weight for _residual, weight in residuals)
+            if weight_total <= 0:
+                continue
+            raw_effect = sum(residual * weight for residual, weight in residuals) / weight_total
+            prior_effect = self._configured_house_effect(pollster, option_id)
+            poll_count = len(residuals)
+            shrinkage = poll_count / (poll_count + max(self.house_effect_prior_polls, 0.0))
+            effect = prior_effect + shrinkage * (raw_effect - prior_effect)
+            estimates[(pollster, option_id)] = HouseEffectEstimate(
+                pollster=pollster,
+                option_id=option_id,
+                effect=clamp(effect, -self.max_house_effect, self.max_house_effect),
+                raw_effect=raw_effect,
+                prior_effect=prior_effect,
+                shrinkage=shrinkage,
+                poll_count=poll_count,
+            )
+        return estimates
+
+    def _trajectory_house_effects(
+        self,
+        polls: pl.DataFrame,
+        option_priors: dict[tuple[str, str], float],
+        current: dict[tuple[str, str | None], HouseEffectEstimate],
+    ) -> dict[tuple[str, str | None], HouseEffectEstimate]:
+        residual_groups: dict[tuple[str, str | None], list[tuple[float, float]]] = defaultdict(list)
+        sort_columns = [
+            column
+            for column in ["race_id", "option_id", "_poll_end_date", "pollster", "poll_id"]
+            if column in polls.columns
+        ]
+        sorted_polls = polls.sort(sort_columns) if sort_columns else polls
+        for key, group in sorted_polls.group_by(["race_id", "option_id"], maintain_order=True):
+            race_id, option_id = str(key[0]), str(key[1])
+            observations = [self._observation(row, current) for row in group.iter_rows(named=True)]
+            observations = [observation for observation in observations if observation is not None]
+            if not observations:
+                continue
+            state_by_date = self._filtered_states_by_date(
+                observations,
+                option_priors.get((race_id, option_id), 0.5),
+            )
+            for observation in observations:
+                reference_share = state_by_date.get(observation.end_date)
+                if reference_share is None:
+                    continue
+                residual = observation.observed_share - reference_share
+                weight = 1.0 / max(observation.observation_variance, 1e-10)
+                residual_groups[(observation.pollster, option_id)].append((residual, weight))
+                residual_groups[(observation.pollster, None)].append((residual, weight))
+        return self._shrink_house_effect_groups(residual_groups)
+
+    def _filtered_states_by_date(
+        self, observations: list[PollObservation], initial_mean: float
+    ) -> dict[date, float]:
+        observations_by_date: dict[date, list[PollObservation]] = defaultdict(list)
+        for observation in sorted(observations, key=lambda item: (item.end_date, item.poll_id)):
+            observations_by_date[observation.end_date].append(observation)
+        state_mean = clamp(initial_mean, 0.001, 0.999)
+        state_variance = max(self.initial_state_variance, 1e-8)
+        previous_date = min(observations_by_date)
+        state_by_date: dict[date, float] = {}
+        for observation_date in sorted(observations_by_date):
+            elapsed_days = max((observation_date - previous_date).days, 0)
+            predicted_variance = state_variance + self.daily_process_variance * elapsed_days
+            state_mean, state_variance = self._kalman_update(
+                state_mean,
+                predicted_variance,
+                observations_by_date[observation_date],
+            )
+            state_mean = clamp(state_mean, 0.001, 0.999)
+            state_variance = max(state_variance, 1e-10)
+            state_by_date[observation_date] = state_mean
+            previous_date = observation_date
+        return state_by_date
+
+    def _shrink_house_effect_groups(
+        self, residual_groups: dict[tuple[str, str | None], list[tuple[float, float]]]
+    ) -> dict[tuple[str, str | None], HouseEffectEstimate]:
         estimates: dict[tuple[str, str | None], HouseEffectEstimate] = {}
         for (pollster, option_id), residuals in residual_groups.items():
             weight_total = sum(weight for _residual, weight in residuals)
@@ -423,6 +524,50 @@ class KalmanPollingModel:
             return None
         max_value = polls.select(self._date_expr("end_date").max()).item()
         return self._to_date(max_value)
+
+    @staticmethod
+    def _option_priors(options: pl.DataFrame) -> dict[tuple[str, str], float]:
+        if options.is_empty() or not {"race_id", "option_id", "previous_vote_share"}.issubset(
+            set(options.columns)
+        ):
+            return {}
+        priors: dict[tuple[str, str], float] = {}
+        for row in options.select(["race_id", "option_id", "previous_vote_share"]).iter_rows(
+            named=True
+        ):
+            value = row.get("previous_vote_share")
+            if value is None:
+                continue
+            priors[(str(row["race_id"]), str(row["option_id"]))] = clamp(float(value), 0.001, 0.999)
+        return priors
+
+    def _bundle_fingerprint(self, bundle: FeatureBundle) -> str:
+        payload = {
+            "polls": self._frame_fingerprint(bundle.polls),
+            "options": self._frame_fingerprint(bundle.options),
+            "settings": {
+                "daily_process_variance": self.daily_process_variance,
+                "default_sample_size": self.default_sample_size,
+                "half_life_days": self.half_life_days,
+                "house_effect_iterations": self.house_effect_iterations,
+                "house_effect_prior_polls": self.house_effect_prior_polls,
+                "initial_state_variance": self.initial_state_variance,
+                "max_house_effect": self.max_house_effect,
+                "min_nonsampling_error": self.min_nonsampling_error,
+                "pollster_house_effects": self.pollster_house_effects,
+            },
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+
+    @staticmethod
+    def _frame_fingerprint(frame: pl.DataFrame) -> str:
+        if frame.is_empty():
+            return "empty"
+        ordered = frame.select(sorted(frame.columns))
+        if ordered.columns:
+            ordered = ordered.sort(ordered.columns)
+        payload = json.dumps(ordered.to_dicts(), sort_keys=True, default=str)
+        return hashlib.sha256(payload.encode()).hexdigest()
 
     @staticmethod
     def _date_expr(column: str) -> pl.Expr:

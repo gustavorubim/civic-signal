@@ -167,8 +167,10 @@ Canonical latent targets:
 
 Component models:
 
-- Polling model: sample-size inverse-variance style polling estimates with methodology,
-  population, sponsor, time-decay, house-effect hooks, and posterior uncertainty proxy.
+- Polling model: deterministic Kalman/state-space polling estimates initialized from
+  previous vote share when available, with sample-size observation variance,
+  methodology/population/sponsor effective-sample adjustments, iterative empirical-Bayes
+  pollster house-effect shrinkage, and posterior uncertainty proxy.
 - Fundamentals model: historical vote share, partisan lean, incumbency, finance, economy,
   demographics, turnout history, and election type through a standardized ridge fit when
   enough prior-cycle rows exist, otherwise explicit defaults.
@@ -292,9 +294,14 @@ artifacts/cycle_evals/<run_id>/
   plots/
 ```
 
-The summary must report Electoral College winner probability, EV p10/p50/p90, EC winner
-accuracy, state accuracy, Brier score, vote-share MAE, upset count, missed states, and
-links to each cycle's diagnostics and comparison report.
+The summary must report simulated/control Electoral College winner probability, EV
+p10/p50/p90, simulated/control EC winner accuracy, deterministic state-topline EC winner
+as an audit field, state accuracy, Brier score, vote-share MAE, upset count, missed
+states, and links to each cycle's diagnostics and comparison report.
+
+Cycle evaluation must validate all requested scenario keys and cycle-specific dates
+before starting any forecast. It may support explicit artifact reuse, but reuse must be
+operator-selected rather than silent.
 
 ## API Credentials
 

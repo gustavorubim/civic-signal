@@ -213,6 +213,10 @@ def results_cycle_eval(
     forecast_run_prefix: str = typer.Option("eval", help="Prefix for generated forecast run ids."),
     comparison_id: str = typer.Option("actuals", help="Comparison id inside each forecast run."),
     office_type: str = typer.Option("president", help="Office type passed to results compare."),
+    reuse_existing: bool = typer.Option(
+        False,
+        help="Reuse complete forecast/comparison artifacts for matching generated run ids.",
+    ),
     root: Path | None = typer.Option(None, help="Project root."),
     sources_config: str = typer.Option("sources.yaml", help="Source registry config file."),
     data_dir: Path | None = typer.Option(None, help="Data directory override."),
@@ -233,6 +237,7 @@ def results_cycle_eval(
         forecast_run_prefix=forecast_run_prefix,
         comparison_id=comparison_id,
         office_type=office_type,
+        reuse_existing=reuse_existing,
     )
     aggregate = payload["aggregate"]
     console.print(

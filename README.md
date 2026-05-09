@@ -460,6 +460,12 @@ artifacts/cycle-eval/cycle_evals/oct5-presidential-cycle-eval/
   plots/
 ```
 
+The command validates every requested `president_<cycle>_state` scenario and every
+cycle-specific date before running any forecast. Add `--reuse-existing` when you want to
+reuse already-complete generated forecast/comparison artifacts for the same run ids. The
+cycle dashboard reports simulated/control Electoral College winner accuracy, while also
+retaining the deterministic state-topline EC winner from `results compare` for audit.
+
 ## Performance Run
 
 Binary two-option race simulation uses a Numba parallel kernel when available, with a
@@ -650,9 +656,10 @@ erDiagram
 ```mermaid
 classDiagram
     class PollingModel {
-      +weighted polling estimate
-      +sample-size weighting
-      +time decay and uncertainty
+      +Kalman state-space estimate
+      +previous-share prior initialization
+      +iterative house-effect shrinkage
+      +content fingerprint cache
     }
     class FundamentalsModel {
       +partisan lean

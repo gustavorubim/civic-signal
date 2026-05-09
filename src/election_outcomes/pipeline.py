@@ -42,7 +42,7 @@ from election_outcomes.scoring import (
     ResultComparator,
     RewardEvaluator,
 )
-from election_outcomes.storage.io import write_json, write_parquet, write_text
+from election_outcomes.storage.io import read_json, write_json, write_parquet, write_text
 
 
 class ForecastPipeline:
@@ -264,24 +264,29 @@ class ForecastPipeline:
         forecast_run_prefix: str = "eval",
         comparison_id: str = "actuals",
         office_type: str = "president",
+        reuse_existing: bool = False,
     ) -> dict[str, Any]:
         run_id = run_id or datetime.now(UTC).strftime("cycle-eval-%Y%m%dT%H%M%SZ")
-        self._validate_as_of_mm_dd(as_of_mm_dd)
+        plan = self._cycle_eval_plan(cycles, as_of_mm_dd, scenario_template)
         output_dir = self.context.artifacts_dir / "cycle_evals" / run_id
         rows: list[dict[str, Any]] = []
-        for cycle in cycles:
-            scenario = scenario_template.format(cycle=cycle)
-            as_of = f"{cycle}-{as_of_mm_dd}"
+        for item in plan:
+            cycle = int(item["cycle"])
+            scenario = str(item["scenario"])
+            as_of = str(item["as_of"])
             as_of_slug = as_of_mm_dd.replace("-", "")
             forecast_run_id = f"{forecast_run_prefix}-{cycle}-{as_of_slug}"
-            forecast_run_dir = self.run_forecast(
-                as_of=as_of, run_id=forecast_run_id, scenario=scenario
-            )
-            comparison = self.compare_results(
+            forecast_run_dir = self.context.artifacts_dir / "runs" / forecast_run_id
+            if not reuse_existing or not self._forecast_run_complete(forecast_run_dir):
+                forecast_run_dir = self.run_forecast(
+                    as_of=as_of, run_id=forecast_run_id, scenario=scenario
+                )
+            comparison = self._cycle_eval_comparison(
                 forecast_run_id=forecast_run_id,
                 comparison_id=comparison_id,
                 cycle=cycle,
                 office_type=office_type,
+                reuse_existing=reuse_existing,
             )
             rows.append(
                 self._cycle_eval_row(
@@ -390,13 +395,73 @@ class ForecastPipeline:
         path = self.context.curated_dir / f"{name}.parquet"
         return pl.read_parquet(path) if path.exists() else pl.DataFrame()
 
-    @staticmethod
-    def _validate_as_of_mm_dd(as_of_mm_dd: str) -> None:
+    def _cycle_eval_plan(
+        self, cycles: list[int], as_of_mm_dd: str, scenario_template: str
+    ) -> list[dict[str, Any]]:
+        if not cycles:
+            raise ValueError("cycles must include at least one cycle")
         parts = as_of_mm_dd.split("-")
         if len(parts) != 2:
             raise ValueError("as_of_mm_dd must use MM-DD format")
-        month, day = (int(part) for part in parts)
-        date(2024, month, day)
+        registry = ScenarioRegistry.from_context(self.context)
+        plan: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for cycle in cycles:
+            try:
+                as_of = date.fromisoformat(f"{cycle}-{as_of_mm_dd}")
+            except ValueError:
+                errors.append(f"{cycle}-{as_of_mm_dd} is not a valid date")
+                continue
+            try:
+                scenario = scenario_template.format(cycle=cycle)
+            except Exception as exc:  # pragma: no cover - defensive formatting detail
+                errors.append(f"scenario_template failed for cycle {cycle}: {exc}")
+                continue
+            try:
+                registry.get(scenario)
+            except ValueError:
+                errors.append(f"unknown scenario {scenario!r} for cycle {cycle}")
+                continue
+            plan.append({"cycle": cycle, "scenario": scenario, "as_of": as_of.isoformat()})
+        if errors:
+            raise ValueError("Invalid cycle evaluation request: " + "; ".join(errors))
+        return plan
+
+    @staticmethod
+    def _forecast_run_complete(forecast_run_dir: Path) -> bool:
+        required = [
+            "control_forecasts.parquet",
+            "diagnostics.html",
+            "race_catalog.parquet",
+            "race_forecasts.parquet",
+            "reproducibility_fingerprint.json",
+        ]
+        return forecast_run_dir.exists() and all(
+            (forecast_run_dir / name).exists() for name in required
+        )
+
+    def _cycle_eval_comparison(
+        self,
+        forecast_run_id: str,
+        comparison_id: str,
+        cycle: int,
+        office_type: str,
+        reuse_existing: bool,
+    ) -> dict[str, Any]:
+        comparison_dir = (
+            self.context.artifacts_dir / "runs" / forecast_run_id / "comparisons" / comparison_id
+        )
+        summary_path = comparison_dir / "result_comparison_summary.json"
+        if reuse_existing and summary_path.exists():
+            payload = read_json(summary_path)
+            payload["output_dir"] = str(comparison_dir)
+            return payload
+        return self.compare_results(
+            forecast_run_id=forecast_run_id,
+            comparison_id=comparison_id,
+            cycle=cycle,
+            office_type=office_type,
+        )
 
     @staticmethod
     def _cycle_eval_row(
@@ -419,17 +484,28 @@ class ForecastPipeline:
             for row in actual_winner_probabilities
             if not bool(row.get("race_winner_correct"))
         ]
+        electoral_college = comparison.get("electoral_college") or {}
+        actual_ec_winner = electoral_college.get("actual_winner_party")
+        forecast_ec_winner = winner.get("party")
+        ec_winner_accuracy = (
+            float(forecast_ec_winner == actual_ec_winner)
+            if forecast_ec_winner is not None and actual_ec_winner is not None
+            else None
+        )
         comparison_dir = Path(str(comparison["output_dir"]))
         return {
             "cycle": cycle,
             "as_of": as_of,
             "forecast_run_id": forecast_run_id,
             "forecast_ec_winner_party": winner.get("party"),
+            "actual_ec_winner_party": actual_ec_winner,
+            "state_topline_ec_winner_party": electoral_college.get("predicted_winner_party"),
+            "state_topline_ec_winner_accuracy": comparison.get("ec_winner_accuracy"),
             "forecast_ec_win_probability": winner.get("control_probability"),
             "forecast_ec_p10": winner.get("seat_count_p10"),
             "forecast_ec_p50": winner.get("seat_count_p50"),
             "forecast_ec_p90": winner.get("seat_count_p90"),
-            "ec_winner_accuracy": comparison.get("ec_winner_accuracy"),
+            "ec_winner_accuracy": ec_winner_accuracy,
             "state_accuracy": comparison.get("state_accuracy"),
             "state_accuracy_n": comparison.get("state_accuracy_n"),
             "brier_score": comparison.get("brier_score"),
