@@ -295,6 +295,68 @@ uv run python scripts/generate_senate_panel.py
 uv run python scripts/generate_house_panel.py
 ```
 
+## 2026 Midterm Forecast
+
+The 2026 Senate (Class II rotation) and 2026 House midterm have forecast-only entries
+in both panels — fundamentals and polling rows are populated, results columns are
+deliberately empty until the election happens.
+
+### Senate 2026
+
+```bash
+uv run election-outcomes forecast run \
+  --as-of 2026-11-02 \
+  --run-id senate-2026-midterm \
+  --scenario senate_2026_state \
+  --sources-config sources_senate.yaml \
+  --data-dir data/senate \
+  --artifacts-dir artifacts/senate-2026
+```
+
+### House 2026
+
+```bash
+uv run election-outcomes forecast run \
+  --as-of 2026-11-02 \
+  --run-id house-2026-midterm \
+  --scenario house_2026_district \
+  --sources-config sources_house.yaml \
+  --data-dir data/house \
+  --artifacts-dir artifacts/house-2026
+```
+
+### Inspect The Midterm Outputs
+
+```bash
+open artifacts/senate-2026/runs/senate-2026-midterm/diagnostics.html
+open artifacts/house-2026/runs/house-2026-midterm/diagnostics.html
+
+# Majority probability summary
+uv run python -c "
+import polars as pl
+for chamber, path in [
+    ('SENATE', 'artifacts/senate-2026/runs/senate-2026-midterm/control_forecasts.parquet'),
+    ('HOUSE',  'artifacts/house-2026/runs/house-2026-midterm/control_forecasts.parquet'),
+]:
+    print(chamber)
+    print(pl.read_parquet(path).select([
+        'party','control_threshold','holdover_seats','modeled_seats',
+        'seat_count_mean','seat_count_p10','seat_count_p90',
+        'majority_probability','seats_to_majority_mean',
+    ]))
+"
+```
+
+### Forecast-Only Cycle Caveats
+
+- `compare_results` against 2026 returns empty (no actuals yet). R5/R6/R8 still gate
+  on the rolling-origin backtest of 2014–2024.
+- The 2026 environment seed (D+3.0 for Senate, D+4.0 for House) is a midterm
+  out-party assumption baked into `scripts/generate_*_panel.py`. Replace with real
+  poll-aggregate values via `sources_live.yaml` when 538 senate/house adapters land.
+- House 2026 inherits the `2022_plus` redistricting era, so rolling-origin training
+  uses 2022 + 2024 boundaries.
+
 ## What To Inspect
 
 Important forecast artifacts:
