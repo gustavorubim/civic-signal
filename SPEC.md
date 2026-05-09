@@ -24,7 +24,8 @@ Every `forecast run` must create `artifacts/runs/<run_id>/` with:
 - `control_forecasts.parquet`: seat/control probabilities, seat distributions, and
   tipping-point races.
 - `ecosystem_forecasts.parquet`: turnout, demographic-composition support, ballot-measure
-  support, recount risk, and certification-risk probabilities.
+  support, and close-margin administrative-risk fields that are withheld unless explicitly
+  enabled as experimental output.
 - `source_manifest.parquet`: source ids, URLs/paths, retrieval timestamps, content hashes,
   parser versions, license/terms notes, status, and downstream usage.
 - `diagnostics.html`: top-line summary, paired Electoral College distribution and
@@ -53,8 +54,9 @@ Forecasts must distinguish:
   primaries, runoffs, and ranked-choice races where data permits.
 - Ballot measures: yes/no vote-share and pass probability.
 - Control outcomes: seat-count and governing-control distributions.
-- Ecosystem outcomes: turnout, demographic turnout support, recount risk, and
-  certification-delay risk.
+- Ecosystem outcomes: turnout and demographic turnout support. Recount and
+  certification-delay proxies stay withheld unless the experimental close-margin proxy is
+  explicitly enabled or replaced by a calibrated administrative-risk model.
 
 ## Verifiable Rewards
 
@@ -69,7 +71,8 @@ Use vector rewards so the system cannot hide weak behavior behind one aggregate 
 - `R3_sync_integrity`: incremental sync fetches new/changed sources only, dedupes records,
   and records failures explicitly.
 - `R4_calibration`: backtests report Brier score, log score, calibration line, expected
-  calibration error, and interval coverage.
+  calibration error, interval coverage, learned ensemble weights, and the probability
+  calibration transform applied to published marginal race probabilities.
 - `R5_baseline_competition`: trusted ensemble beats or matches declared baselines on a
   rolling-origin holdout with enough historical rows; otherwise it is labeled
   experimental.
@@ -147,11 +150,11 @@ Important config contracts:
   baselines.
 
 Current implementation note: the repo runs a rolling-origin component refit harness and
-writes `rolling_predictions.parquet`, `component_admission.json`, and
-`residual_covariance.parquet`. The rolling-origin harness evaluates multiple pre-election
-as-of cuts when data exists (`T-90/T-60/T-30/T-7/T-1` by default). It must not certify
-`R5`, `R6`, or `R8` until the historical race store reaches the configured sample
-threshold.
+writes `rolling_predictions.parquet`, `component_admission.json`, `ensemble_learning.json`,
+`probability_calibration.json`, and `residual_covariance.parquet`. The rolling-origin
+harness evaluates multiple pre-election as-of cuts when data exists
+(`T-90/T-60/T-30/T-7/T-1` by default). It must not certify `R5`, `R6`, or `R8` until the
+historical race store reaches the configured sample threshold.
 
 ## Modeling Specification
 
@@ -177,12 +180,14 @@ Component models:
 - Market model: public read-only market probabilities adjusted for liquidity and spread,
   then mapped to vote-share proxy through a configurable normal inverse-CDF scale.
 - Public-signal model: news/pageview/official-release features, experimental by default.
-- Ensemble: weighted blend of trusted components with vote-share normalization by race
-  and unnormalized marginal win-probability reporting.
-- Simulation: structured-factor election-error draws with national, residual-covariance,
-  region, and office factors plus heavy-tailed local error, race-level winners, vote
-  shares, turnout, recount risk, certification-risk proxy, and thresholded control
-  outcomes.
+- Ensemble: weighted blend of trusted components with vote-share normalization by race,
+  component-disagreement tracking, rolling-origin simplex weight learning when the
+  backtest is trustworthy, and calibrated marginal winner probabilities.
+- Simulation: structured-factor election-error draws. When a residual covariance artifact
+  is available, that covariance replaces the configured national/region/office layers;
+  otherwise the engine falls back to national, region, and office factors plus
+  heavy-tailed local error. Race-level winners, vote shares, turnout, and thresholded
+  control outcomes are always emitted.
 - Performance: two-option race draw generation uses a Numba parallel kernel with a Python
   fallback, while table transforms should stay vectorized through Polars/DuckDB.
 
@@ -190,7 +195,8 @@ Planned statistical upgrade path:
 
 - Replace deterministic polling component with a hierarchical Bayesian model using
   `cmdstanpy` or NumPyro behind the same component/artifact schema.
-- Calibrate component weights with rolling-origin backtests rather than static config.
+- Replace the current rolling-origin simplex/Platt calibration layer with a richer
+  hierarchical calibration model once the historical panel is deep enough.
 - Expand the current residual-covariance shrinkage model with a deeper historical
   state/down-ballot residual panel; single-observation covariance must be withheld rather
   than invented.
@@ -209,7 +215,8 @@ Every forecast run must emit calibration and projection visuals:
 - Winner-probability bars.
 - Vote-share interval projections.
 - Seat/control projections.
-- Turnout/recount-risk projections.
+- Turnout/recount-risk projections when calibrated or explicitly enabled proxy fields are
+  available.
 - Forecast coverage by tier.
 - Electoral College distribution and representative simulation swarm for presidential
   scenarios. These two top-line presidential views should render together in the lead

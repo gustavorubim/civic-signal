@@ -31,6 +31,8 @@ Final forecast rows must additionally carry:
 - tier and tier reason
 - data-quality flags
 - component contribution JSON
+- raw and calibrated winner-probability fields when rolling-origin calibration is
+  available
 - uncertainty explanation
 
 ## Tier Contract
@@ -45,8 +47,10 @@ $$
 ## Simulation Contract
 
 Final forecast artifacts are generated from correlated simulation draws, not from
-component point estimates alone. Component marginal probabilities are diagnostics;
-published race probabilities are draw frequencies.
+component point estimates alone. Component marginal probabilities are diagnostics.
+Published race probabilities are draw frequencies transformed by the rolling-origin
+calibration artifact when that artifact is fitted; `raw_winner_probability` keeps the
+pre-calibration draw frequency.
 
 ## Control Contract
 

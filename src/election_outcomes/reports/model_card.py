@@ -53,9 +53,12 @@ class ModelCard:
                 f"pollster house-effect shrinkage; learned_effects={len(house_effect_rows)}"
             ),
             "fundamentals": fundamentals_status,
-            "markets": "configured public-market inversion; calibration artifact planned",
+            "markets": (
+                "configured public-market inversion; ensemble calibration applied downstream"
+            ),
             "public_signals": "experimental unless admission artifact proves value",
             "covariance": covariance_status,
+            "probability_calibration": model_config.get("probability_calibration", {}),
         }
         return f"""# Model Card
 
@@ -79,6 +82,12 @@ class ModelCard:
 
 ```json
 {json.dumps(model_config.get("component_weights", {}), indent=2, sort_keys=True)}
+```
+
+## Probability Calibration
+
+```json
+{json.dumps(model_config.get("probability_calibration", {}), indent=2, sort_keys=True)}
 ```
 
 ## Admission Source

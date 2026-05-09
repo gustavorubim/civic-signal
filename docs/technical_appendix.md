@@ -516,10 +516,23 @@ $$
 {\sum_k A_k w_k}
 $$
 
+The component-disagreement term used by simulation is the weighted dispersion of admitted
+component vote-share point estimates:
+
+$$
+d_{ro}
+=
+\sqrt{
+\frac{\sum_k A_k w_k(\hat\theta^{(k)}_{ro}-\bar\theta_{ro})^2}
+{\sum_k A_k w_k}
+}
+$$
+
 Important interpretation:
 
-- `hat p^{ens}` is a component-blend diagnostic.
-- The published `winner_probability` comes from simulation draws.
+- `hat p^{ens}` is a component-blend diagnostic before the simulation layer.
+- The published `winner_probability` comes from simulation draws and is transformed by the
+  rolling-origin calibration model when that model is fitted.
 - Marginal probabilities are not renormalized across options.
 
 Per-race driver attribution is the stored contribution vector:
@@ -546,6 +559,9 @@ N_d
 + O_{\omega(r)d}
 $$
 
+Operationally, either `G` is active or the configured `N/R/O` layers are active under the
+default `residual_covariance_only` mode.
+
 where:
 
 $$
@@ -562,8 +578,11 @@ R_{\rho d} \sim \mathcal{N}(0,\sigma_R^2),
 O_{\omega d} \sim \mathcal{N}(0,\sigma_O^2)
 $$
 
-`G` is used when a residual covariance artifact is available. Region and office shocks
-remain additive, so the covariance path does not disable those factor layers.
+`G` is used when a residual covariance artifact is available. In the current default
+configuration, a fitted residual covariance artifact replaces the configured national,
+region, and office factors to avoid double-counting correlated residual structure. If no
+covariance artifact exists, the simulation falls back to configured national, region, and
+office shocks.
 
 Local residual:
 
@@ -581,9 +600,12 @@ The scale:
 
 $$
 \sigma_r =
+\sqrt{
 \max\left(
 \sigma_{tier(T_r)},\ 0.5\hat\sigma^{ens}_{ro}
-\right)
+\right)^2
++ d_{ro}^2
+}
 $$
 
 ### 9.2 Two-Option Draws
@@ -835,9 +857,11 @@ $$
 \}
 $$
 
-The multiplier is explicitly a placeholder. The artifact labels this field as
-`close_margin_proxy_not_calibrated`. It should not be read as a calibrated
-administrative or legal-risk forecast.
+The multiplier is explicitly a placeholder. By default these close-margin fields are
+withheld and labeled `withheld_experimental_close_margin_proxy`. Setting
+`experimental_outputs.include_close_margin_ecosystem: true` emits the historical
+`close_margin_proxy_not_calibrated` fields for exploratory analysis only. They should not
+be read as calibrated administrative or legal-risk forecasts.
 
 Demographic turnout composition is also explicitly marked as not estimated until a
 group-level turnout model is implemented.
@@ -932,6 +956,10 @@ $$
 \alpha=0,\qquad \beta=1
 $$
 
+When the rolling-origin sample passes the trust gate, the fitted transform is written to
+`probability_calibration.json` and copied into `component_admission.json`. Forecast runs
+apply it to marginal `winner_probability` while retaining `raw_winner_probability`.
+
 Expected calibration error:
 
 $$
@@ -946,7 +974,8 @@ $$
 \right|
 $$
 
-The current implementation uses quantile-adaptive probability bins when possible.
+The current implementation uses quantile-adaptive probability bins with
+`B = max(1, min(15, floor(n / 30)))`.
 
 Interval coverage:
 
@@ -1110,9 +1139,10 @@ Implemented:
 - Deterministic Kalman polling with empirical-Bayes house-effect shrinkage.
 - Standardized ridge fundamentals when enough rows exist.
 - Market inverse-normal share proxy with liquidity/spread gates.
-- Weighted ensemble with contribution attribution.
-- Correlated simulation with national, geography covariance, region, office, and
-  heavy-tailed local errors.
+- Weighted ensemble with rolling-origin simplex weights, contribution attribution, and
+  bounded Platt/logit probability calibration.
+- Correlated simulation with geography residual covariance or configured national,
+  region, and office factors plus heavy-tailed local errors.
 - Electoral College control threshold and pivotal-rate calculation.
 - Rolling-origin backtesting across cycles and as-of offsets.
 - Calibration, interval coverage, result comparison, and cycle-eval dashboards.
@@ -1122,7 +1152,8 @@ Still not frontier:
 
 - No full posterior MCMC/SMC over all polling and election-error parameters.
 - No hierarchical Bayesian fundamentals prior.
-- No calibrated legal/process model for certification risk.
+- No calibrated legal/process model for certification risk; close-margin proxies are
+  withheld by default.
 - No group-level demographic turnout model.
 - No real-time nationwide live adapter coverage across every public data source.
 - Multi-option and ranked-choice models remain approximations.

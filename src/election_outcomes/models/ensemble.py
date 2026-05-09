@@ -36,6 +36,7 @@ class EnsembleModel:
             if race["tier"] == "C":
                 continue
             weighted_probability = weighted_share = weight_total = uncertainty_total = 0.0
+            component_shares: list[tuple[float, float]] = []
             drivers: list[str] = []
             contributions: dict[str, dict[str, float]] = {}
             for row in group.iter_rows(named=True):
@@ -46,19 +47,26 @@ class EnsembleModel:
                 weight = self.weights.get(component, 0.0)
                 marginal = float(row["marginal_win_probability"])
                 weighted_probability += weight * marginal
-                weighted_share += weight * float(row["vote_share"])
+                vote_share = float(row["vote_share"])
+                weighted_share += weight * vote_share
                 uncertainty_total += weight * float(row["uncertainty"])
                 weight_total += weight
+                component_shares.append((weight, vote_share))
                 drivers.append(component)
                 contributions[component] = {
                     "weight": weight,
                     "marginal_win_probability": marginal,
-                    "vote_share": float(row["vote_share"]),
+                    "vote_share": vote_share,
                     "weighted_marginal_win_probability": weight * marginal,
-                    "weighted_vote_share": weight * float(row["vote_share"]),
+                    "weighted_vote_share": weight * vote_share,
                 }
             if weight_total <= 0:
                 continue
+            mean_share = weighted_share / weight_total
+            disagreement = (
+                sum(weight * (share - mean_share) ** 2 for weight, share in component_shares)
+                / weight_total
+            ) ** 0.5
             rows.append(
                 {
                     "race_id": race_id,
@@ -67,6 +75,7 @@ class EnsembleModel:
                     "marginal_win_probability": clamp(weighted_probability / weight_total),
                     "vote_share": clamp(weighted_share / weight_total),
                     "uncertainty": uncertainty_total / weight_total,
+                    "component_disagreement": disagreement,
                     "admitted": True,
                     "explanation": " + ".join(drivers),
                     "component_contributions": json.dumps(contributions, sort_keys=True),

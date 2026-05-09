@@ -418,9 +418,18 @@ class PlotGenerator:
     def _turnout_and_recount(
         self, plot_dir: Path, ecosystem_forecasts: pl.DataFrame
     ) -> Path | None:
-        if ecosystem_forecasts.is_empty():
+        if (
+            ecosystem_forecasts.is_empty()
+            or "recount_probability" not in ecosystem_forecasts.columns
+        ):
             return None
-        frame = ecosystem_forecasts.sort("recount_probability", descending=True).head(24)
+        frame = (
+            ecosystem_forecasts.filter(pl.col("recount_probability").is_not_null())
+            .sort("recount_probability", descending=True)
+            .head(24)
+        )
+        if frame.is_empty():
+            return None
         labels = frame["race_id"].to_list()
         recount = frame["recount_probability"].to_list()
         fig, ax = plt.subplots(figsize=(8.4, 6.0), dpi=150)

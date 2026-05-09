@@ -24,6 +24,12 @@ from election_outcomes.models import (
     PublicSignalModel,
 )
 from election_outcomes.models.common import clamp, normal_cdf
+from election_outcomes.scoring.learning import (
+    apply_platt_calibration,
+    fit_platt_calibration,
+    fit_simplex_weights,
+    stacked_probability,
+)
 from election_outcomes.scoring.metrics import score_predictions
 from election_outcomes.storage.io import write_json, write_parquet
 
@@ -37,12 +43,28 @@ class BacktestArtifacts:
 
 
 class BacktestRunner:
+    BASE_COMPONENT_COLUMNS: ClassVar[dict[str, str]] = {
+        "baseline": "baseline_probability",
+        "polling": "polls_probability",
+        "fundamentals": "fundamentals_probability",
+        "markets": "markets_probability",
+        "public_signals": "public_signals_probability",
+        "ensemble": "ensemble_probability",
+    }
+    STACK_COMPONENT_COLUMNS: ClassVar[dict[str, str]] = {
+        "polling": "polls_probability",
+        "fundamentals": "fundamentals_probability",
+        "markets": "markets_probability",
+        "public_signals": "public_signals_probability",
+    }
     COMPONENT_COLUMNS: ClassVar[dict[str, str]] = {
         "baseline": "baseline_probability",
         "polling": "polls_probability",
         "fundamentals": "fundamentals_probability",
         "markets": "markets_probability",
         "public_signals": "public_signals_probability",
+        "ensemble_configured": "configured_ensemble_probability",
+        "ensemble_learned": "learned_ensemble_probability",
         "ensemble": "ensemble_probability",
     }
 
@@ -76,22 +98,30 @@ class BacktestRunner:
             holdout_cycle=holdout_cycle,
         )
         minimum_rows = int(backtest_config.get("minimum_rows_for_trust", 30))
-        metrics = {
-            component: score_predictions(rolling_predictions, column)
-            for component, column in self.COMPONENT_COLUMNS.items()
-            if column in rolling_predictions.columns
-        }
-        baseline_brier = metrics.get("baseline", {}).get("brier")
-        ablations = {}
-        for component, values in metrics.items():
-            if component == "baseline" or baseline_brier is None:
-                continue
-            ablations[component] = {
-                "brier_delta_vs_baseline": values["brier"] - baseline_brier,
-                "beats_or_matches_baseline": values["brier"] <= baseline_brier,
-            }
         rolling = self._rolling_origin_summary(rolling_predictions)
         sample_size_too_small = rolling_predictions.height < minimum_rows
+        initial_metrics = self._score_columns(rolling_predictions, self.BASE_COMPONENT_COLUMNS)
+        initial_ablations = self._ablations(initial_metrics)
+        trustworthy = bool(rolling["executed"]) and not sample_size_too_small
+        trusted_components = self._trusted_components(
+            initial_ablations,
+            model_config,
+            trustworthy=trustworthy,
+        )
+        ensemble_learning = self._fit_ensemble_learning(
+            rolling_predictions,
+            model_config,
+            trusted_components,
+            trustworthy=trustworthy,
+            minimum_rows=minimum_rows,
+        )
+        rolling_predictions = self._with_learned_ensemble_columns(
+            rolling_predictions,
+            ensemble_learning,
+        )
+        metrics = self._score_columns(rolling_predictions, self.COMPONENT_COLUMNS)
+        ablations = self._ablations(metrics)
+        rolling = self._rolling_origin_summary(rolling_predictions)
         payload: dict[str, Any] = {
             "generated_at": datetime.now(UTC).isoformat(),
             "method": "rolling_origin_component_refit",
@@ -105,12 +135,16 @@ class BacktestRunner:
             "row_count": rolling_predictions.height,
             "metrics": metrics,
             "ablations": ablations,
+            "ensemble_learning": ensemble_learning["weight_learning"],
+            "probability_calibration": ensemble_learning["probability_calibration"],
         }
         component_admission = self._component_admission(
             payload=payload,
             ablations=ablations,
             model_config=model_config,
             scenario=scenario_obj,
+            trusted_components=trusted_components,
+            ensemble_learning=ensemble_learning,
         )
         covariance = self._residual_covariance(rolling_predictions, model_config)
         return BacktestArtifacts(payload, rolling_predictions, component_admission, covariance)
@@ -260,6 +294,160 @@ class BacktestRunner:
         }
 
     @staticmethod
+    def _score_columns(
+        frame: pl.DataFrame,
+        component_columns: dict[str, str],
+    ) -> dict[str, dict[str, float]]:
+        return {
+            component: score_predictions(frame, column)
+            for component, column in component_columns.items()
+            if column in frame.columns
+        }
+
+    @staticmethod
+    def _ablations(metrics: dict[str, dict[str, float]]) -> dict[str, dict[str, Any]]:
+        baseline_brier = metrics.get("baseline", {}).get("brier")
+        if baseline_brier is None or not np.isfinite(baseline_brier):
+            return {}
+        ablations = {}
+        for component, values in metrics.items():
+            if component == "baseline":
+                continue
+            brier = values.get("brier")
+            if brier is None or not np.isfinite(brier):
+                continue
+            ablations[component] = {
+                "brier_delta_vs_baseline": brier - baseline_brier,
+                "beats_or_matches_baseline": brier <= baseline_brier,
+            }
+        return ablations
+
+    @staticmethod
+    def _trusted_components(
+        ablations: dict[str, dict[str, Any]],
+        model_config: dict[str, Any],
+        *,
+        trustworthy: bool,
+    ) -> dict[str, bool]:
+        configured = {
+            str(key): bool(value)
+            for key, value in dict(model_config.get("trusted_components", {})).items()
+        }
+        trusted_components = {}
+        for component, configured_trust in configured.items():
+            if component == "public_signals":
+                trusted_components[component] = False
+                continue
+            if trustworthy:
+                trusted_components[component] = bool(
+                    ablations.get(component, {}).get("beats_or_matches_baseline", False)
+                )
+            else:
+                trusted_components[component] = configured_trust
+        return trusted_components
+
+    def _fit_ensemble_learning(
+        self,
+        frame: pl.DataFrame,
+        model_config: dict[str, Any],
+        trusted_components: dict[str, bool],
+        *,
+        trustworthy: bool,
+        minimum_rows: int,
+    ) -> dict[str, Any]:
+        configured_weights = {
+            component: float(dict(model_config.get("component_weights", {})).get(component, 0.0))
+            for component in self.STACK_COMPONENT_COLUMNS
+        }
+        settings = dict(model_config.get("ensemble_learning", {}))
+        if not trustworthy or not bool(settings.get("enabled", True)):
+            reason = "disabled" if not bool(settings.get("enabled", True)) else "untrusted_backtest"
+            weight_learning = {
+                "status": reason,
+                "method": "configured_fallback",
+                "components": [],
+                "component_weights": configured_weights,
+                "configured_weights": configured_weights,
+                "row_count": frame.height,
+                "iterations": 0,
+            }
+            calibration = {
+                "status": reason,
+                "method": "platt_logistic_ridge",
+                "intercept": 0.0,
+                "slope": 1.0,
+                "row_count": frame.height,
+                "ridge": float(settings.get("calibration_ridge", 1e-3)),
+                "min_slope": float(settings.get("calibration_min_slope", 0.25)),
+                "max_slope": float(settings.get("calibration_max_slope", 4.0)),
+                "max_abs_intercept": float(settings.get("calibration_max_abs_intercept", 2.0)),
+            }
+            return {
+                "weight_learning": weight_learning,
+                "probability_calibration": calibration,
+            }
+
+        weight_learning = fit_simplex_weights(
+            frame,
+            self.STACK_COMPONENT_COLUMNS,
+            configured_weights,
+            trusted_components,
+            max_iterations=int(settings.get("max_iterations", 800)),
+            learning_rate=float(settings.get("learning_rate", 0.35)),
+            l2_prior_strength=float(settings.get("l2_prior_strength", 0.02)),
+            min_rows=minimum_rows,
+        )
+        learned_probability = stacked_probability(
+            frame,
+            self.STACK_COMPONENT_COLUMNS,
+            weight_learning["component_weights"],
+        )
+        calibration = fit_platt_calibration(
+            learned_probability,
+            frame["actual_winner"].cast(pl.Float64).to_numpy()
+            if "actual_winner" in frame.columns
+            else np.array([], dtype=np.float64),
+            min_rows=minimum_rows,
+            ridge=float(settings.get("calibration_ridge", 1e-3)),
+            min_slope=float(settings.get("calibration_min_slope", 0.25)),
+            max_slope=float(settings.get("calibration_max_slope", 4.0)),
+            max_abs_intercept=float(settings.get("calibration_max_abs_intercept", 2.0)),
+        )
+        calibration["input_probability"] = "learned_ensemble_probability"
+        return {
+            "weight_learning": weight_learning,
+            "probability_calibration": calibration,
+        }
+
+    def _with_learned_ensemble_columns(
+        self,
+        frame: pl.DataFrame,
+        ensemble_learning: dict[str, Any],
+    ) -> pl.DataFrame:
+        if "ensemble_probability" in frame.columns:
+            if "configured_ensemble_probability" in frame.columns:
+                frame = frame.drop("configured_ensemble_probability")
+            frame = frame.rename({"ensemble_probability": "configured_ensemble_probability"})
+        else:
+            frame = frame.with_columns(
+                pl.lit(None, dtype=pl.Float64).alias("configured_ensemble_probability")
+            )
+        learned = stacked_probability(
+            frame,
+            self.STACK_COMPONENT_COLUMNS,
+            ensemble_learning["weight_learning"]["component_weights"],
+            fallback_column="configured_ensemble_probability",
+        )
+        calibrated = apply_platt_calibration(
+            learned,
+            ensemble_learning["probability_calibration"],
+        )
+        return frame.with_columns(
+            pl.Series("learned_ensemble_probability", learned, dtype=pl.Float64),
+            pl.Series("ensemble_probability", calibrated, dtype=pl.Float64),
+        )
+
+    @staticmethod
     def _restrict_to_era(train_catalog: pl.DataFrame, test_catalog: pl.DataFrame) -> pl.DataFrame:
         """Drop training rows from a different redistricting era than the holdout cycle.
 
@@ -349,33 +537,28 @@ class BacktestRunner:
         ablations: dict[str, dict[str, Any]],
         model_config: dict[str, Any],
         scenario: Scenario | None,
+        trusted_components: dict[str, bool],
+        ensemble_learning: dict[str, Any],
     ) -> dict[str, Any]:
         trustworthy = bool(payload["rolling_origin_executed"]) and not bool(
             payload["sample_size_too_small"]
         )
-        configured = {
-            str(key): bool(value)
-            for key, value in dict(model_config.get("trusted_components", {})).items()
-        }
-        trusted_components = {}
-        for component, configured_trust in configured.items():
-            if component == "public_signals":
-                trusted_components[component] = False
-                continue
-            if trustworthy:
-                trusted_components[component] = bool(
-                    ablations.get(component, {}).get("beats_or_matches_baseline", False)
-                )
-            else:
-                trusted_components[component] = configured_trust
+        weight_learning = ensemble_learning["weight_learning"]
+        probability_calibration = ensemble_learning["probability_calibration"]
+        learned_weights = dict(weight_learning.get("component_weights", {}))
         return {
             "generated_at": payload["generated_at"],
             "scenario": scenario.name if scenario else None,
             "scenario_family": scenario.family if scenario else None,
             "admission_status": "trusted" if trustworthy else "experimental_insufficient_rows",
-            "engine_using": "learned_admission" if trustworthy else "config_defaults",
+            "engine_using": "learned_weights_calibrated" if trustworthy else "config_defaults",
             "trusted_components": trusted_components,
-            "component_weights": dict(model_config.get("component_weights", {})),
+            "component_weights": learned_weights
+            if trustworthy and learned_weights
+            else dict(model_config.get("component_weights", {})),
+            "configured_component_weights": dict(model_config.get("component_weights", {})),
+            "ensemble_learning": weight_learning,
+            "probability_calibration": probability_calibration,
             "ablations": ablations,
             "minimum_rows_for_trust": payload["minimum_rows_for_trust"],
             "row_count": payload["row_count"],
@@ -516,6 +699,8 @@ class BacktestRunner:
                 "fundamentals_probability": pl.Float64,
                 "markets_probability": pl.Float64,
                 "public_signals_probability": pl.Float64,
+                "configured_ensemble_probability": pl.Float64,
+                "learned_ensemble_probability": pl.Float64,
                 "ensemble_probability": pl.Float64,
                 "predicted_vote_share": pl.Float64,
                 "lower_90": pl.Float64,
@@ -541,6 +726,11 @@ class BacktestRunner:
         write_json(artifacts.payload, out_dir / "scorecard.json")
         write_parquet(artifacts.rolling_predictions, out_dir / "rolling_predictions.parquet")
         write_json(artifacts.component_admission, out_dir / "component_admission.json")
+        write_json(artifacts.payload["ensemble_learning"], out_dir / "ensemble_learning.json")
+        write_json(
+            artifacts.payload["probability_calibration"],
+            out_dir / "probability_calibration.json",
+        )
         write_parquet(artifacts.residual_covariance, out_dir / "residual_covariance.parquet")
         self._write_latest_artifacts(
             scenario=scenario,
@@ -558,6 +748,14 @@ class BacktestRunner:
         key = component_admission.get("scenario_family") or scenario or "default"
         latest_dir = self.context.artifacts_dir / "backtests" / "latest"
         write_json(component_admission, latest_dir / f"component_admission_{key}.json")
+        write_json(
+            component_admission.get("ensemble_learning", {}),
+            latest_dir / f"ensemble_learning_{key}.json",
+        )
+        write_json(
+            component_admission.get("probability_calibration", {}),
+            latest_dir / f"probability_calibration_{key}.json",
+        )
         write_parquet(residual_covariance, latest_dir / f"residual_covariance_{key}.parquet")
         index_path = latest_dir / "index.json"
         index = {}
@@ -568,6 +766,8 @@ class BacktestRunner:
                     index = loaded
         index[str(key)] = {
             "component_admission": f"component_admission_{key}.json",
+            "ensemble_learning": f"ensemble_learning_{key}.json",
+            "probability_calibration": f"probability_calibration_{key}.json",
             "residual_covariance": f"residual_covariance_{key}.parquet",
         }
         write_json(index, index_path)

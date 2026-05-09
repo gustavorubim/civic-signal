@@ -663,6 +663,10 @@ class ForecastPipeline:
                 updated["trusted_components"] = admission["trusted_components"]
             if isinstance(admission.get("component_weights"), dict):
                 updated["component_weights"] = admission["component_weights"]
+            if isinstance(admission.get("probability_calibration"), dict):
+                updated["probability_calibration"] = admission["probability_calibration"]
+            if isinstance(admission.get("ensemble_learning"), dict):
+                updated["ensemble_learning_result"] = admission["ensemble_learning"]
             updated["component_admission"] = admission
             updated["component_admission_source"] = {
                 "status": "learned",
@@ -670,6 +674,12 @@ class ForecastPipeline:
                 "path": str(path),
                 "engine_using": str(admission.get("engine_using", "learned_admission")),
                 "admission_status": str(admission.get("admission_status", "unknown")),
+                "weight_status": str(
+                    dict(admission.get("ensemble_learning", {})).get("status", "unknown")
+                ),
+                "calibration_status": str(
+                    dict(admission.get("probability_calibration", {})).get("status", "unknown")
+                ),
             }
         return updated
 

@@ -12,6 +12,7 @@ from election_outcomes.performance.kernels import (
     configure_numba_threads,
     simulate_binary_draw_arrays,
 )
+from election_outcomes.scoring.learning import apply_platt_calibration
 
 
 @dataclass(frozen=True)
@@ -48,10 +49,18 @@ class SimulationEngine:
         self.national_sigma = float(correlation.get("national_sigma", 0.015))
         self.region_sigma = float(correlation.get("region_sigma", 0.010))
         self.office_sigma = float(correlation.get("office_sigma", 0.008))
+        self.residual_covariance_mode = str(
+            correlation.get("residual_covariance_mode", "residual_covariance_only")
+        )
         self.geographic_groups = {
             str(key): str(value)
             for key, value in dict(correlation.get("geographic_groups", {})).items()
         }
+        self.probability_calibration = dict(config.get("probability_calibration", {}))
+        experimental = dict(config.get("experimental_outputs", {}))
+        self.include_close_margin_ecosystem = bool(
+            experimental.get("include_close_margin_ecosystem", False)
+        )
         self.control_thresholds = {
             str(key): int(value)
             for key, value in dict(config.get("control_thresholds", {})).items()
@@ -79,6 +88,11 @@ class SimulationEngine:
             "numba_available": NUMBA_AVAILABLE,
             "numba_threads": self.numba_threads,
             "simulation_count": self.draw_count,
+            "systematic_error_mode": self._systematic_error_mode(),
+            "probability_calibration_status": str(
+                self.probability_calibration.get("status", "not_configured")
+            ),
+            "close_margin_ecosystem_included": self.include_close_margin_ecosystem,
         }
 
     def _draws(self, bundle: FeatureBundle, ensemble: pl.DataFrame) -> pl.DataFrame:
@@ -100,7 +114,11 @@ class SimulationEngine:
         fundamentals = {row["race_id"]: row for row in bundle.fundamentals.iter_rows(named=True)}
         binary_specs: list[dict[str, object]] = []
         multi_option_specs: list[dict[str, object]] = []
-        national_error = rng.normal(0, self.national_sigma, self.draw_count)
+        national_error = (
+            np.zeros(self.draw_count)
+            if self._uses_residual_covariance_only()
+            else rng.normal(0, self.national_sigma, self.draw_count)
+        )
         systematic_errors = self._systematic_errors(catalog, rng)
         for race_id, options in options_by_race.items():
             race = catalog[race_id]
@@ -108,9 +126,7 @@ class SimulationEngine:
                 continue
             estimate_rows = ensemble.filter(pl.col("race_id") == race_id).sort("option_id")
             first = estimate_rows.row(0, named=True)
-            sigma = max(
-                self.tier_sigma.get(str(race["tier"]), 0.08), float(first["uncertainty"]) * 0.5
-            )
+            sigma = self._race_sigma(race, first)
             if len(options) == 2:
                 binary_specs.append(
                     {
@@ -146,6 +162,25 @@ class SimulationEngine:
         if not multi_frame.is_empty():
             frames.append(multi_frame)
         return pl.concat(frames, how="vertical") if frames else pl.DataFrame()
+
+    def _race_sigma(self, race: dict[str, object], estimate: dict[str, object]) -> float:
+        tier_floor = self.tier_sigma.get(str(race["tier"]), 0.08)
+        component_uncertainty = float(estimate.get("uncertainty") or 0.0) * 0.5
+        base_sigma = max(tier_floor, component_uncertainty)
+        disagreement = float(estimate.get("component_disagreement") or 0.0)
+        return float(np.sqrt(base_sigma**2 + disagreement**2))
+
+    def _uses_residual_covariance_only(self) -> bool:
+        return (
+            self.residual_covariance is not None
+            and not self.residual_covariance.is_empty()
+            and self.residual_covariance_mode == "residual_covariance_only"
+        )
+
+    def _systematic_error_mode(self) -> str:
+        if self.residual_covariance is None or self.residual_covariance.is_empty():
+            return "configured_national_region_office"
+        return self.residual_covariance_mode
 
     def _binary_draw_frame(
         self, specs: list[dict[str, object]], national_error: np.ndarray
@@ -308,6 +343,11 @@ class SimulationEngine:
             mean=np.zeros(len(groups)), cov=matrix, size=self.draw_count
         ).T
         group_errors = {group: group_draws[index] for index, group in enumerate(groups)}
+        if self.residual_covariance_mode == "residual_covariance_only":
+            return {
+                race_id: group_errors[self._covariance_group_for_race(row)]
+                for race_id, row in active.items()
+            }
         region_errors = {
             region: rng.normal(0, self.region_sigma, self.draw_count) for region in regions
         }
@@ -374,6 +414,7 @@ class SimulationEngine:
             "explanation",
             "component_contributions",
             "uncertainty",
+            "component_disagreement",
         ]
         drivers = (
             ensemble.select([column for column in driver_columns if column in ensemble.columns])
@@ -395,7 +436,9 @@ class SimulationEngine:
                 "tier_reason",
                 pl.lit(None, dtype=pl.Float64).alias("winner_probability"),
             )
-            return self._attach_forecast_explainability(empty, drivers)
+            return self._apply_probability_calibration(
+                self._attach_forecast_explainability(empty, drivers)
+            )
         intervals = draws.group_by(["race_id", "option_id"]).agg(
             pl.col("winner").mean().alias("winner_probability"),
             pl.col("vote_share").mean().alias("vote_share_mean"),
@@ -423,7 +466,34 @@ class SimulationEngine:
             .otherwise(pl.lit("trusted_probability"))
             .alias("data_quality_flags"),
         )
-        return self._attach_forecast_explainability(forecast, drivers)
+        return self._apply_probability_calibration(
+            self._attach_forecast_explainability(forecast, drivers)
+        )
+
+    def _apply_probability_calibration(self, forecast: pl.DataFrame) -> pl.DataFrame:
+        if forecast.is_empty() or "winner_probability" not in forecast.columns:
+            return forecast
+        raw_values = forecast["winner_probability"].to_list()
+        numeric = np.array(
+            [float(value) if value is not None else np.nan for value in raw_values],
+            dtype=np.float64,
+        )
+        status = str(self.probability_calibration.get("status", "not_configured"))
+        method = str(self.probability_calibration.get("method", "identity"))
+        if status == "fitted":
+            calibrated = apply_platt_calibration(numeric, self.probability_calibration)
+            calibrated_values = [
+                None if value is None else float(calibrated[index])
+                for index, value in enumerate(raw_values)
+            ]
+        else:
+            calibrated_values = raw_values
+        return forecast.with_columns(
+            pl.Series("raw_winner_probability", raw_values, dtype=pl.Float64),
+            pl.Series("winner_probability", calibrated_values, dtype=pl.Float64),
+            pl.lit(status).alias("probability_calibration_status"),
+            pl.lit(method).alias("probability_calibration_method"),
+        )
 
     @staticmethod
     def _attach_forecast_explainability(
@@ -449,7 +519,8 @@ class SimulationEngine:
                 pl.concat_str(
                     [
                         pl.lit("Simulation uncertainty combines component posterior proxy, "),
-                        pl.lit("tier floor, heavy-tailed local residuals, and systematic factors."),
+                        pl.lit("component disagreement, tier floor, heavy-tailed local "),
+                        pl.lit("residuals, and systematic factors."),
                     ]
                 )
             )
@@ -579,6 +650,16 @@ class SimulationEngine:
             )
             margins = np.array([values[0] - values[1] for values in pivot["top_two"].to_list()])
             turnout = pivot["turnout"].to_numpy()
+            if self.include_close_margin_ecosystem:
+                recount_probability = float(np.mean(margins <= 0.01))
+                certification_risk_probability = float(np.mean(margins <= 0.005) * 0.6)
+                risk_model = "close_margin_proxy_not_calibrated"
+                risk_status = "experimental_proxy_included"
+            else:
+                recount_probability = None
+                certification_risk_probability = None
+                risk_model = "withheld_experimental_close_margin_proxy"
+                risk_status = "withheld_experimental"
             rows.append(
                 {
                     "race_id": race_key,
@@ -595,12 +676,18 @@ class SimulationEngine:
                         sort_keys=True,
                     ),
                     "demographic_model_status": "placeholder_not_estimated",
-                    "recount_probability": float(np.mean(margins <= 0.01)),
-                    "certification_risk_probability": float(np.mean(margins <= 0.005) * 0.6),
-                    "certification_risk_model": "close_margin_proxy_not_calibrated",
+                    "recount_probability": recount_probability,
+                    "certification_risk_probability": certification_risk_probability,
+                    "certification_risk_model": risk_model,
+                    "close_margin_risk_status": risk_status,
                     "ballot_measure_supported": bool(
                         catalog[race_key]["race_type"] == "ballot_measure"
                     ),
                 }
             )
-        return pl.DataFrame(rows)
+        if not rows:
+            return pl.DataFrame()
+        return pl.DataFrame(rows).with_columns(
+            pl.col("recount_probability").cast(pl.Float64),
+            pl.col("certification_risk_probability").cast(pl.Float64),
+        )

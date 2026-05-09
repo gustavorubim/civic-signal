@@ -32,9 +32,17 @@ class MethodologySnapshot:
 {json.dumps(model_config.get("component_weights", {}), indent=2, sort_keys=True)}
 ```
 
+## Probability Calibration
+
+```json
+{json.dumps(model_config.get("probability_calibration", {}), indent=2, sort_keys=True)}
+```
+
 ## Limitations
 
 This run uses the implemented deterministic hybrid engine over the configured source
 registry. Public-signal features remain experimental unless admitted by backtest
 reward gates. Tier C races are tracked but not assigned trusted probabilities.
+Close-margin administrative-risk proxies stay withheld unless explicitly enabled as
+experimental output.
 """

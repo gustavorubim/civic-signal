@@ -1,4 +1,4 @@
-model_version: "0.1.1-structured-fixture"
+model_version: "0.2.0-calibrated-ensemble"
 seed: 20260508
 simulation_count: 1000
 performance:
@@ -17,6 +17,15 @@ component_weights:
   fundamentals: 0.30
   markets: 0.20
   public_signals: 0.05
+ensemble_learning:
+  enabled: true
+  max_iterations: 800
+  learning_rate: 0.35
+  l2_prior_strength: 0.02
+  calibration_ridge: 0.001
+  calibration_min_slope: 0.25
+  calibration_max_slope: 4.0
+  calibration_max_abs_intercept: 2.0
 baseline:
   previous_share_sigma: 0.08
   empirical_min_rows: 20
@@ -38,6 +47,7 @@ correlation:
   residual_min_variance: 0.0004
   residual_same_region_correlation: 0.35
   residual_cross_region_correlation: 0.12
+  residual_covariance_mode: residual_covariance_only
   geographic_groups:
     # Census Bureau 4-region map. Unmapped geographies fall into their own per-state group.
     CT: northeast
@@ -104,6 +114,8 @@ market_adjustments:
 public_signal_admission:
   max_brier_delta_vs_baseline: 0.0
   leakage_check_required: true
+experimental_outputs:
+  include_close_margin_ecosystem: false
 reward_thresholds:
   provenance_min_share: 1.0
   interval_coverage_tolerance: 0.12

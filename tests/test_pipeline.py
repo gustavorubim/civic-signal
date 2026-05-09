@@ -156,6 +156,12 @@ def test_simulation_outputs_forecasts_control_and_ecosystem(tmp_path: Path) -> N
     ctx, _sync, bundle = build_bundle(tmp_path)
     active = ForecastPipeline._active_bundle(bundle, "2026-05-08")
     model_config = ctx.read_yaml("model.yaml")
+    model_config["probability_calibration"] = {
+        "status": "fitted",
+        "method": "platt_logistic_ridge",
+        "intercept": 0.0,
+        "slope": 0.0,
+    }
     estimates = [
         PollingModel(model_config, as_of="2026-05-08").run(active),
         FundamentalsModel(model_config).fit(bundle).run(active),
@@ -171,8 +177,21 @@ def test_simulation_outputs_forecasts_control_and_ecosystem(tmp_path: Path) -> N
     assert outputs.ecosystem_forecasts["demographic_model_status"].unique().to_list() == [
         "placeholder_not_estimated"
     ]
+    assert outputs.ecosystem_forecasts["close_margin_risk_status"].unique().to_list() == [
+        "withheld_experimental"
+    ]
+    assert (
+        outputs.ecosystem_forecasts["recount_probability"].null_count()
+        == outputs.ecosystem_forecasts.height
+    )
     tier_c = outputs.race_forecasts.filter(pl.col("race_id") == "MAYOR-SPRINGFIELD-2026")
     assert tier_c["winner_probability"].null_count() == tier_c.height
+    trusted = outputs.race_forecasts.filter(pl.col("winner_probability").is_not_null())
+    assert {"raw_winner_probability", "probability_calibration_status"}.issubset(
+        outputs.race_forecasts.columns
+    )
+    assert trusted["probability_calibration_status"].unique().to_list() == ["fitted"]
+    assert trusted["winner_probability"].round(8).unique().to_list() == [0.5]
     assert {"top_drivers", "component_contributions", "uncertainty_explanation"}.issubset(
         outputs.race_forecasts.columns
     )
@@ -285,9 +304,20 @@ def test_backtest_and_report_rebuild(tmp_path: Path) -> None:
     assert (backtest_dir / "scorecard.json").exists()
     assert (backtest_dir / "rolling_predictions.parquet").exists()
     assert (backtest_dir / "component_admission.json").exists()
+    assert (backtest_dir / "ensemble_learning.json").exists()
+    assert (backtest_dir / "probability_calibration.json").exists()
     assert (backtest_dir / "residual_covariance.parquet").exists()
     rolling = pl.read_parquet(backtest_dir / "rolling_predictions.parquet")
     assert set(rolling["as_of_offset_days"].unique().to_list()) == {1, 7, 30, 60, 90}
+    assert {
+        "configured_ensemble_probability",
+        "learned_ensemble_probability",
+        "ensemble_probability",
+    }.issubset(rolling.columns)
+    admission = json.loads((backtest_dir / "component_admission.json").read_text())
+    learned_weights = admission["ensemble_learning"]["component_weights"]
+    assert abs(sum(learned_weights.values()) - 1.0) < 1e-9
+    assert admission["probability_calibration"]["status"] == "fitted"
     covariance = pl.read_parquet(backtest_dir / "residual_covariance.parquet")
     assert {"matrix_rank", "covariance_method"}.issubset(covariance.columns)
     assert (report_dir / "model_card.md").exists()
@@ -432,6 +462,12 @@ def test_presidential_scenario_writes_ec_plot_and_latest_backtest_artifacts(
     assert (out_dir / "poll_trajectory.parquet").stat().st_size > 0
     assert (
         ctx.artifacts_dir / "backtests" / "latest" / "component_admission_president_state.json"
+    ).exists()
+    assert (
+        ctx.artifacts_dir / "backtests" / "latest" / "ensemble_learning_president_state.json"
+    ).exists()
+    assert (
+        ctx.artifacts_dir / "backtests" / "latest" / "probability_calibration_president_state.json"
     ).exists()
     assert (
         ctx.artifacts_dir / "backtests" / "latest" / "residual_covariance_president_state.parquet"
@@ -930,6 +966,7 @@ def test_score_predictions_handles_empty_and_real_rows(tmp_path: Path) -> None:
     assert str(empty_scores["brier"]) == "nan"
     assert 0.0 <= real_scores["brier"] <= 1.0
     assert 0.0 <= real_scores["expected_calibration_error"] <= 1.0
+    assert real_scores["expected_calibration_error_bins"] >= 1
 
 
 def test_performance_benchmark_and_python_kernel_fallback(tmp_path: Path) -> None:

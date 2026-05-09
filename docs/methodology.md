@@ -22,12 +22,16 @@ The current implementation is a deterministic, auditable approximation to that p
 4. **Public Signals**: news/pageview/official-release signals, experimental by default
    and admitted only after leakage and rolling-origin ablation checks.
 5. **Ensemble**: weighted component blend over admitted components, with contribution
-   attribution retained by race and option.
-6. **Simulation**: correlated draw engine with national, geography covariance, region,
-   office, and heavy-tailed local errors. Published probabilities and intervals come
-   from these draws.
+   attribution retained by race and option. Trusted rolling-origin backtests learn
+   non-negative simplex weights and a bounded Platt/logit calibration transform that is
+   applied to published marginal race probabilities.
+6. **Simulation**: correlated draw engine with either learned geography residual covariance
+   or configured national/region/office factors, plus heavy-tailed local errors. Local
+   uncertainty includes a component-disagreement term so divergent model inputs raise
+   simulation variance.
 
 The rigorous mathematical contract lives in
 [`technical_appendix.md`](technical_appendix.md). That document also identifies which
 parts are implemented approximations and which remain frontier targets, including full
-hierarchical Bayesian polling, richer turnout modeling, and broader live-source coverage.
+hierarchical Bayesian polling, richer turnout modeling, calibrated administrative-risk
+models, and broader live-source coverage.

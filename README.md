@@ -90,7 +90,8 @@ artifacts/runs/full-forecast/
 
 ### 2. Full Backtest
 
-Run the rolling-origin scorecard, component admission, and residual covariance pass:
+Run the rolling-origin scorecard, component admission, learned ensemble calibration, and
+residual covariance pass:
 
 ```bash
 uv run election-outcomes backtest run \
@@ -106,11 +107,16 @@ artifacts/backtests/president-state-backtest/
   scorecard.parquet
   rolling_predictions.parquet
   component_admission.json
+  ensemble_learning.json
+  probability_calibration.json
   residual_covariance.parquet
 ```
 
 The presidential-state benchmark evaluates multiple pre-election cuts where data exists:
-`T-90`, `T-60`, `T-30`, `T-7`, and `T-1`.
+`T-90`, `T-60`, `T-30`, `T-7`, and `T-1`. When the row-count gate passes, the latest
+backtest also writes learned non-negative ensemble weights and a bounded Platt/logit
+calibration transform under `artifacts/backtests/latest/`; forecast runs consume those
+artifacts before publishing marginal race probabilities.
 
 ### 3. Full Cycle Analysis
 
@@ -391,7 +397,8 @@ Important forecast artifacts:
   fixed-size overview plots, model drivers, trust gates, backtest snapshot,
   Silver/FiveThirtyEight methodology benchmark, and compact plot grids.
 - `race_forecasts.parquet`: per-option probabilities, vote-share intervals, drivers,
-  data-quality flags, and lineage hashes.
+  raw and calibrated per-option probabilities, vote-share intervals, drivers, data-quality
+  flags, and lineage hashes.
 - `forecast_draws.parquet`: race-level posterior-style simulation draws.
 - `control_forecasts.parquet`: EC/control probability, EV/seat distributions, and
   pivotal/tipping information.
@@ -405,6 +412,9 @@ Current trust boundary:
   is not a reproduction of Silver Bulletin or FiveThirtyEight.
 - Live polling can be enabled with `configs/sources_live.yaml`; most live adapters are
   still planned.
+- Close-margin recount/certification fields are withheld by default because they are only
+  experimental proxies. Set `experimental_outputs.include_close_margin_ecosystem: true`
+  in `configs/model.yaml` only when you explicitly want those uncalibrated proxy fields.
 
 ## Repository Map
 
@@ -722,7 +732,7 @@ Projection plots:
 - `race_probability_bars.png`
 - `vote_share_intervals.png`
 - `control_projection.png`
-- `turnout_recount_risk.png`
+- `turnout_recount_risk.png` (only when close-margin ecosystem proxies are enabled)
 - `tier_coverage.png`
 - `electoral_college_distribution.png`
 - `topline_electoral_swarm.png`
@@ -765,7 +775,9 @@ PY
 - `build-features`: normalize raw snapshots into curated Parquet tables and race tiers.
 - `forecast run`: refresh data, rebuild features, run models, simulate outcomes, and
   emit artifacts.
-- `backtest run`: refit components by rolling-origin cycle and score baselines.
+- `backtest run`: refit components by rolling-origin cycle, score baselines, learn
+  simplex-constrained ensemble weights, fit probability calibration, and refresh latest
+  admission/covariance artifacts.
 - `report build`: rebuild diagnostics and methodology files for an existing run.
 - `benchmark run`: measure simulation throughput.
 - `results compare`: compare one forecast run against known actual results.

@@ -17,6 +17,7 @@ def score_predictions(
             "calibration_intercept": math.nan,
             "calibration_slope": math.nan,
             "expected_calibration_error": math.nan,
+            "expected_calibration_error_bins": math.nan,
             "interval_90_coverage": math.nan,
         }
     actual = frame["actual_winner"].cast(pl.Float64).to_numpy()
@@ -26,7 +27,8 @@ def score_predictions(
         np.mean(-(actual * np.log(probability) + (1 - actual) * np.log(1 - probability)))
     )
     slope, intercept = _calibration_line(probability, actual)
-    ece = _expected_calibration_error(probability, actual)
+    ece_bins = _ece_bin_count(len(probability))
+    ece = _expected_calibration_error(probability, actual, bins=ece_bins)
     coverage = np.mean(
         (frame["actual_vote_share"].to_numpy() >= frame["lower_90"].to_numpy())
         & (frame["actual_vote_share"].to_numpy() <= frame["upper_90"].to_numpy())
@@ -37,6 +39,7 @@ def score_predictions(
         "calibration_intercept": float(intercept),
         "calibration_slope": float(slope),
         "expected_calibration_error": float(ece),
+        "expected_calibration_error_bins": float(ece_bins),
         "interval_90_coverage": float(coverage),
     }
 
@@ -76,3 +79,9 @@ def _expected_calibration_error(
             continue
         error += np.mean(mask) * abs(float(np.mean(probability[mask]) - np.mean(actual[mask])))
     return float(error if total else math.nan)
+
+
+def _ece_bin_count(row_count: int) -> int:
+    if row_count <= 0:
+        return 1
+    return max(1, min(15, row_count // 30))

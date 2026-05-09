@@ -421,17 +421,23 @@ class DiagnosticsReport:
                     control_detail,
                 )
             )
-        if ecosystem_forecasts is not None and not ecosystem_forecasts.is_empty():
-            top_risk = ecosystem_forecasts.sort("recount_probability", descending=True).row(
-                0, named=True
-            )
-            cards.append(
-                cls._insight_card(
-                    "Closest-Race Risk",
-                    cls._pct(top_risk.get("recount_probability")),
-                    f"Highest recount-risk race: {top_risk.get('race_id')}.",
+        if (
+            ecosystem_forecasts is not None
+            and not ecosystem_forecasts.is_empty()
+            and "recount_probability" in ecosystem_forecasts.columns
+        ):
+            risk_frame = ecosystem_forecasts.filter(pl.col("recount_probability").is_not_null())
+            if not risk_frame.is_empty():
+                top_risk = risk_frame.sort("recount_probability", descending=True).row(
+                    0, named=True
                 )
-            )
+                cards.append(
+                    cls._insight_card(
+                        "Closest-Race Risk",
+                        cls._pct(top_risk.get("recount_probability")),
+                        f"Highest recount-risk race: {top_risk.get('race_id')}.",
+                    )
+                )
         trust_note = (
             "Trust gates remain experimental because the rolling-origin sample is below threshold."
             if backtest_payload.get("sample_size_too_small")

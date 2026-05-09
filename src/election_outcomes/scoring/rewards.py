@@ -68,7 +68,10 @@ class RewardEvaluator:
                 "R4_calibration": {
                     "passed": bool(ensemble_metrics),
                     "metric": ensemble_metrics,
-                    "detail": "Historical backtest reports calibration and scoring metrics.",
+                    "detail": (
+                        "Historical backtest reports scoring metrics and a probability "
+                        "calibration transform."
+                    ),
                 },
                 "R5_baseline_competition": {
                     "passed": trustworthy_backtest
