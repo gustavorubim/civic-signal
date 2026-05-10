@@ -1431,7 +1431,7 @@ def test_presidential_result_comparison(tmp_path: Path) -> None:
     assert comparison.filter(pl.col("actual_winner")).height == payload["race_count"]
 
 
-def test_result_comparison_handles_withheld_vote_share_projection() -> None:
+def test_result_comparison_handles_withheld_vote_share_projection(tmp_path: Path) -> None:
     race_catalog = pl.DataFrame(
         [
             {
@@ -1496,6 +1496,19 @@ def test_result_comparison_handles_withheld_vote_share_projection() -> None:
     assert comparison["absolute_vote_share_error"].null_count() == comparison.height
     assert race_outcomes["predicted_winner_option_id"].null_count() == race_outcomes.height
     assert race_outcomes["race_winner_correct"].null_count() == race_outcomes.height
+
+    empty_comparison = ResultComparator()._comparison_frame(
+        race_catalog=race_catalog,
+        race_forecasts=race_forecasts,
+        curated_results=curated_results.head(0),
+        cycle=2026,
+        office_type="house",
+        race_id=None,
+    )
+    manifest = ResultComparator()._write_plots(empty_comparison, tmp_path / "empty-comparison")
+
+    assert empty_comparison.is_empty()
+    assert manifest == {"comparison": []}
 
 
 def test_cycle_eval_writes_consolidated_dashboard(tmp_path: Path) -> None:

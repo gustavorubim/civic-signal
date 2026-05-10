@@ -542,6 +542,9 @@ class ResultComparator:
         manifest["comparison"].append({"title": title, "path": f"plots/{path.name}"})
 
     def _vote_share_plot(self, comparison: pl.DataFrame, plot_dir: Path) -> Path | None:
+        required = {"vote_share_mean", "actual_vote_share", "absolute_vote_share_error"}
+        if comparison.is_empty() or not required.issubset(set(comparison.columns)):
+            return None
         frame = comparison.filter(pl.col("vote_share_mean").is_not_null())
         if frame.is_empty():
             return None
@@ -580,6 +583,9 @@ class ResultComparator:
         return self._save(fig, plot_dir / "vote_share_forecast_vs_actual.png")
 
     def _winner_probability_plot(self, comparison: pl.DataFrame, plot_dir: Path) -> Path | None:
+        required = {"winner_probability", "actual_winner"}
+        if comparison.is_empty() or not required.issubset(set(comparison.columns)):
+            return None
         frame = comparison.filter(pl.col("winner_probability").is_not_null())
         if frame.is_empty():
             return None
