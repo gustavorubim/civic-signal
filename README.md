@@ -16,6 +16,8 @@ Core project documents:
 - [`docs/technical_appendix.md`](docs/technical_appendix.md): model details.
 - [`docs/performance.md`](docs/performance.md): Numba and performance contract.
 - [`docs/api_requirements.md`](docs/api_requirements.md): live-ingestion API notes.
+- [`docs/plan_completion_audit.md`](docs/plan_completion_audit.md): current evidence
+  against the plan's definition of done and remaining blockers.
 
 ## Package Initialization And Installation
 
@@ -58,11 +60,120 @@ uv run election-outcomes forecast run \
   --run-id full-forecast
 ```
 
+The default polling engine is resolved from `configs/model.yaml`.
+The Bayesian path is the production default in config, so operational forecasts emit
+Bayesian posterior artifacts. The broad live-scope readiness gate is eligible with the
+current Bayes/NUTS run: ensemble log loss `0.124907` versus legacy Kalman `0.125154`,
+with 90% interval coverage `0.9662` versus legacy `0.9610`. To force the legacy
+Kalman/state-space path, run:
+
+```bash
+uv run election-outcomes forecast run \
+  --as-of 2026-05-08 \
+  --run-id kalman-polling-smoke \
+  --inference-engine kalman
+```
+
+The Bayesian backend defaults to compact hierarchical NumPyro/NUTS with two vectorized
+chains, 500 warmup iterations, 2,000 sampling iterations per chain, and a `0.99` target
+acceptance probability. A plain `uv sync` installs JAX, NumPyro, and ArviZ. The
+deterministic analytic bridge remains available for fast smoke runs by selecting it
+explicitly:
+
+NUTS polling observations use the empirical-Bayes pollster house-effect adjustment, a
+Bayesian-specific 7-day half-life, and population/methodology quality weights before
+fitting the election-day latent state. Bayesian component probabilities are normalized
+within each race before ensemble calibration so binary race probabilities remain
+coherent.
+
+```bash
+uv run election-outcomes forecast run \
+  --as-of 2026-05-08 \
+  --run-id analytic-polling-smoke \
+  --inference-engine bayes \
+  --bayesian-backend analytic
+```
+
+If the runtime environment is missing NumPyro/JAX or NUTS exceeds the configured wall-clock timeout, the run
+falls back through the configured policy and records that status in
+`posterior_diagnostics.json`.
+
 Open the main report:
 
 ```bash
 open artifacts/runs/full-forecast/diagnostics.html
 ```
+
+Verify a completed run's artifacts, plots, posterior schemas, and reward gates:
+
+```bash
+uv run election-outcomes verify run --run-id full-forecast
+```
+
+Run the fixture-backed Phase 8 multi-office verification scenario. This executes a
+Bayesian President-tracker+Senate+House+Governor 2026 forecast twice for
+reproducibility, runs the daily-update gate, verifies schemas/rewards, and writes the
+visual QA checklist. The President tracker is a non-control fixture row, so it appears in
+posterior/race/cross-office artifacts but does not contribute Electoral College control:
+
+```bash
+uv run election-outcomes verify run \
+  --scenario 2026-multioffice-verification \
+  --run-id phase8-verification \
+  --as-of 2026-05-08 \
+  --inference-engine bayes \
+  --quiet
+```
+
+To make the compact hierarchical NumPyro/NUTS backend explicit through the same Phase 8
+harness, add `--bayesian-backend nuts`:
+
+```bash
+uv run election-outcomes verify run \
+  --scenario 2026-multioffice-verification \
+  --run-id phase8-nuts-verification \
+  --as-of 2026-05-08 \
+  --inference-engine bayes \
+  --bayesian-backend nuts \
+  --quiet
+```
+
+Run a cached-posterior daily update from a Bayesian anchor run:
+
+```bash
+uv run election-outcomes forecast update \
+  --from-anchor bayes-polling-smoke \
+  --as-of 2026-05-09
+```
+
+The update appends posterior history, writes run-local update diagnostics, and refreshes
+`reward_card.json` so `R15_daily_update_quality` reflects the latest update gate.
+
+Audit whether the Bayesian path is eligible to become the production default:
+
+```bash
+uv run election-outcomes verify readiness \
+  --run-id bayes-default-readiness \
+  --forecast-run-id phase8-verification \
+  --bayes-backtest-run-id president-state-bayes-backtest \
+  --legacy-backtest-run-id president-state-backtest
+```
+
+This writes `artifacts/readiness/<run_id>/methodology_readiness.json` and
+`methodology_readiness.md`. The audit is intentionally conservative: it blocks a
+default switch unless Bayes dependencies are base dependencies, docs/config declare the
+Bayesian default, Phase 8 and hard reward gates pass, live-source scope is claimed, and
+rolling-origin Bayes evidence beats the legacy Kalman scorecard without degrading
+interval coverage. The calibrated publication layer uses a bounded Platt/logit
+transform with `ensemble_learning.calibration_max_slope: 2.0`; this keeps recalibration
+from manufacturing overconfident probabilities on small historical panels.
+The live-source scope check inspects the run's curated source manifest and tables; it
+only claims live 2026 coverage when successful non-file sources contribute
+model-bearing rows for every office listed in the scenario's
+`live_source_required_offices`. Neutral metadata rows, such as race-presence rows from
+Wikipedia, are reported as `metadata_only` rather than treated as enough to unlock a
+production default. The synthetic President tracker remains a fixture-only artifact
+exercise and is not a live-source coverage requirement.
 
 Main output:
 
@@ -84,9 +195,73 @@ artifacts/runs/full-forecast/
   performance.json
   plot_manifest.json
   poll_trajectory.parquet
+  recalibration_map.parquet      # when a latest backtest calibration map is applied
+  posterior_draws.parquet        # Bayesian default; absent on --inference-engine kalman
+  state_space_trajectory.parquet # Bayesian default; absent on --inference-engine kalman
+  pollster_house_effects.parquet # Bayesian default; absent on --inference-engine kalman
+  posterior_diagnostics.json     # Bayesian default; absent on --inference-engine kalman
+  fundamentals_prior.parquet     # Bayesian default; absent on --inference-engine kalman
+  seat_posterior.parquet         # Bayesian default; absent on --inference-engine kalman
+  senate_seat_posterior.parquet  # if senate control rows exist
+  house_seat_posterior.parquet   # if house control rows exist
+  governor_seat_posterior.parquet # if governor control rows exist
+  senate_joint_posterior.parquet # if Senate posterior rows exist
+  house_hierarchical_posterior.parquet # if House posterior rows exist
+  cross_office_posterior.parquet # if multiple midterm offices share draws
+  inference.log                  # Bayesian default; absent on --inference-engine kalman
+  inference.html                 # Bayesian default; absent on --inference-engine kalman
+  posterior_history.parquet      # after forecast update
+  latest_daily_update.json       # after forecast update
+  updates/<as-of>/               # after forecast update
+  timeout_failover_audit.json    # after Phase 8 verification
+  phase8_verification.json       # after verify run --scenario ...
+  visual_qa_checklist.json       # after verify run --scenario ...
+  verification.json              # after verify run
   stability_metrics.json
   plots/
 ```
+
+Readiness output:
+
+```text
+artifacts/readiness/bayes-default-readiness/
+  methodology_readiness.json
+  methodology_readiness.md
+```
+
+`posterior_draws.parquet` uses the same `model_config_hash` and
+`source_manifest_hash` lineage columns as `race_forecasts.parquet`. The bridge is
+deterministic for a fixed bundle, config, seed, and `as_of` date. Bayes runs also
+write `fundamentals_prior.parquet`, a CV-ridge or fallback Election-Day prior used by
+the polling posterior. The analytic bridge and NumPyro/NUTS backend both initialize
+their race-option logits from this artifact. Candidate offices with no eligible polls
+can still receive prior-only posterior draws from that fundamentals prior so sparse
+House/Senate races leave an auditable uncertainty artifact instead of disappearing from
+the Bayesian state. The legacy Kalman path remains available with
+`--inference-engine kalman`.
+
+Bayesian runs now also write office-methodology artifacts when relevant. When the
+upstream posterior is fitted by `--bayesian-backend nuts`, these artifacts are
+NUTS-backed decompositions of the shared fitted state-space draw stream; when
+`--bayesian-backend analytic` is selected they are labeled as analytic bridge outputs.
+
+- `senate_joint_posterior.parquet`: Phase 4 Senate shared-environment decomposition
+  with class effect, state deviation, and holdover-aware seat posterior summaries.
+- `house_hierarchical_posterior.parquet`: Phase 5 House hierarchy decomposition with
+  redistricting-era partitioning, state effects, district residuals, sparse-district
+  flags, and a non-dense covariance method.
+- `cross_office_posterior.parquet`: Phase 7 shared midterm draw stream with national
+  environment and per-office offsets for Senate/House/Governor offices present in the
+  run.
+
+Bayesian runs use Rich progress reporting for the fundamentals-prior and posterior
+fit phases. `--quiet` suppresses terminal rendering while still writing
+`inference.log` and `inference.html` for run-local inspection.
+
+When a trusted rolling-origin backtest has produced a latest calibration artifact,
+forecast runs also copy `recalibration_map.parquet` into the run directory. The reward
+card's `R14_calibrated_publication` gate records whether published probabilities used
+that persisted map or were already within the configured calibration tolerance.
 
 ### 2. Full Backtest
 
@@ -99,6 +274,82 @@ uv run election-outcomes backtest run \
   --run-id president-state-backtest
 ```
 
+The same rolling-origin harness can score the Bayesian polling path explicitly:
+
+```bash
+uv run election-outcomes backtest run \
+  --scenario president_state \
+  --holdout-cycle 2024 \
+  --run-id president-state-bayes-backtest \
+  --inference-engine bayes \
+  --bayesian-backend nuts
+```
+
+Use `--bayesian-backend analytic` for a fast deterministic bridge run when you are
+debugging scorecard plumbing rather than exercising the production NUTS backend.
+
+Write scheduled hyperprior refresh candidates without changing the production `latest`
+artifacts:
+
+```bash
+uv run election-outcomes backtest refresh-hyperpriors \
+  --run-id monthly-hyperpriors \
+  --scenarios president_state \
+  --inference-engine bayes \
+  --bayesian-backend nuts
+```
+
+This writes `artifacts/hyperprior_refreshes/<run_id>/hyperprior_refresh_manifest.json`,
+scenario-local candidate hyperpriors, and `comparison_report.md`. The refresh command is
+deliberately non-promoting; production forecasts continue reading
+`artifacts/backtests/latest/` until a separate explicit review promotes a candidate.
+
+Run the Phase 0 side-by-side methodology spike:
+
+```bash
+uv run election-outcomes spike phase-0 \
+  --scenario president_state \
+  --holdout-cycle 2024 \
+  --run-id phase0-potus-2024 \
+  --bayesian-backend nuts
+```
+
+Run the Phase 0b geometry and daily-update acceleration spike:
+
+```bash
+uv run election-outcomes spike phase-0b --run-id phase0b-acceleration
+```
+
+Run the compact 2022 Senate/House/Governor historical calibration gate for the
+Phase 4/5/7 office-methodology plan:
+
+```bash
+uv run election-outcomes verify historical-calibration \
+  --run-id midterm-2022-calibration \
+  --bayesian-backend nuts \
+  --quiet
+```
+
+This writes `artifacts/historical_calibration/<run_id>/historical_calibration.json`,
+`office_calibration.parquet`, `historical_calibration_comparison.parquet`, and a
+Markdown summary. The fixture proves the calibration gate is executable across Senate,
+House, and Governor; it does not replace a production-sized historical panel.
+
+For a production-dimension synthetic congressional panel, switch the source registry:
+
+```bash
+uv run election-outcomes verify historical-calibration \
+  --run-id historical-panels-2022-nuts \
+  --sources-config sources_historical_panels.yaml \
+  --data-dir data/historical-panels-nuts \
+  --artifacts-dir artifacts/historical-panels-nuts \
+  --bayesian-backend nuts \
+  --quiet
+```
+
+That registry loads full Senate and House fixture panels for 2014-2026 while keeping
+the default source registry compact for routine tests.
+
 Backtest output:
 
 ```text
@@ -109,14 +360,47 @@ artifacts/backtests/president-state-backtest/
   component_admission.json
   ensemble_learning.json
   probability_calibration.json
+  recalibration_map.parquet
+  bayesian_hyperpriors.json
   residual_covariance.parquet
+```
+
+Phase 0 spike output:
+
+```text
+artifacts/spikes/phase0-potus-2024/
+  comparison.json
+  phase0_comparison.parquet
+  rolling_predictions_kalman.parquet
+  rolling_predictions_bayes.parquet
+  scorecard_kalman.json
+  scorecard_bayes.json
+```
+
+Phase 0b spike output:
+
+```text
+artifacts/spikes/phase0b-acceleration/
+  phase0b_summary.json
+  geometry_comparison.parquet
+  acceleration_bakeoff.parquet
 ```
 
 The presidential-state benchmark evaluates multiple pre-election cuts where data exists:
 `T-90`, `T-60`, `T-30`, `T-7`, and `T-1`. When the row-count gate passes, the latest
 backtest also writes learned non-negative ensemble weights and a bounded Platt/logit
 calibration transform under `artifacts/backtests/latest/`; forecast runs consume those
-artifacts before publishing marginal race probabilities.
+artifacts before publishing marginal race probabilities. The same backtest pass also
+writes `bayesian_hyperpriors.json`, a rolling-origin grid search used by Bayes
+runs to set the Election-Day extra-variance and fundamentals-prior strength. The Phase
+0b spike records the non-centered parameterization gate and rejects global SMC for the
+combined dimensionality ladder unless its ESS/drift thresholds pass; the current
+configured daily-update strategy remains cached posterior reweighting with full-refit
+fallback semantics. Bayesian NUTS configuration includes a wall-clock timeout and an
+ordered fallback policy (`previous_posterior_reuse`, `bayes_svi_fallback`,
+`kalman_legacy_fallback`); Phase 8 writes `timeout_failover_audit.json` from a forced
+fixture timeout so the policy is exercised without marking the forecast itself as a
+fallback run.
 
 ### 3. Full Cycle Analysis
 
@@ -294,7 +578,7 @@ states/districts.
 configs/sources.yaml         # Presidential state-panel + fixture defaults.
 configs/sources_senate.yaml  # Senate state-panel (Class rotation), 6 cycles.
 configs/sources_house.yaml   # House district-panel, 6 cycles, 2 redistricting eras.
-configs/sources_live.yaml    # Live 538 polling overlay (extends sources.yaml).
+configs/sources_live.yaml    # Live 538 polling and Wikipedia metadata overlay.
 ```
 
 Each registry supports `extends:` to layer real-data adapters on top of the panel
@@ -383,8 +667,9 @@ for chamber, path in [
 - `compare_results` against 2026 returns empty (no actuals yet). R5/R6/R8 still gate
   on the rolling-origin backtest of 2014–2024.
 - The 2026 environment seed (D+3.0 for Senate, D+4.0 for House) is a midterm
-  out-party assumption baked into `scripts/generate_*_panel.py`. Replace with real
-  poll-aggregate values via `sources_live.yaml` when 538 senate/house adapters land.
+  out-party assumption baked into `scripts/generate_*_panel.py`. Replace it with real
+  poll-aggregate values via `sources_live.yaml` once upstream 538 or other live poll
+  streams contribute 2026 model-bearing rows.
 - House 2026 inherits the `2022_plus` redistricting era, so rolling-origin training
   uses 2022 + 2024 boundaries.
 
@@ -400,6 +685,29 @@ Important forecast artifacts:
   raw and calibrated per-option probabilities, vote-share intervals, drivers, data-quality
   flags, and lineage hashes.
 - `forecast_draws.parquet`: race-level posterior-style simulation draws.
+- `recalibration_map.parquet`: persisted Platt/logit recalibration map copied from the
+  latest trusted backtest when applied to published probabilities.
+- `posterior_draws.parquet`: Bayesian polling latent-share draws unless the run forces
+  `--inference-engine kalman`.
+- `state_space_trajectory.parquet`: Bayesian trajectory summaries by
+  race, option, and day, with the same lineage hashes as forecast rows.
+- `pollster_house_effects.parquet`: empirical-Bayes pollster house-effect estimates
+  used by the Bayesian polling bridge.
+- `posterior_diagnostics.json`: Bayesian polling diagnostics, draw count,
+  parameterization, and lineage hashes.
+- `fundamentals_prior.parquet`: Bayesian Election-Day prior from the trained
+  fundamentals model, including prior method and logit-scale uncertainty.
+- `seat_posterior.parquet`: Bayesian draw-level seat/control counts. When
+  Senate or House control rows exist, office-specific posterior files are also written.
+- `posterior_history.parquet`: append/update history of daily posterior summaries
+  created by `forecast update`.
+- `senate_joint_posterior.parquet`: opt-in Senate shared-environment artifact with
+  Senate class effect and state deviation decomposition.
+- `house_hierarchical_posterior.parquet`: opt-in House hierarchy artifact with
+  redistricting-era partition, state effect, district idiosyncrasy, and sparse-district
+  indicators.
+- `cross_office_posterior.parquet`: opt-in cross-office shared midterm environment
+  artifact over the common posterior draw stream.
 - `control_forecasts.parquet`: EC/control probability, EV/seat distributions, and
   pivotal/tipping information.
 - `reward_card.json`: machine-readable reward checks.
@@ -410,8 +718,9 @@ Current trust boundary:
 - Default data is deterministic fixture/panel data.
 - The default presidential panel is useful for development and benchmark shape, but it
   is not a reproduction of Silver Bulletin or FiveThirtyEight.
-- Live polling can be enabled with `configs/sources_live.yaml`; most live adapters are
-  still planned.
+- Live polling and metadata ingestion can be enabled with `configs/sources_live.yaml`.
+  The 2026 Wikipedia entries are neutral race-presence metadata, not a substitute for
+  model-bearing polls, fundamentals, or market observations.
 - Close-margin recount/certification fields are withheld by default because they are only
   experimental proxies. Set `experimental_outputs.include_close_margin_ecosystem: true`
   in `configs/model.yaml` only when you explicitly want those uncalibrated proxy fields.
@@ -683,10 +992,18 @@ PYTHONPATH=src uv run election-outcomes results cycle-eval \
   --reuse-existing
 ```
 
-### Live 538 Poll Smoke Run
+### Live Source Smoke Run
 
 The first live-ingestion path uses FiveThirtyEight's public Datasette CSV stream for
-the 2020 presidential poll archive. It does not need Google Civic.
+the 2020 presidential poll archive. The same live registry also includes keyless
+FiveThirtyEight/Datasette Senate, Governor, and House polling streams filtered to the
+2026 cycle; those streams contribute polling rows only when the upstream tables have
+matching 2026 general-election polls. The live registry also includes a keyless FRED
+UNRATE CSV adapter that emits model-bearing national macro fundamentals for the compact
+2026 Senate/Governor/House smoke races, plus keyless Wikipedia raw-page race-presence
+metadata. The Wikipedia rows are neutral `public_signals` with `z_score = 0.0`; they
+prove public HTTP text ingestion and provenance, but they do not influence the Bayesian
+polling latent state by themselves. The live registry does not need Google Civic.
 
 ```bash
 uv run election-outcomes forecast run \
@@ -709,6 +1026,30 @@ uv run election-outcomes results compare \
   --race-id US-PRES-WI-2020
 ```
 
+To probe whether the public 2026 Senate/Governor/House streams currently satisfy the
+Phase 8 live-source scope gate, run the verification scenario against the live registry:
+
+```bash
+uv run election-outcomes verify run \
+  --scenario 2026-multioffice-verification \
+  --run-id phase8-live-scope-analytic \
+  --as-of 2026-05-08 \
+  --inference-engine bayes \
+  --bayesian-backend analytic \
+  --sources-config sources_live.yaml \
+  --data-dir data/live-scope \
+  --artifacts-dir artifacts/live-scope \
+  --quiet
+```
+
+Inspect `artifacts/live-scope/runs/<run_id>/phase8_verification.json`. A production
+default switch still requires `fixture_scope.live_source_scope.status == "claimed"`.
+The FRED fundamentals adapter can satisfy that live-source scope for the compact smoke
+races; neutral Wikipedia `public_signals` rows alone cannot.
+If an HTTP refresh stalls after a prior successful sync, the source manifest records
+`status = stale_reused` and uses the cached raw snapshot rather than blocking the
+verification run indefinitely.
+
 ### Performance Benchmark
 
 ```bash
@@ -722,6 +1063,10 @@ Benchmark output:
 ```text
 artifacts/benchmarks/full-perf/performance_benchmark.json
 ```
+
+The benchmark isolates simulation throughput. It uses the deterministic Kalman polling
+path to build the setup ensemble, then times repeated `SimulationEngine` draws with the
+configured performance backend.
 
 ## Appendix B: Diagnostics And Plots
 
@@ -774,14 +1119,52 @@ PY
 - `sync`: snapshot configured fixture or HTTP CSV sources into the local raw lake.
 - `build-features`: normalize raw snapshots into curated Parquet tables and race tiers.
 - `forecast run`: refresh data, rebuild features, run models, simulate outcomes, and
-  emit artifacts.
+  emit artifacts. The inference engine defaults to `configs/model.yaml`; use
+  `--inference-engine kalman` to force the legacy path. Use `--bayesian-backend analytic`
+  for the deterministic bridge or `--bayesian-backend nuts` for the production default
+  compact hierarchical NumPyro/NUTS backend. Use `--quiet` to suppress the completion
+  message.
+- `forecast update`: run the configured daily-update strategy from a Bayesian anchor
+  run and append `posterior_history.parquet`.
 - `backtest run`: refit components by rolling-origin cycle, score baselines, learn
   simplex-constrained ensemble weights, fit probability calibration, and refresh latest
-  admission/covariance artifacts.
-- `report build`: rebuild diagnostics and methodology files for an existing run.
+  admission/covariance artifacts. The inference engine defaults to `configs/model.yaml`;
+  use `--inference-engine bayes` or `--inference-engine kalman` to override it in the
+  same historical harness. Use `--bayesian-backend analytic` or `--bayesian-backend nuts`
+  to choose the Bayesian backend for Bayes folds.
+- `backtest refresh-hyperpriors`: run the configured scheduled hyperprior refresh and
+  write candidate artifacts plus a comparison report under `artifacts/hyperprior_refreshes/`
+  without promoting `artifacts/backtests/latest/`. It accepts the same
+  `--bayesian-backend` override for candidate backtests.
+- `report build`: rebuild diagnostics and methodology files for an existing run. It uses
+  the fast legacy Kalman rolling-origin baseline for report-only benchmark context; run
+  `backtest run --inference-engine bayes --bayesian-backend nuts` explicitly when you
+  need Bayesian training evidence.
+- `verify run`: verify required run artifacts, plot files, posterior schemas, and
+  reward gates, then write `verification.json` in the run directory. With
+  `--scenario 2026-multioffice-verification`, it orchestrates the fixture-backed Phase 8
+  Senate+House+Governor verification run and writes `phase8_verification.json` plus
+  `visual_qa_checklist.json`. Use `--bayesian-backend nuts` to route Phase 8 through
+  the compact hierarchical NumPyro/NUTS backend. The Silver benchmark is scoped to the
+  configured run: a compact multi-office Phase 8 run can score `production` for its
+  configured scope without claiming nationwide live-source coverage.
+- `verify readiness`: audit the default-switch contract and write
+  `artifacts/readiness/<run_id>/methodology_readiness.json` plus a Markdown report.
+- `verify historical-calibration`: run the compact 2022 Senate/House/Governor
+  historical calibration audit, write `artifacts/historical_calibration/<run_id>/`,
+  and gate Phase 4 Senate ECE, Phase 5 House ECE, and Phase 7 cross-office per-office
+  ECE. It defaults to `--bayesian-backend nuts`; use `analytic` only for fast plumbing
+  checks. Use `--sources-config sources_historical_panels.yaml` for the
+  production-dimension synthetic Senate/House panel.
+- `spike phase-0`: run the Kalman-vs-Bayes rolling-origin comparison harness and
+  write the Phase 0 go/no-go artifact under `artifacts/spikes/`. Use
+  `--bayesian-backend` to choose the Bayes comparison backend.
+- `spike phase-0b`: run centered-vs-non-centered geometry checks and the
+  SMC/SVI/reweighting dimensionality bakeoff, then write the Phase 0b strategy artifact.
 - `benchmark run`: measure simulation throughput.
 - `results compare`: compare one forecast run against known actual results.
-- `results cycle-eval`: run same-date historical forecast-vs-actual analysis.
+- `results cycle-eval`: run same-date historical forecast-vs-actual analysis. Generated
+  forecast runs accept `--inference-engine` and `--bayesian-backend` overrides.
 
 ## Appendix D: Trust, Rewards, And API Credentials
 
@@ -792,12 +1175,16 @@ Reward interpretation:
   fingerprint.
 - `R5_baseline_competition`, `R6_component_admission`, and `R8_uncertainty_quality`
   require enough historical rows and should stay honest when sample sizes are weak.
+  `R6` checks the components admitted as trusted by the current rolling-origin evidence;
+  components rejected by admission can still be shown as diagnostics or used as priors,
+  but they do not get trusted ensemble weight.
 - `R2_provenance` is row-level: every forecast row must carry a model-config hash and
   source-manifest hash.
 
 No API credentials are needed to run default fixture-backed forecasts, backtests, plots,
-diagnostics, comparisons, or benchmarks. The first live source in
-`configs/sources_live.yaml` also runs keylessly through a public FiveThirtyEight CSV.
+diagnostics, comparisons, or benchmarks. The live sources in `configs/sources_live.yaml`
+also run keylessly through public FiveThirtyEight/Datasette CSV streams, FRED CSV
+downloads, and Wikipedia raw-page HTTP text reads.
 
 Google Civic is optional. The current live path does not use `GOOGLE_CIVIC_API_KEY`, and
 Civic should not block polling, fundamentals, market, or historical-result ingestion.

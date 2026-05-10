@@ -35,6 +35,11 @@ The benchmark writes:
 artifacts/benchmarks/<run_id>/performance_benchmark.json
 ```
 
+The benchmark isolates simulation throughput. It uses deterministic Kalman polling to
+construct the setup ensemble, then times repeated simulation draws with the configured
+Numba or Python backend. Use forecast or verification commands when measuring the
+Bayesian/NUTS sampler itself.
+
 Forecast runs also write:
 
 ```text
