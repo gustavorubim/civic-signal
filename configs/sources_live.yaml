@@ -14,3 +14,126 @@ sources:
       stage: general
       race_id: US-PRES-WI-2020
       parties: [DEM, REP]
+  - id: fivethirtyeight_senate_polls_2026
+    table: polls
+    type: http_csv
+    path: senate_polls.csv
+    parser_version: fivethirtyeight-general-polls-v1
+    license: Public FiveThirtyEight/Datasette polling table; record terms before redistribution.
+    auth_mode: public
+    url: https://fivethirtyeight.datasettes.com/polls/senate_polls.csv?cycle=2026&_stream=on
+    parser_args:
+      cycle: 2026
+      office: senate
+      stage: general
+      parties: [DEM, REP]
+  - id: fivethirtyeight_governor_polls_2026
+    table: polls
+    type: http_csv
+    path: governor_polls.csv
+    parser_version: fivethirtyeight-general-polls-v1
+    license: Public FiveThirtyEight/Datasette polling table; record terms before redistribution.
+    auth_mode: public
+    url: https://fivethirtyeight.datasettes.com/polls/governor_polls.csv?cycle=2026&_stream=on
+    parser_args:
+      cycle: 2026
+      office: governor
+      stage: general
+      parties: [DEM, REP]
+  - id: fivethirtyeight_house_polls_2026
+    table: polls
+    type: http_csv
+    path: house_polls.csv
+    parser_version: fivethirtyeight-general-polls-v1
+    license: Public FiveThirtyEight/Datasette polling table; record terms before redistribution.
+    auth_mode: public
+    url: https://fivethirtyeight.datasettes.com/polls/house_polls.csv?cycle=2026&_stream=on
+    parser_args:
+      cycle: 2026
+      office: house
+      stage: general
+      parties: [DEM, REP]
+      house_race_id_format: compact
+  - id: fred_unrate_2026_fundamentals
+    table: fundamentals
+    type: http_csv
+    path: fred_unrate.csv
+    parser_version: fred-national-fundamentals-v1
+    license: Federal Reserve Bank of St. Louis FRED CSV for BLS unemployment series UNRATE; keyless read-only macro signal.
+    auth_mode: public
+    url: https://fred.stlouisfed.org/graph/fredgraph.csv?id=UNRATE
+    parser_args:
+      series_id: UNRATE
+      as_of: "2026-05-08"
+      lookback_observations: 120
+      economic_index_scale: 0.1
+      races:
+        - race_id: US-SEN-GA-2026
+          partisan_lean: 0.4
+          incumbency_advantage: 0.5
+          demographic_turnout_index: 0.2
+          historical_turnout_rate: 0.642
+          registered_voters: 5200000
+        - race_id: US-GOV-GA-2026
+          partisan_lean: -0.4
+          incumbency_advantage: -0.7
+          demographic_turnout_index: 0.2
+          historical_turnout_rate: 0.575
+          registered_voters: 7600000
+        - race_id: US-HOUSE-CA45-2026
+          partisan_lean: -1.6
+          incumbency_advantage: -1.0
+          demographic_turnout_index: 0.1
+          historical_turnout_rate: 0.584
+          registered_voters: 510000
+  - id: wikipedia_senate_2026_race_presence
+    table: public_signals
+    type: http_text
+    path: wikipedia_2026_senate.wikitext
+    parser_version: wikipedia-race-presence-signals-v1
+    license: Wikipedia article text under CC BY-SA/GFDL; used only as opt-in race-presence metadata.
+    auth_mode: public
+    url: https://en.wikipedia.org/wiki/2026_United_States_Senate_elections?action=raw
+    parser_args:
+      cycle: 2026
+      observed_at: "2026-05-10T00:00:00Z"
+      races:
+        - race_id: US-SEN-GA-2026
+          office_type: senate
+          patterns:
+            - "2026 United States Senate election in Georgia"
+            - "^==\\s*Georgia\\s*=="
+  - id: wikipedia_governor_2026_race_presence
+    table: public_signals
+    type: http_text
+    path: wikipedia_2026_governor.wikitext
+    parser_version: wikipedia-race-presence-signals-v1
+    license: Wikipedia article text under CC BY-SA/GFDL; used only as opt-in race-presence metadata.
+    auth_mode: public
+    url: https://en.wikipedia.org/wiki/2026_United_States_gubernatorial_elections?action=raw
+    parser_args:
+      cycle: 2026
+      observed_at: "2026-05-10T00:00:00Z"
+      races:
+        - race_id: US-GOV-GA-2026
+          office_type: governor
+          patterns:
+            - "2026 Georgia gubernatorial election"
+            - "^==\\s*Georgia\\s*=="
+  - id: wikipedia_house_2026_race_presence
+    table: public_signals
+    type: http_text
+    path: wikipedia_2026_house.wikitext
+    parser_version: wikipedia-race-presence-signals-v1
+    license: Wikipedia article text under CC BY-SA/GFDL; used only as opt-in race-presence metadata.
+    auth_mode: public
+    url: https://en.wikipedia.org/wiki/2026_United_States_House_of_Representatives_elections?action=raw
+    parser_args:
+      cycle: 2026
+      observed_at: "2026-05-10T00:00:00Z"
+      races:
+        - race_id: US-HOUSE-CA45-2026
+          office_type: house
+          patterns:
+            - "\\{\\{ushr\\|CA\\|45\\|X\\}\\}"
+            - "2024 California's 45th congressional district election"

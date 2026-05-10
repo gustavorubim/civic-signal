@@ -484,3 +484,23 @@ scenarios:
     election_date: "2026-11-03"
     default_as_of: "2026-11-02"
     redistricting_era: "2022_plus"
+
+  # ---------------- Multi-office verification scenarios ----------------
+  2022-midterm-historical-calibration:
+    description: 2022 compact midterm historical calibration fixture for Senate, House, and Governor gates.
+    family: 2022-midterm-historical-calibration
+    cycle: 2022
+    office_types: [senate, house, governor]
+    election_date: "2022-11-08"
+    default_as_of: "2022-11-07"
+    expected_offices: [senate, house, governor]
+
+  2026-multioffice-verification:
+    description: 2026 multi-office Bayesian verification fixture with non-control President tracker.
+    family: 2026-multioffice-verification
+    cycle: 2026
+    office_types: [president, senate, house, governor]
+    election_date: "2026-11-03"
+    default_as_of: "2026-05-08"
+    expected_offices: [president, senate, house, governor]
+    live_source_required_offices: [senate, house, governor]

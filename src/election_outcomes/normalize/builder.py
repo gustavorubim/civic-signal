@@ -1,13 +1,73 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import ClassVar
 
 import polars as pl
 
 from election_outcomes.config import ProjectContext
 from election_outcomes.storage.io import write_parquet
+
+US_STATE_ABBREVIATIONS: dict[str, str] = {
+    "ALABAMA": "AL",
+    "ALASKA": "AK",
+    "ARIZONA": "AZ",
+    "ARKANSAS": "AR",
+    "CALIFORNIA": "CA",
+    "COLORADO": "CO",
+    "CONNECTICUT": "CT",
+    "DELAWARE": "DE",
+    "DISTRICT OF COLUMBIA": "DC",
+    "FLORIDA": "FL",
+    "GEORGIA": "GA",
+    "HAWAII": "HI",
+    "IDAHO": "ID",
+    "ILLINOIS": "IL",
+    "INDIANA": "IN",
+    "IOWA": "IA",
+    "KANSAS": "KS",
+    "KENTUCKY": "KY",
+    "LOUISIANA": "LA",
+    "MAINE": "ME",
+    "MARYLAND": "MD",
+    "MASSACHUSETTS": "MA",
+    "MICHIGAN": "MI",
+    "MINNESOTA": "MN",
+    "MISSISSIPPI": "MS",
+    "MISSOURI": "MO",
+    "MONTANA": "MT",
+    "NEBRASKA": "NE",
+    "NEVADA": "NV",
+    "NEW HAMPSHIRE": "NH",
+    "NEW JERSEY": "NJ",
+    "NEW MEXICO": "NM",
+    "NEW YORK": "NY",
+    "NORTH CAROLINA": "NC",
+    "NORTH DAKOTA": "ND",
+    "OHIO": "OH",
+    "OKLAHOMA": "OK",
+    "OREGON": "OR",
+    "PENNSYLVANIA": "PA",
+    "RHODE ISLAND": "RI",
+    "SOUTH CAROLINA": "SC",
+    "SOUTH DAKOTA": "SD",
+    "TENNESSEE": "TN",
+    "TEXAS": "TX",
+    "UTAH": "UT",
+    "VERMONT": "VT",
+    "VIRGINIA": "VA",
+    "WASHINGTON": "WA",
+    "WEST VIRGINIA": "WV",
+    "WISCONSIN": "WI",
+    "WYOMING": "WY",
+}
+US_STATE_LOOKUP: dict[str, str] = {
+    **US_STATE_ABBREVIATIONS,
+    **{value: value for value in US_STATE_ABBREVIATIONS.values()},
+}
 
 
 @dataclass(frozen=True)
@@ -158,19 +218,29 @@ class CuratedDataBuilder:
         return CuratedBuildResult(tables)
 
     def _read_source(self, row: dict[str, object]) -> pl.DataFrame:
-        frame = pl.read_csv(
-            str(row["raw_path"]),
-            infer_schema_length=1000,
-            null_values=["", "null", "None"],
-            try_parse_dates=True,
-        )
-        if frame.columns:
-            frame = frame.filter(pl.col(frame.columns[0]).is_not_null())
         table = str(row["table"])
         parser_version = str(row["parser_version"])
         parser_args = self._parser_args_from_row(row)
+        if parser_version == "wikipedia-race-presence-signals-v1":
+            frame = self._normalize_wikipedia_race_presence(
+                Path(str(row["raw_path"])).read_text(encoding="utf-8"),
+                parser_args,
+            )
+        else:
+            frame = pl.read_csv(
+                str(row["raw_path"]),
+                infer_schema_length=1000,
+                null_values=["", "null", "None"],
+                try_parse_dates=True,
+            )
+            if frame.columns:
+                frame = frame.filter(pl.col(frame.columns[0]).is_not_null())
         if parser_version == "fivethirtyeight-president-polls-v1":
             frame = self._normalize_538_president_polls(frame, parser_args)
+        elif parser_version == "fivethirtyeight-general-polls-v1":
+            frame = self._normalize_538_general_polls(frame, parser_args)
+        elif parser_version == "fred-national-fundamentals-v1":
+            frame = self._normalize_fred_national_fundamentals(frame, parser_args)
         elif parser_version in self.PRESIDENT_STATE_PANEL_TABLES:
             expected_table = self.PRESIDENT_STATE_PANEL_TABLES[parser_version]
             if table != expected_table:
@@ -256,6 +326,70 @@ class CuratedDataBuilder:
         if parser_version == "president-state-panel-polls-v1":
             return self._president_state_panel_polls(frame, parser_version, parser_args)
         raise ValueError(f"Unsupported president state panel parser: {parser_version}")
+
+    def _normalize_fred_national_fundamentals(
+        self, frame: pl.DataFrame, parser_args: dict[str, object]
+    ) -> pl.DataFrame:
+        series_id = str(parser_args.get("series_id") or "UNRATE")
+        as_of = str(parser_args.get("as_of") or "").strip()
+        races = parser_args.get("races")
+        if not as_of:
+            raise ValueError("fred-national-fundamentals-v1 requires parser_args.as_of")
+        if not isinstance(races, list) or not races:
+            raise ValueError("fred-national-fundamentals-v1 requires parser_args.races")
+        if "observation_date" not in frame.columns or series_id not in frame.columns:
+            raise ValueError(
+                f"fred-national-fundamentals-v1 requires observation_date and {series_id} columns"
+            )
+
+        observations = (
+            frame.select(
+                pl.col("observation_date").cast(pl.Date, strict=False),
+                pl.col(series_id).cast(pl.Float64, strict=False).alias("series_value"),
+            )
+            .drop_nulls()
+            .filter(pl.col("observation_date") <= pl.lit(as_of).str.strptime(pl.Date))
+            .sort("observation_date")
+        )
+        if observations.is_empty():
+            raise ValueError(f"No {series_id} observations are available on or before {as_of}")
+
+        lookback = max(int(parser_args.get("lookback_observations", 120)), 2)
+        baseline = observations.tail(lookback)
+        latest = observations.tail(1).row(0, named=True)
+        mean = float(baseline["series_value"].mean())
+        std = float(baseline["series_value"].std() or 1.0)
+        z_score = (float(latest["series_value"]) - mean) / max(std, 1e-9)
+        index_scale = float(parser_args.get("economic_index_scale", 0.1))
+        economic_index = max(min(-z_score * index_scale, 3.0), -3.0)
+
+        rows: list[dict[str, object]] = []
+        for item in races:
+            if not isinstance(item, dict):
+                raise ValueError("Each FRED fundamentals race entry must be a mapping")
+            race_id = str(item.get("race_id") or "").strip()
+            if not race_id:
+                raise ValueError("Each FRED fundamentals race entry requires race_id")
+            rows.append(
+                {
+                    "race_id": race_id,
+                    "as_of": as_of,
+                    "partisan_lean": item.get("partisan_lean", 0.0),
+                    "incumbency_advantage": item.get("incumbency_advantage", 0.0),
+                    "economic_index": economic_index,
+                    "demographic_turnout_index": item.get("demographic_turnout_index", 0.0),
+                    "historical_turnout_rate": item.get("historical_turnout_rate", 0.6),
+                    "registered_voters": item.get("registered_voters", 0.0),
+                    "economic_series_id": series_id,
+                    "economic_observation_date": latest["observation_date"],
+                    "economic_series_value": latest["series_value"],
+                    "economic_series_z_score": z_score,
+                    "economic_index_method": (
+                        f"negative_z_score_scaled_{index_scale:g}_over_{baseline.height}_obs"
+                    ),
+                }
+            )
+        return pl.DataFrame(rows)
 
     def _president_state_panel_races(
         self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
@@ -1189,6 +1323,246 @@ class CuratedDataBuilder:
             .unique(subset=["poll_id", "race_id", "option_id"], keep="last", maintain_order=True)
             .sort(["race_id", "option_id", "end_date", "poll_id"])
         )
+
+    def _normalize_538_general_polls(
+        self, frame: pl.DataFrame, parser_args: dict[str, object] | None = None
+    ) -> pl.DataFrame:
+        required = {
+            "cycle",
+            "state",
+            "pollster",
+            "poll_id",
+            "question_id",
+            "start_date",
+            "end_date",
+            "sample_size",
+            "population",
+            "population_full",
+            "methodology",
+            "office_type",
+            "seat_number",
+            "internal",
+            "partisan",
+            "stage",
+            "candidate_party",
+            "pct",
+        }
+        missing = required.difference(frame.columns)
+        if missing:
+            raise ValueError(f"FiveThirtyEight general polls missing columns: {sorted(missing)}")
+        args = parser_args or {}
+        required_args = {"cycle", "office", "stage", "parties"}
+        missing_args = required_args.difference(args)
+        if missing_args:
+            raise ValueError(
+                f"FiveThirtyEight general parser_args missing required keys: {sorted(missing_args)}"
+            )
+
+        cycle = int(args["cycle"])
+        office = str(args["office"]).lower().strip()
+        stage_lower = str(args["stage"]).lower().strip()
+        parties = [str(party).upper() for party in list(args["parties"])]
+        if office not in {"senate", "house", "governor"}:
+            raise ValueError(
+                "FiveThirtyEight general parser_args.office must be senate, house, or governor"
+            )
+        if not parties:
+            raise ValueError("FiveThirtyEight general parser_args parties must be non-empty")
+
+        base = frame.with_columns(
+            pl.col("cycle").cast(pl.Int64, strict=False),
+            pl.col("candidate_party").str.to_uppercase().alias("candidate_party"),
+            pl.col("state")
+            .cast(pl.Utf8)
+            .str.strip_chars()
+            .str.to_uppercase()
+            .replace(US_STATE_LOOKUP)
+            .alias("_state_abbr"),
+            pl.col("office_type")
+            .cast(pl.Utf8)
+            .str.to_lowercase()
+            .str.strip_chars()
+            .alias("_office_lower"),
+            pl.col("stage")
+            .cast(pl.Utf8)
+            .str.to_lowercase()
+            .str.strip_chars()
+            .alias("_stage_lower"),
+            self._date_expr("start_date"),
+            self._date_expr("end_date"),
+            pl.coalesce(pl.col("population_full"), pl.col("population"))
+            .cast(pl.Utf8)
+            .str.to_lowercase()
+            .replace({"v": "lv"})
+            .fill_null("a")
+            .alias("_population"),
+            pl.col("seat_number")
+            .cast(pl.Int64, strict=False)
+            .cast(pl.Utf8)
+            .str.zfill(2)
+            .alias("_seat_number"),
+        )
+        states = self._parser_states(args)
+        if states:
+            base = base.filter(pl.col("_state_abbr").is_in(states))
+
+        office_pattern = {"senate": "senate", "house": "house", "governor": "governor"}[office]
+        race_id = self._538_general_race_id_expr(
+            office,
+            cycle,
+            house_format=str(args.get("house_race_id_format", "compact")),
+        )
+        filtered = base.filter(
+            (pl.col("cycle") == cycle)
+            & pl.col("_office_lower").str.contains(office_pattern, literal=True)
+            & (pl.col("_stage_lower") == stage_lower)
+            & pl.col("candidate_party").is_in(parties)
+            & pl.col("pct").is_not_null()
+            & pl.col("_state_abbr").is_in(list(US_STATE_ABBREVIATIONS.values()))
+        )
+        if office == "house":
+            filtered = filtered.filter(pl.col("_seat_number").is_not_null())
+
+        return (
+            filtered.select(
+                pl.concat_str(
+                    [
+                        pl.lit("538-"),
+                        pl.lit(office),
+                        pl.lit("-"),
+                        pl.col("poll_id").cast(pl.Utf8),
+                        pl.lit("-"),
+                        pl.col("question_id").cast(pl.Utf8).fill_null("q"),
+                        pl.lit("-"),
+                        pl.col("candidate_party"),
+                    ]
+                ).alias("poll_id"),
+                pl.lit(cycle).alias("cycle"),
+                pl.lit(office).alias("office_type"),
+                race_id.alias("race_id"),
+                pl.col("pollster").fill_null("unknown").alias("pollster"),
+                "start_date",
+                "end_date",
+                pl.col("_population").alias("population"),
+                pl.col("sample_size").cast(pl.Float64, strict=False).alias("sample_size"),
+                pl.when(pl.col("internal").cast(pl.Boolean, strict=False))
+                .then(pl.lit("internal"))
+                .when(pl.col("partisan").is_not_null())
+                .then(pl.lit("partisan"))
+                .otherwise(pl.lit("nonpartisan"))
+                .alias("sponsor_class"),
+                self._methodology_expr().alias("methodology"),
+                pl.concat_str(
+                    [race_id, pl.lit("-"), pl.col("candidate_party").str.slice(0, 1)]
+                ).alias("option_id"),
+                pl.col("pct").cast(pl.Float64, strict=False).alias("pct"),
+            )
+            .unique(subset=["poll_id", "race_id", "option_id"], keep="last", maintain_order=True)
+            .sort(["race_id", "option_id", "end_date", "poll_id"])
+        )
+
+    @staticmethod
+    def _parser_states(parser_args: dict[str, object]) -> list[str]:
+        raw_states = parser_args.get("states")
+        if raw_states is None:
+            return []
+        if not isinstance(raw_states, list):
+            raise ValueError("parser_args.states must be a list when provided")
+        states = []
+        for value in raw_states:
+            state = str(value).strip().upper()
+            normalized = US_STATE_LOOKUP.get(state, state)
+            if normalized not in states:
+                states.append(normalized)
+        return states
+
+    @staticmethod
+    def _538_general_race_id_expr(office: str, cycle: int, *, house_format: str) -> pl.Expr:
+        if office == "senate":
+            return pl.concat_str([pl.lit("US-SEN-"), pl.col("_state_abbr"), pl.lit(f"-{cycle}")])
+        if office == "governor":
+            return pl.concat_str([pl.lit("US-GOV-"), pl.col("_state_abbr"), pl.lit(f"-{cycle}")])
+        if house_format == "hyphenated":
+            return pl.concat_str(
+                [
+                    pl.lit("US-HOUSE-"),
+                    pl.col("_state_abbr"),
+                    pl.lit("-"),
+                    pl.col("_seat_number"),
+                    pl.lit(f"-{cycle}"),
+                ]
+            )
+        if house_format != "compact":
+            raise ValueError("house_race_id_format must be compact or hyphenated")
+        return pl.concat_str(
+            [
+                pl.lit("US-HOUSE-"),
+                pl.col("_state_abbr"),
+                pl.col("_seat_number").str.strip_prefix("0"),
+                pl.lit(f"-{cycle}"),
+            ]
+        )
+
+    @staticmethod
+    def _normalize_wikipedia_race_presence(
+        text: str, parser_args: dict[str, object] | None = None
+    ) -> pl.DataFrame:
+        args = parser_args or {}
+        required = {"cycle", "observed_at", "races"}
+        missing = required.difference(args)
+        if missing:
+            raise ValueError(
+                f"Wikipedia race-presence parser_args missing required keys: {sorted(missing)}"
+            )
+        races = args["races"]
+        if not isinstance(races, list) or not races:
+            raise ValueError("Wikipedia race-presence parser_args.races must be a non-empty list")
+        cycle = int(args["cycle"])
+        observed_at = str(args["observed_at"])
+        signal_type = str(args.get("signal_type", "wikipedia_race_presence"))
+        require_all = bool(args.get("require_all", False))
+
+        rows: list[dict[str, object]] = []
+        missing_races: list[str] = []
+        for item in races:
+            if not isinstance(item, dict):
+                raise ValueError("Wikipedia race entries must be mappings")
+            race_id = str(item.get("race_id", "")).strip()
+            office_type = str(item.get("office_type", "")).strip().lower()
+            patterns = item.get("patterns")
+            if not race_id or not office_type or not isinstance(patterns, list) or not patterns:
+                raise ValueError(
+                    "Wikipedia race entries require race_id, office_type, and patterns"
+                )
+            matched = any(
+                re.search(str(pattern), text, flags=re.IGNORECASE | re.MULTILINE)
+                for pattern in patterns
+            )
+            if not matched:
+                missing_races.append(race_id)
+                continue
+            suffixes = item.get("option_suffixes", ["D", "R"])
+            if not isinstance(suffixes, list) or not suffixes:
+                raise ValueError("Wikipedia race option_suffixes must be a non-empty list")
+            for suffix in suffixes:
+                option_suffix = str(suffix).strip().upper()
+                rows.append(
+                    {
+                        "signal_id": f"wiki-{race_id}-{option_suffix}",
+                        "race_id": race_id,
+                        "signal_type": signal_type,
+                        "observed_at": observed_at,
+                        "option_id": f"{race_id}-{option_suffix}",
+                        "value": 1.0,
+                        "z_score": 0.0,
+                        "leakage_checked": True,
+                        "cycle": cycle,
+                        "office_type": office_type,
+                    }
+                )
+        if missing_races and require_all:
+            raise ValueError(f"Wikipedia race-presence patterns not found: {missing_races}")
+        return pl.DataFrame(rows)
 
     @staticmethod
     def _date_expr(column: str) -> pl.Expr:

@@ -76,16 +76,34 @@ class Scenario:
 
     def filter_catalog(self, catalog: pl.DataFrame, include_cycle: bool = True) -> pl.DataFrame:
         frame = catalog
-        for column in ("office_type", "geography_type", "control_body"):
-            value = self.payload.get(column)
-            if value is not None and column in frame.columns:
-                frame = frame.filter(pl.col(column) == value)
+        for column, aliases in {
+            "office_type": ("office_type", "office_types", "offices"),
+            "geography_type": ("geography_type", "geography_types"),
+            "control_body": ("control_body", "control_bodies"),
+        }.items():
+            if column in frame.columns:
+                frame = self._filter_column(frame, column, aliases)
         if include_cycle and self.cycle is not None and "cycle" in frame.columns:
             frame = frame.filter(pl.col("cycle") == self.cycle)
         return frame
 
     def metadata(self) -> dict[str, Any]:
         return {"name": self.name, **self.payload}
+
+    def _filter_column(
+        self, frame: pl.DataFrame, column: str, aliases: tuple[str, ...]
+    ) -> pl.DataFrame:
+        for alias in aliases:
+            if alias not in self.payload:
+                continue
+            value = self.payload.get(alias)
+            if value is None:
+                return frame
+            if isinstance(value, list):
+                values = [str(item) for item in value]
+                return frame.filter(pl.col(column).is_in(values))
+            return frame.filter(pl.col(column) == str(value))
+        return frame
 
 
 class ScenarioRegistry:

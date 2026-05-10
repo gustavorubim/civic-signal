@@ -1,0 +1,157 @@
+parser_arg_anchors:
+  congressional_panel_cycles: &congressional_panel_cycles [2014, 2016, 2018, 2020, 2022, 2024, 2026]
+  congressional_as_of_offsets: &congressional_as_of_offsets [90, 60, 30, 7, 1]
+
+sources:
+  - id: senate_state_panel_races
+    table: races
+    type: fixture
+    path: fixtures/senate_state_panel.csv
+    parser_version: senate-state-panel-races-v1
+    license: Synthetic public-data-style Senate state panel for production-dimension validation.
+    url: file://fixtures/senate_state_panel.csv
+    parser_args:
+      cycles: *congressional_panel_cycles
+  - id: senate_state_panel_options
+    table: options
+    type: fixture
+    path: fixtures/senate_state_panel.csv
+    parser_version: senate-state-panel-options-v1
+    license: Synthetic public-data-style Senate state panel for production-dimension validation.
+    url: file://fixtures/senate_state_panel.csv
+    parser_args:
+      cycles: *congressional_panel_cycles
+  - id: senate_state_panel_fundamentals
+    table: fundamentals
+    type: fixture
+    path: fixtures/senate_state_panel.csv
+    parser_version: senate-state-panel-fundamentals-v1
+    license: Synthetic public-data-style Senate state panel for production-dimension validation.
+    url: file://fixtures/senate_state_panel.csv
+    parser_args:
+      cycles: *congressional_panel_cycles
+      as_of_offsets_days: *congressional_as_of_offsets
+  - id: senate_state_panel_polls
+    table: polls
+    type: fixture
+    path: fixtures/senate_state_panel.csv
+    parser_version: senate-state-panel-polls-v1
+    license: Synthetic public-data-style Senate state panel for production-dimension validation.
+    url: file://fixtures/senate_state_panel.csv
+    parser_args:
+      cycles: *congressional_panel_cycles
+      as_of_offsets_days: *congressional_as_of_offsets
+      poll_duration_days: 3
+  - id: senate_state_panel_results
+    table: results
+    type: fixture
+    path: fixtures/senate_state_panel.csv
+    parser_version: senate-state-panel-results-v1
+    license: Synthetic public-data-style Senate state panel for production-dimension validation.
+    url: file://fixtures/senate_state_panel.csv
+    parser_args:
+      cycles: *congressional_panel_cycles
+  - id: house_district_panel_races
+    table: races
+    type: fixture
+    path: fixtures/house_district_panel.csv
+    parser_version: house-district-panel-races-v1
+    license: Synthetic public-data-style House district panel for production-dimension validation.
+    url: file://fixtures/house_district_panel.csv
+    parser_args:
+      cycles: *congressional_panel_cycles
+  - id: house_district_panel_options
+    table: options
+    type: fixture
+    path: fixtures/house_district_panel.csv
+    parser_version: house-district-panel-options-v1
+    license: Synthetic public-data-style House district panel for production-dimension validation.
+    url: file://fixtures/house_district_panel.csv
+    parser_args:
+      cycles: *congressional_panel_cycles
+  - id: house_district_panel_fundamentals
+    table: fundamentals
+    type: fixture
+    path: fixtures/house_district_panel.csv
+    parser_version: house-district-panel-fundamentals-v1
+    license: Synthetic public-data-style House district panel for production-dimension validation.
+    url: file://fixtures/house_district_panel.csv
+    parser_args:
+      cycles: *congressional_panel_cycles
+      as_of_offsets_days: *congressional_as_of_offsets
+  - id: house_district_panel_polls
+    table: polls
+    type: fixture
+    path: fixtures/house_district_panel.csv
+    parser_version: house-district-panel-polls-v1
+    license: Synthetic public-data-style House district panel for production-dimension validation.
+    url: file://fixtures/house_district_panel.csv
+    parser_args:
+      cycles: *congressional_panel_cycles
+      as_of_offsets_days: *congressional_as_of_offsets
+      poll_duration_days: 3
+  - id: house_district_panel_results
+    table: results
+    type: fixture
+    path: fixtures/house_district_panel.csv
+    parser_version: house-district-panel-results-v1
+    license: Synthetic public-data-style House district panel for production-dimension validation.
+    url: file://fixtures/house_district_panel.csv
+    parser_args:
+      cycles: *congressional_panel_cycles
+  - id: fixture_races
+    table: races
+    type: fixture
+    path: fixtures/races.csv
+    parser_version: fixture-v1
+    license: Synthetic public-data-style fixture for governor/local validation.
+    url: file://fixtures/races.csv
+  - id: fixture_options
+    table: options
+    type: fixture
+    path: fixtures/options.csv
+    parser_version: fixture-v1
+    license: Synthetic public-data-style fixture for governor/local validation.
+    url: file://fixtures/options.csv
+  - id: fixture_polls
+    table: polls
+    type: fixture
+    path: fixtures/polls.csv
+    parser_version: fixture-v1
+    license: Synthetic public-data-style fixture for governor/local validation.
+    url: file://fixtures/polls.csv
+  - id: fixture_market_quotes
+    table: market_quotes
+    type: fixture
+    path: fixtures/market_quotes.csv
+    parser_version: fixture-v1
+    license: Synthetic public-data-style fixture for local validation.
+    url: file://fixtures/market_quotes.csv
+  - id: fixture_public_signals
+    table: public_signals
+    type: fixture
+    path: fixtures/public_signals.csv
+    parser_version: fixture-v1
+    license: Synthetic public-data-style fixture for local validation.
+    url: file://fixtures/public_signals.csv
+  - id: fixture_fundamentals
+    table: fundamentals
+    type: fixture
+    path: fixtures/fundamentals.csv
+    parser_version: fixture-v1
+    license: Synthetic public-data-style fixture for governor/local validation.
+    url: file://fixtures/fundamentals.csv
+  - id: fixture_results
+    table: results
+    type: fixture
+    path: fixtures/results.csv
+    parser_version: fixture-v1
+    license: Synthetic public-data-style fixture for governor/local validation.
+    url: file://fixtures/results.csv
+  - id: fixture_backtest_predictions
+    table: backtest_predictions
+    type: fixture
+    path: fixtures/backtest_predictions.csv
+    parser_version: fixture-v1
+    license: Synthetic public-data-style fixture for local validation.
+    url: file://fixtures/backtest_predictions.csv

@@ -16,11 +16,13 @@ from election_outcomes.config import ProjectContext
 from election_outcomes.ingest.sources import SourceDefinition, SourceRegistry
 from election_outcomes.storage.io import read_json, write_json, write_parquet
 
-HTTP_RETRY_ATTEMPTS = 3
-HTTP_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
+HTTP_RETRY_ATTEMPTS = 2
+HTTP_BACKOFF_SECONDS = (1.0, 2.0)
+HTTP_TIMEOUT_SECONDS = 20
 HTTP_MAX_BYTES = 500 * 1024 * 1024
 HTTP_ALLOWED_CONTENT_TYPES = (
     "text/csv",
+    "text/x-wiki",
     "text/plain",
     "application/csv",
     "application/octet-stream",
@@ -88,7 +90,7 @@ class SyncRunner:
         previous: dict[str, str],
         retrieved_at: str,
     ) -> tuple[dict[str, object], bool]:
-        if source.type == "http_csv":
+        if source.type in {"http_csv", "http_text"}:
             return self._sync_http(source, previous, retrieved_at)
         if source.type != "fixture":
             raise ValueError(f"Unsupported source type: {source.type}")
@@ -125,7 +127,13 @@ class SyncRunner:
         previous: dict[str, str],
         retrieved_at: str,
     ) -> tuple[dict[str, object], bool]:
-        payload = self._http_get_with_retry(source.url)
+        try:
+            payload = self._http_get_with_retry(source.url)
+        except Exception as exc:
+            cached = self._cached_http_row(source, previous, retrieved_at, exc)
+            if cached is not None:
+                return cached, False
+            raise
         content_hash = hashlib.sha256(payload).hexdigest()
         suffix = self._http_suffix(source)
         raw_path = self.context.raw_dir / source.id / f"{content_hash}{suffix}"
@@ -152,16 +160,54 @@ class SyncRunner:
             did_fetch,
         )
 
+    def _cached_http_row(
+        self,
+        source: SourceDefinition,
+        previous: dict[str, str],
+        retrieved_at: str,
+        exc: Exception,
+    ) -> dict[str, object] | None:
+        previous_hash = str(previous.get(source.id) or "")
+        if not previous_hash:
+            return None
+        raw_path = self.context.raw_dir / source.id / f"{previous_hash}{self._http_suffix(source)}"
+        if not raw_path.exists():
+            return None
+        manifest_path = self.context.raw_dir / "source_manifest.parquet"
+        if manifest_path.exists():
+            manifest = pl.read_parquet(manifest_path)
+            previous_rows = manifest.filter(pl.col("source_id") == source.id)
+            if previous_rows.is_empty():
+                return None
+            previous_row = previous_rows.tail(1).row(0, named=True)
+            if (
+                str(previous_row.get("url") or "") != source.url
+                or str(previous_row.get("parser_version") or "") != source.parser_version
+            ):
+                return None
+        return {
+            "source_id": source.id,
+            "table": source.table,
+            "url": source.url,
+            "raw_path": str(raw_path),
+            "retrieved_at": retrieved_at,
+            "content_hash": previous_hash,
+            "license": source.license,
+            "parser_version": source.parser_version,
+            "parser_args": source.parser_args_json(),
+            "auth_mode": source.auth_mode,
+            "status": "stale_reused",
+            "error": f"refresh failed; reused previous raw snapshot: {exc}",
+            "downstream_usage": "",
+        }
+
     @staticmethod
     def _http_get_with_retry(url: str) -> bytes:
-        request = urllib.request.Request(
-            url,
-            headers={"User-Agent": "election-outcomes/0.1 (+research forecast sync)"},
-        )
+        request = urllib.request.Request(url)
         last_exc: Exception | None = None
         for attempt in range(HTTP_RETRY_ATTEMPTS):
             try:
-                with urllib.request.urlopen(request, timeout=60) as response:
+                with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
                     raw_type = response.headers.get("Content-Type") or ""
                     content_type = raw_type.split(";")[0].strip().lower()
                     if content_type and not any(

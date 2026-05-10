@@ -8,9 +8,14 @@ in `source_manifest.parquet`.
 Important current boundary: `.env` may contain real keys, but the first implemented
 live path does not need them. The default `configs/sources.yaml` registry is
 fixture-only. `configs/sources_live.yaml` adds a keyless HTTP CSV adapter for the
-FiveThirtyEight/Datasette 2020 presidential poll stream, normalized into the `polls`
-table for `US-PRES-WI-2020`. All other forecast support tables in that run are still
-fixtures.
+FiveThirtyEight/Datasette 2020 presidential poll stream, plus 2026 Senate, Governor,
+and House poll streams. These are normalized into the `polls` table when upstream rows
+exist for the configured cycle/stage/party filters. The same live registry includes a
+keyless FRED UNRATE CSV adapter that emits model-bearing national macro fundamentals
+for the compact 2026 Senate/Governor/House smoke races, plus Wikipedia raw-page
+race-presence metadata. The Wikipedia rows are neutral `public_signals` metadata, not
+model-bearing poll, fundamentals, or market observations. All other forecast support
+tables in that run are still fixtures or configured race priors.
 
 ## Not Needed For Current Runs
 
@@ -27,7 +32,9 @@ fixtures.
 
 ## Usually Public Or Keyless For Read-Only Use
 
-- FiveThirtyEight/Datasette poll CSV streams: current first live adapter, keyless.
+- FiveThirtyEight/Datasette poll CSV streams: current live polling adapters, keyless.
+- FRED graph CSV downloads: current UNRATE fundamentals adapter, keyless.
+- Wikipedia raw-page race-presence metadata: current `http_text` adapter, keyless.
 - Polymarket market data: public market/event endpoints are generally keyless; trading,
   portfolio, and authenticated WebSocket flows require credentials and are out of scope.
 - Kalshi market data: public market data can be read without trading credentials; trading
@@ -81,4 +88,8 @@ uv run election-outcomes results compare \
 
 This run proves API/file consumption, raw hashing, source-manifest provenance, parser
 normalization, forecast artifact generation, and forecast-vs-actual comparison for one
-real race. It is not yet a full live-source election model.
+real race. The 2026 Senate/Governor/House adapters are included in the same registry,
+but the methodology-readiness gate still requires successful non-file model-bearing rows
+for every required office before Bayes can become the production default. The FRED
+fundamentals adapter can supply that compact smoke-scope evidence; neutral Wikipedia
+race-presence rows are reported as metadata coverage only.

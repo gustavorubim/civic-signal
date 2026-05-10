@@ -1,14 +1,33 @@
 poll_id,race_id,pollster,start_date,end_date,population,sample_size,sponsor_class,methodology,option_id,pct
-P-AZ-1-D,US-SEN-AZ-2026,Desert Research,2026-04-10,2026-04-14,lv,900,nonpartisan,live_phone,US-SEN-AZ-2026-D,50.0
-P-AZ-1-R,US-SEN-AZ-2026,Desert Research,2026-04-10,2026-04-14,lv,900,nonpartisan,live_phone,US-SEN-AZ-2026-R,47.0
-P-AZ-2-D,US-SEN-AZ-2026,Southwest Polling,2026-04-20,2026-04-24,rv,1100,nonpartisan,online,US-SEN-AZ-2026-D,48.0
-P-AZ-2-R,US-SEN-AZ-2026,Southwest Polling,2026-04-20,2026-04-24,rv,1100,nonpartisan,online,US-SEN-AZ-2026-R,48.0
+P-GA-SEN-1-D,US-SEN-GA-2026,Peach State Research,2026-04-10,2026-04-14,lv,900,nonpartisan,live_phone,US-SEN-GA-2026-D,50.0
+P-GA-SEN-1-R,US-SEN-GA-2026,Peach State Research,2026-04-10,2026-04-14,lv,900,nonpartisan,live_phone,US-SEN-GA-2026-R,47.0
+P-GA-SEN-2-D,US-SEN-GA-2026,Southern Polling,2026-04-20,2026-04-24,rv,1100,nonpartisan,online,US-SEN-GA-2026-D,48.0
+P-GA-SEN-2-R,US-SEN-GA-2026,Southern Polling,2026-04-20,2026-04-24,rv,1100,nonpartisan,online,US-SEN-GA-2026-R,48.0
+P-CA45-HOUSE-1-D,US-HOUSE-CA45-2026,Coastal House Poll,2026-04-16,2026-04-19,lv,760,nonpartisan,online,US-HOUSE-CA45-2026-D,49.0
+P-CA45-HOUSE-1-R,US-HOUSE-CA45-2026,Coastal House Poll,2026-04-16,2026-04-19,lv,760,nonpartisan,online,US-HOUSE-CA45-2026-R,48.0
+P-GA-GOV-1-D,US-GOV-GA-2026,Peachtree Polling,2026-04-12,2026-04-15,lv,950,nonpartisan,mixed,US-GOV-GA-2026-D,47.0
+P-GA-GOV-1-R,US-GOV-GA-2026,Peachtree Polling,2026-04-12,2026-04-15,lv,950,nonpartisan,mixed,US-GOV-GA-2026-R,49.0
+P-GA-GOV-2-D,US-GOV-GA-2026,Capitol Survey,2026-04-22,2026-04-25,rv,1050,nonpartisan,online,US-GOV-GA-2026-D,48.0
+P-GA-GOV-2-R,US-GOV-GA-2026,Capitol Survey,2026-04-22,2026-04-25,rv,1050,nonpartisan,online,US-GOV-GA-2026-R,48.0
+P-PRES-TRACK-1-D,US-PRES-TRACKER-2026,National Tracker,2026-04-18,2026-04-21,rv,1800,nonpartisan,online,US-PRES-TRACKER-2026-D,49.0
+P-PRES-TRACK-1-R,US-PRES-TRACKER-2026,National Tracker,2026-04-18,2026-04-21,rv,1800,nonpartisan,online,US-PRES-TRACKER-2026-R,48.0
+P-PRES-TRACK-2-D,US-PRES-TRACKER-2026,Civic Barometer,2026-04-28,2026-05-01,rv,2200,nonpartisan,mixed,US-PRES-TRACKER-2026-D,48.0
+P-PRES-TRACK-2-R,US-PRES-TRACKER-2026,Civic Barometer,2026-04-28,2026-05-01,rv,2200,nonpartisan,mixed,US-PRES-TRACKER-2026-R,48.0
 P-PROP-1-Y,BALLOT-CA-PROP1-2026,Golden State Poll,2026-04-15,2026-04-18,lv,1200,nonpartisan,mixed,BALLOT-CA-PROP1-2026-YES,54.0
 P-PROP-1-N,BALLOT-CA-PROP1-2026,Golden State Poll,2026-04-15,2026-04-18,lv,1200,nonpartisan,mixed,BALLOT-CA-PROP1-2026-NO,41.0
 P-PROP-2-Y,BALLOT-CA-PROP1-2026,Pacific Survey,2026-04-25,2026-04-27,rv,1000,nonpartisan,online,BALLOT-CA-PROP1-2026-YES,52.0
 P-PROP-2-N,BALLOT-CA-PROP1-2026,Pacific Survey,2026-04-25,2026-04-27,rv,1000,nonpartisan,online,BALLOT-CA-PROP1-2026-NO,43.0
 P-WI-1-D,US-PRES-WI-2024,Lake Poll,2024-10-10,2024-10-12,lv,800,nonpartisan,live_phone,US-PRES-WI-2024-D,49.0
 P-WI-1-R,US-PRES-WI-2024,Lake Poll,2024-10-10,2024-10-12,lv,800,nonpartisan,live_phone,US-PRES-WI-2024-R,48.0
-P-NV-1-D,US-SEN-NV-2022,Silver State Poll,2022-10-15,2022-10-18,lv,850,nonpartisan,mixed,US-SEN-NV-2022-D,48.0
-P-NV-1-R,US-SEN-NV-2022,Silver State Poll,2022-10-15,2022-10-18,lv,850,nonpartisan,mixed,US-SEN-NV-2022-R,47.0
-
+P-NV-1-D,US-SEN-NV-2022,Silver State Poll,2022-10-15,2022-10-18,lv,850,nonpartisan,mixed,US-SEN-NV-2022-D,56.0
+P-NV-1-R,US-SEN-NV-2022,Silver State Poll,2022-10-15,2022-10-18,lv,850,nonpartisan,mixed,US-SEN-NV-2022-R,40.0
+P-NV-2-D,US-SEN-NV-2022,Desert Polling,2022-10-25,2022-10-28,lv,920,nonpartisan,online,US-SEN-NV-2022-D,58.0
+P-NV-2-R,US-SEN-NV-2022,Desert Polling,2022-10-25,2022-10-28,lv,920,nonpartisan,online,US-SEN-NV-2022-R,39.0
+P-CA45-2022-HOUSE-1-D,US-HOUSE-CA45-2022,Coastal House Poll,2022-10-12,2022-10-15,lv,760,nonpartisan,online,US-HOUSE-CA45-2022-D,44.0
+P-CA45-2022-HOUSE-1-R,US-HOUSE-CA45-2022,Coastal House Poll,2022-10-12,2022-10-15,lv,760,nonpartisan,online,US-HOUSE-CA45-2022-R,53.0
+P-CA45-2022-HOUSE-2-D,US-HOUSE-CA45-2022,Pacific District Survey,2022-10-25,2022-10-28,lv,840,nonpartisan,mixed,US-HOUSE-CA45-2022-D,45.0
+P-CA45-2022-HOUSE-2-R,US-HOUSE-CA45-2022,Pacific District Survey,2022-10-25,2022-10-28,lv,840,nonpartisan,mixed,US-HOUSE-CA45-2022-R,52.0
+P-GA-2022-GOV-1-D,US-GOV-GA-2022,Peachtree Polling,2022-10-10,2022-10-13,lv,950,nonpartisan,mixed,US-GOV-GA-2022-D,46.0
+P-GA-2022-GOV-1-R,US-GOV-GA-2022,Peachtree Polling,2022-10-10,2022-10-13,lv,950,nonpartisan,mixed,US-GOV-GA-2022-R,53.0
+P-GA-2022-GOV-2-D,US-GOV-GA-2022,Capitol Survey,2022-10-24,2022-10-27,lv,1050,nonpartisan,online,US-GOV-GA-2022-D,47.0
+P-GA-2022-GOV-2-R,US-GOV-GA-2022,Capitol Survey,2022-10-24,2022-10-27,lv,1050,nonpartisan,online,US-GOV-GA-2022-R,52.0
