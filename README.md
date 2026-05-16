@@ -4,11 +4,28 @@
   <img src="docs/assets/civic-signal-bayesian-performance-logo.png" alt="Civic Signal Bayesian statistical forecasting logo" width="420">
 </p>
 
-Civic Signal is a CLI-first U.S. election forecasting engine built as an engineered,
-auditable alternative to narrow POTUS-only economic baselines. The package syncs public
-or fixture-backed sources, builds curated race tables, runs
-polling/fundamentals/market/public-signal components, simulates correlated outcomes,
-and writes reproducible diagnostics.
+Civic Signal is a CLI-first U.S. election forecasting engine intended as a
+Python-native alternative that builds on the Economist-style Bayesian election-modeling
+lineage. It starts from the same broad forecasting problem: combine polls,
+fundamentals, public signals, and uncertainty-aware simulation into a coherent
+probabilistic forecast. The repo then extends that baseline into a broader engineering
+surface for repeatable source sync, race normalization, component admission,
+calibration, diagnostics, and reproducibility checks.
+
+The project is also a methodology benchmark harness, not only one forecasting recipe.
+It compares Bayesian state-space inference, analytic/Kalman baselines, rolling-origin
+calibration, source coverage, forecast-vs-actual scoring, Silver/FiveThirtyEight-style
+methodology readiness, and simulation-throughput performance. The intended
+improvements are explicit: broader race and office coverage, row-level provenance,
+sparse-race honesty, calibrated probability publication, reproducible run artifacts,
+model cards, reward gates, and benchmarkable performance.
+
+The implementation is deliberately Python-native and performance-aware. The current
+Bayesian path uses the Pyro-family NumPyro/JAX stack with compact hierarchical NUTS;
+table work is built around Polars/DuckDB patterns; repeated numerical simulation uses
+Numba and parallel kernels when practical. The backend contracts are artifact-oriented
+so future Pyro/PyTorch, NumPyro/JAX, analytic, or other inference engines can be
+benchmarked against the same CLI workflows and output schemas.
 
 The current default run is deterministic and fixture-backed so the full artifact,
 plotting, reward, and benchmark contract can be tested before broader live adapters are
