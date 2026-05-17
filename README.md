@@ -1236,3 +1236,7 @@ Remaining live-adapter implementation order:
 3. Polls: public poll feeds and pollster metadata.
 4. Markets: read-only Kalshi/Polymarket public data, with no trading credentials.
 5. Public signals: GDELT and Wikimedia/pageview-style public attention features.
+
+## License
+
+Civic Signal is released under the MIT License. See [`LICENSE`](LICENSE).

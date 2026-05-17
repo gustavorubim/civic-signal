@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Civic Signal: a research-grade U.S. election forecasting engine with auditable artifacts and verifiable rewards."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
 dependencies = [
   "duckdb>=1.1.3",
   "arviz>=0.21.0",
