@@ -703,7 +703,7 @@ class RewardV2Evaluator:
         levels = list(thr.get("nominal_levels", [0.5, 0.8, 0.9]))
         observed: dict[str, float | None] = {}
         reasons: list[str] = []
-        any_present = False
+        missing_levels: list[str] = []
         for level in levels:
             key_candidates = [
                 f"interval_{int(level * 100)}_coverage",
@@ -716,16 +716,17 @@ class RewardV2Evaluator:
                 if value is not None:
                     break
             observed[str(level)] = value
-            if value is not None:
-                any_present = True
-                if abs(value - float(level)) > tol:
-                    reasons.append(f"Coverage at {level}: {value} outside ±{tol}")
-        if not any_present:
+            if value is None:
+                missing_levels.append(str(level))
+            elif abs(value - float(level)) > tol:
+                reasons.append(f"Coverage at {level}: {value} outside ±{tol}")
+        if missing_levels:
             return _missing_metric_state(
                 "R8_uncertainty_quality",
-                reasons=["Missing interval coverage metrics"],
+                reasons=[f"Missing interval coverage for levels: {missing_levels}"],
                 threshold=thr,
                 evidence=evidence,
+                metric={"observed_coverage": observed, "tolerance": tol},
             )
         if nested.get("effective_n_inflated") is True:
             reasons.append("Coverage sample size inflated by candidate complements")
@@ -910,7 +911,20 @@ class RewardV2Evaluator:
                     reasons.append("Unexpected fallback engine")
         mcse = _finite_number(performance.get("max_mcse") or performance.get("mcse_max"))
         max_mcse = float(thr.get("max_mcse", 0.0025))
-        if mcse is not None and mcse > max_mcse:
+        if mcse is None:
+            # Every published probability must meet MCSE; missing metric is not a pass.
+            return _missing_metric_state(
+                "R12_performance_contract",
+                reasons=["Missing max_mcse / mcse_max for published probabilities"],
+                threshold=thr,
+                evidence=["performance.json"],
+                metric={
+                    "engine": performance.get("engine"),
+                    "requested_engine": performance.get("requested_engine"),
+                    "max_mcse": None,
+                },
+            )
+        if mcse > max_mcse:
             reasons.append(f"Max MCSE {mcse} > {max_mcse}")
         regression = _finite_number(performance.get("wall_clock_regression"))
         if regression is not None and regression > float(
@@ -956,15 +970,24 @@ class RewardV2Evaluator:
         if draw_count < int(thr.get("min_draw_count", 100)):
             reasons.append(f"Draw count {draw_count} below minimum")
         r_hat = _finite_number(diagnostics.get("r_hat_max"))
+        ess = _finite_number(diagnostics.get("ess_min") or diagnostics.get("bulk_ess_min"))
+        tail_ess = _finite_number(diagnostics.get("tail_ess_min"))
+        e_bfmi = _finite_number(diagnostics.get("e_bfmi_min") or diagnostics.get("e_bfmi"))
+        missing_mcmc: list[str] = []
+        if r_hat is None:
+            missing_mcmc.append("r_hat_max")
+        if ess is None:
+            missing_mcmc.append("ess_min/bulk_ess_min")
+        if tail_ess is None:
+            missing_mcmc.append("tail_ess_min")
+        if e_bfmi is None:
+            missing_mcmc.append("e_bfmi")
         if r_hat is not None and r_hat > float(thr.get("max_r_hat", 1.01)):
             reasons.append(f"R-hat max {r_hat} > {thr.get('max_r_hat')}")
-        ess = _finite_number(diagnostics.get("ess_min") or diagnostics.get("bulk_ess_min"))
         if ess is not None and ess < float(thr.get("min_bulk_ess", 400)):
             reasons.append(f"ESS min {ess} < {thr.get('min_bulk_ess')}")
-        tail_ess = _finite_number(diagnostics.get("tail_ess_min"))
         if tail_ess is not None and tail_ess < float(thr.get("min_tail_ess", 400)):
             reasons.append(f"Tail ESS min {tail_ess} < {thr.get('min_tail_ess')}")
-        e_bfmi = _finite_number(diagnostics.get("e_bfmi_min") or diagnostics.get("e_bfmi"))
         if e_bfmi is not None and e_bfmi <= float(thr.get("min_e_bfmi", 0.3)):
             reasons.append(f"E-BFMI {e_bfmi} <= {thr.get('min_e_bfmi')}")
         if diagnostics.get("chain_count_mislabeled") is True:
@@ -978,6 +1001,14 @@ class RewardV2Evaluator:
             "e_bfmi": e_bfmi,
         }
         evidence = ["posterior_diagnostics.json"]
+        if missing_mcmc:
+            return _missing_metric_state(
+                "R13_posterior_quality",
+                reasons=[f"Missing required MCMC diagnostics: {missing_mcmc}"],
+                threshold=thr,
+                evidence=evidence,
+                metric=metric,
+            )
         if reasons:
             return _fail(
                 "R13_posterior_quality",
@@ -1113,11 +1144,14 @@ class RewardV2Evaluator:
                 metric=metric,
                 evidence=evidence,
             )
-        # Pass only when explicit quality evidence exists.
-        if update.get("quality_passed") is not True and mae is None:
+        # Require both refit-comparison metrics; quality_passed alone is not enough.
+        if mae is None or max_diff is None or update.get("quality_passed") is not True:
             return _missing_metric_state(
                 "R15_daily_update_quality",
-                reasons=["Update present but quality/refit comparison metrics incomplete"],
+                reasons=[
+                    "Update present but quality_passed and/or MAE/max-diff vs full "
+                    "refit metrics incomplete"
+                ],
                 threshold=thr,
                 evidence=evidence,
                 metric=metric,
@@ -1272,20 +1306,40 @@ class RewardV2Evaluator:
             reasons.append("Covariance matrix is not PSD")
         if report.get("complement_averaging") is True:
             reasons.append("Residuals used complement averaging")
-        rel_err = _finite_number(report.get("max_factor_variance_rel_error"))
-        if rel_err is not None and rel_err > float(thr.get("max_factor_variance_rel_error", 0.20)):
-            reasons.append(f"Factor variance rel error {rel_err} exceeds threshold")
-        corr_rmse = _finite_number(report.get("correlation_rmse"))
-        if corr_rmse is not None and corr_rmse > float(thr.get("max_correlation_rmse", 0.10)):
-            reasons.append(f"Correlation RMSE {corr_rmse} exceeds threshold")
         if report.get("one_signed_residual_per_race") is False:
             reasons.append("Not one signed residual per race")
+        rel_err = _finite_number(report.get("max_factor_variance_rel_error"))
+        corr_rmse = _finite_number(report.get("correlation_rmse"))
         metric = {
             "is_psd": report.get("is_psd"),
             "max_factor_variance_rel_error": rel_err,
             "correlation_rmse": corr_rmse,
         }
         evidence = ["covariance_recovery.json"]
+        # Hard scientific failures first.
+        if reasons:
+            return _fail(
+                "R19_covariance_recovery",
+                reasons=reasons,
+                threshold=thr,
+                metric=metric,
+                evidence=evidence,
+            )
+        if rel_err is None or corr_rmse is None or report.get("is_psd") is None:
+            return _missing_metric_state(
+                "R19_covariance_recovery",
+                reasons=[
+                    "Missing PSD status and/or factor variance rel error / "
+                    "correlation RMSE required for recovery tolerances"
+                ],
+                threshold=thr,
+                evidence=evidence,
+                metric=metric,
+            )
+        if rel_err > float(thr.get("max_factor_variance_rel_error", 0.20)):
+            reasons.append(f"Factor variance rel error {rel_err} exceeds threshold")
+        if corr_rmse > float(thr.get("max_correlation_rmse", 0.10)):
+            reasons.append(f"Correlation RMSE {corr_rmse} exceeds threshold")
         if reasons:
             return _fail(
                 "R19_covariance_recovery",
@@ -1608,7 +1662,23 @@ class RewardV2Evaluator:
                 metric=payload if isinstance(payload, dict) else {},
             )
         gap = _finite_number(payload.get("max_comparator_log_score_gap"))
-        if gap is not None and gap > float(thr.get("max_comparator_log_score_gap", 0.005)):
+        if gap is None:
+            return _missing_metric_state(
+                "R26_benchmark_superiority",
+                reasons=["Missing max_comparator_log_score_gap for superiority claim"],
+                threshold=thr,
+                evidence=[
+                    p
+                    for p in ("benchmark_superiority.json", "nested_evaluation.json")
+                    if (run_dir / p).exists()
+                ],
+                metric={
+                    "independent_cycle_count": cycles,
+                    "max_comparator_log_score_gap": None,
+                    "preregistered": payload.get("preregistered"),
+                },
+            )
+        if gap > float(thr.get("max_comparator_log_score_gap", 0.005)):
             reasons.append(f"Comparator gap {gap} exceeds threshold")
         if payload.get("beats_all_simple_baselines") is False:
             reasons.append("Does not beat all simple baselines")

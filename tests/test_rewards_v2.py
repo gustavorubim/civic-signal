@@ -616,6 +616,7 @@ def test_r13_posterior_pass_and_divergence_fail(tmp_path: Path, rewards_config: 
                 "draw_count": 1000,
                 "r_hat_max": 1.2,
                 "ess_min": 50,
+                "tail_ess_min": 50,
                 "e_bfmi": 0.1,
             }
         },
@@ -834,6 +835,7 @@ def test_r26_benchmark_pass_and_post_hoc_metric_fail(tmp_path: Path, rewards_con
                 "preregistered": False,
                 "independent_cycle_count": 3,
                 "beats_all_simple_baselines": False,
+                "max_comparator_log_score_gap": 0.05,
                 "metric_changed_after_scoring": True,
                 "difficult_cycle_removed": True,
                 "scope_mismatch": True,
@@ -1316,3 +1318,175 @@ def test_mcse_and_regression_fail_r12(tmp_path: Path, rewards_config: dict) -> N
         },
     )
     assert _eval_one(bad, "R12_performance_contract", rewards_config)["state"] == "fail"
+
+
+def test_incomplete_posterior_diagnostics_r13_not_pass(
+    tmp_path: Path, rewards_config: dict
+) -> None:
+    """Missing R-hat/ESS/E-BFMI must not auto-pass R13."""
+    bad = _seed_run(
+        tmp_path / "r13-incomplete",
+        **{
+            "posterior_diagnostics.json": {
+                "divergences": 0,
+                "draw_count": 1000,
+                # deliberately omit r_hat_max, ess, e_bfmi
+            }
+        },
+    )
+    result = _eval_one(bad, "R13_posterior_quality", rewards_config)
+    assert result["state"] == "insufficient_evidence"
+    assert any("Missing required MCMC" in r for r in result["failure_reasons"])
+
+
+def test_incomplete_covariance_recovery_r19_not_pass(tmp_path: Path, rewards_config: dict) -> None:
+    """PSD-only covariance report without recovery tolerances must not pass."""
+    bad = _seed_run(
+        tmp_path / "r19-incomplete",
+        **{
+            "covariance_recovery.json": {
+                "is_psd": True,
+                "complement_averaging": False,
+                "one_signed_residual_per_race": True,
+                # omit max_factor_variance_rel_error and correlation_rmse
+            }
+        },
+    )
+    result = _eval_one(bad, "R19_covariance_recovery", rewards_config)
+    assert result["state"] == "insufficient_evidence"
+
+
+def test_incomplete_daily_update_r15_not_pass(tmp_path: Path, rewards_config: dict) -> None:
+    """quality_passed alone without MAE/max-diff vs refit must not pass."""
+    bad = _seed_run(
+        tmp_path / "r15-incomplete",
+        **{
+            "latest_daily_update.json": {
+                "quality_passed": True,
+                "needs_full_refit": False,
+                "strategy": "reweighting",
+                "noop": False,
+                "weights_degenerate": False,
+                # omit MAE / max diff vs full refit
+            }
+        },
+    )
+    result = _eval_one(bad, "R15_daily_update_quality", rewards_config)
+    assert result["state"] == "insufficient_evidence"
+
+
+def test_incomplete_performance_r12_missing_mcse_not_pass(
+    tmp_path: Path, rewards_config: dict
+) -> None:
+    """Engine fields without MCSE must not pass R12."""
+    bad = _seed_run(
+        tmp_path / "r12-incomplete",
+        **{
+            "performance.json": {
+                "requested_engine": "python",
+                "engine": "python",
+                "parallel": False,
+                "numba_available": False,
+                "simulation_count": 1000,
+                # omit max_mcse
+            }
+        },
+    )
+    result = _eval_one(bad, "R12_performance_contract", rewards_config)
+    assert result["state"] == "insufficient_evidence"
+    assert any("mcse" in r.lower() for r in result["failure_reasons"])
+
+
+def test_incomplete_coverage_r8_partial_levels_not_pass(
+    tmp_path: Path, rewards_config: dict
+) -> None:
+    """Only one of 50/80/90 coverages present must not pass R8."""
+    nested = {
+        "exact_pipeline": True,
+        "outer_fold": True,
+        "coverage": {
+            "interval_90_coverage": 0.90,
+            # omit 50 and 80
+        },
+        "calibration": {
+            "expected_calibration_error": 0.02,
+            "calibration_intercept": 0.0,
+            "calibration_slope": 1.0,
+        },
+    }
+    bad = _seed_run(tmp_path / "r8-incomplete", **{"nested_evaluation.json": nested})
+    result = _eval_one(bad, "R8_uncertainty_quality", rewards_config)
+    assert result["state"] == "insufficient_evidence"
+    assert any("Missing interval coverage" in r for r in result["failure_reasons"])
+
+
+def test_incomplete_benchmark_r26_missing_gap_not_pass(
+    tmp_path: Path, rewards_config: dict
+) -> None:
+    """Cycle count without comparator gap must not pass R26."""
+    bad = _seed_run(
+        tmp_path / "r26-incomplete",
+        **{
+            "benchmark_superiority.json": {
+                "preregistered": True,
+                "independent_cycle_count": 6,
+                "beats_all_simple_baselines": True,
+                # omit max_comparator_log_score_gap
+            }
+        },
+    )
+    result = _eval_one(bad, "R26_benchmark_superiority", rewards_config)
+    assert result["state"] == "insufficient_evidence"
+    assert any("max_comparator_log_score_gap" in r for r in result["failure_reasons"])
+
+
+def test_incomplete_primary_metrics_never_pass_matrix(tmp_path: Path, rewards_config: dict) -> None:
+    """Adversarial incomplete evidence files must not yield pass for flagged rewards."""
+    cases = {
+        "R8_uncertainty_quality": {
+            "nested_evaluation.json": {
+                "exact_pipeline": True,
+                "outer_fold": True,
+                "coverage": {"interval_50_coverage": 0.5},
+                "calibration": {
+                    "expected_calibration_error": 0.02,
+                    "calibration_intercept": 0.0,
+                    "calibration_slope": 1.0,
+                },
+            }
+        },
+        "R12_performance_contract": {
+            "performance.json": {
+                "requested_engine": "python",
+                "engine": "python",
+                "parallel": False,
+                "numba_available": False,
+                "simulation_count": 100,
+            }
+        },
+        "R13_posterior_quality": {
+            "posterior_diagnostics.json": {"divergences": 0, "draw_count": 1000}
+        },
+        "R15_daily_update_quality": {
+            "latest_daily_update.json": {
+                "quality_passed": True,
+                "strategy": "reweighting",
+                "needs_full_refit": False,
+            }
+        },
+        "R19_covariance_recovery": {
+            "covariance_recovery.json": {"is_psd": True, "complement_averaging": False}
+        },
+        "R26_benchmark_superiority": {
+            "benchmark_superiority.json": {
+                "preregistered": True,
+                "independent_cycle_count": 8,
+                "beats_all_simple_baselines": True,
+            }
+        },
+    }
+    for reward_id, overrides in cases.items():
+        run_dir = _seed_run(tmp_path / f"incomplete-{reward_id}", **overrides)
+        state = _eval_one(run_dir, reward_id, rewards_config)["state"]
+        assert state != "pass", f"{reward_id} auto-passed with incomplete evidence: {state}"
+        assert state in {"fail", "insufficient_evidence"}
