@@ -471,8 +471,6 @@ def _reward_card_integrity_hash(card: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
 
-
-
 def copy_promoted_snapshot(source: Path, dest: Path) -> None:
     """Helper for tests: deep-copy a promoted tree without following specials."""
     if dest.exists():

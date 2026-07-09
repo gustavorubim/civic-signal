@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 from pathlib import Path
 
 import polars as pl
+from test_rewards_v2 import REPO_ROOT, REWARDS_YAML, _seed_run, _write_json
 
 from civic_signal.config import ProjectContext
 from civic_signal.verification.publication import (
@@ -18,7 +18,6 @@ from civic_signal.verification.publication import (
     profile_required,
     resolve_run_dir,
 )
-from test_rewards_v2 import REPO_ROOT, REWARDS_YAML, _seed_run, _write_json
 
 
 def test_helpers_and_copy(tmp_path: Path) -> None:
@@ -26,11 +25,22 @@ def test_helpers_and_copy(tmp_path: Path) -> None:
     f = tmp_path / "x.txt"
     f.write_text("hi", encoding="utf-8")
     assert _file_hash(f)
-    assert profile_required({"profiles": {"production": {"required_rewards": ["R0_build"]}}}, "production") == [
-        "R0_build"
-    ]
+    required = profile_required(
+        {"profiles": {"production": {"required_rewards": ["R0_build"]}}},
+        "production",
+    )
+    assert required == ["R0_build"]
     assert _reward_card_integrity_hash(
-        {"rewards": {"R0_build": {"state": "pass", "threshold": {}, "evidence": [], "failure_reasons": []}}}
+        {
+            "rewards": {
+                "R0_build": {
+                    "state": "pass",
+                    "threshold": {},
+                    "evidence": [],
+                    "failure_reasons": [],
+                }
+            }
+        }
     )
     src = tmp_path / "src"
     src.mkdir()
@@ -213,9 +223,7 @@ def test_promote_semantic_failure_path(tmp_path: Path) -> None:
     ctx = ProjectContext.create(root=root, artifacts_dir=artifacts)
     # Even if rewards somehow pass, semantic should block; with deleted control,
     # rewards may also block. Either way promotion is false.
-    payload = PublicationVerifier(ctx).attempt_promote(
-        attempt_id="sem-fail", profile="production"
-    )
+    payload = PublicationVerifier(ctx).attempt_promote(attempt_id="sem-fail", profile="production")
     assert payload["promoted"] is False
 
 

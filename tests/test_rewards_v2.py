@@ -1777,9 +1777,7 @@ def test_verify_rewards_finds_runs_layout(tmp_path: Path) -> None:
     run = artifacts / "runs" / "layout-run"
     _seed_run(run)
     context = ProjectContext.create(root=root, artifacts_dir=artifacts)
-    payload = RewardVerificationRunner(context).verify(
-        run_id="layout-run", profile="production"
-    )
+    payload = RewardVerificationRunner(context).verify(run_id="layout-run", profile="production")
     assert (run / "reward_card_v2.json").exists()
     assert payload["profile"] == "production"
 
@@ -1811,11 +1809,10 @@ def test_production_semantic_detects_content_hash_tamper(tmp_path: Path) -> None
             "uncertainty_explanation": ["x"],
         }
     ).write_parquet(attempt / "race_forecasts.parquet")
-    result = PublicationVerifier(context).verify_semantic(
-        run_id="tamper", profile="production"
-    )
+    result = PublicationVerifier(context).verify_semantic(run_id="tamper", profile="production")
     assert result["passed"] is False
-    assert any("hash" in r.lower() or "Duplicate" in r or "blocked" in r for r in result["failure_reasons"])
+    reasons = " ".join(result["failure_reasons"]).lower()
+    assert "hash" in reasons or "duplicate" in reasons or "blocked" in reasons
 
 
 def test_r24_production_without_promotion_fails(tmp_path: Path, rewards_config: dict) -> None:
