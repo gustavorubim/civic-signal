@@ -28,19 +28,9 @@ class RewardVerificationRunner:
         profile: str = "production",
         publication_mode: str | None = None,
     ) -> dict[str, Any]:
-        run_dir = self.context.artifacts_dir / "forecasts" / run_id
-        if not run_dir.exists():
-            # Also accept attempts and bare artifact roots used in tests.
-            for candidate in (
-                self.context.artifacts_dir / "attempts" / run_id,
-                self.context.artifacts_dir / run_id,
-                self.context.artifacts_dir / "forecasts" / run_id,
-            ):
-                if candidate.exists():
-                    run_dir = candidate
-                    break
-        if not run_dir.exists():
-            raise FileNotFoundError(f"Run directory not found for run_id={run_id}")
+        from civic_signal.verification.publication import resolve_run_dir
+
+        run_dir = resolve_run_dir(self.context.artifacts_dir, run_id)
 
         model_config: dict[str, Any] = {}
         model_path = self.context.config_dir / "model.yaml"

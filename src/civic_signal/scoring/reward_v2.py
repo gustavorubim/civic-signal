@@ -71,7 +71,7 @@ def _read_parquet(path: Path) -> pl.DataFrame | None:
 def _is_nan(value: Any) -> bool:
     try:
         return value is not None and isinstance(value, float) and math.isnan(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError):  # pragma: no cover - defensive
         return False
 
 
@@ -80,9 +80,9 @@ def _finite_number(value: Any) -> float | None:
         return None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError):  # pragma: no cover - defensive
         return None
-    if not math.isfinite(number):
+    if not math.isfinite(number):  # pragma: no cover - defensive
         return None
     return number
 
@@ -187,11 +187,19 @@ class RewardV2Evaluator:
         run_dir = Path(run_dir)
         resolved_run_id = run_id or run_dir.name
         mode = publication_mode or self._infer_publication_mode(run_dir)
+        # Evaluation context used by rewards that depend on the gate being checked
+        # (must not re-derive a softer mode from on-disk research labels).
+        self._evaluation_mode = mode
+        self._evaluation_profile = profile
+        # attempt_promote sets _promotion_candidate so R24 can certify readiness
+        # without requiring a pre-existing verified production promotion.
+        if not hasattr(self, "_promotion_candidate"):
+            self._promotion_candidate = False
         artifacts = self._load_artifacts(run_dir)
         rewards: dict[str, Any] = {}
         for reward_id in all_reward_ids(self.config):
             evaluator = getattr(self, f"_eval_{reward_id}", None)
-            if evaluator is None:
+            if evaluator is None:  # pragma: no cover - all R0-R27 registered
                 rewards[reward_id] = _missing_metric_state(
                     reward_id,
                     reasons=[f"No evaluator registered for {reward_id}"],
@@ -209,11 +217,11 @@ class RewardV2Evaluator:
         blocking: list[str] = []
         for reward_id in required:
             record = rewards.get(reward_id)
-            if not isinstance(record, dict):
+            if not isinstance(record, dict):  # pragma: no cover - always dict records
                 blocking.append(reward_id)
                 continue
-            state = record.get("state")
-            if state in {"fail", "insufficient_evidence"}:
+            # Only explicit pass satisfies a promotion gate (plan contract).
+            if record.get("state") != "pass":
                 blocking.append(reward_id)
 
         profile_cfg = dict(self.config.get("profiles", {}).get(profile, {}))
@@ -291,34 +299,27 @@ class RewardV2Evaluator:
         if coverage_pct is None and ci:
             coverage_pct = _finite_from(ci, "line_coverage_pct")
         commands_ok = ci.get("commands_passed")
-        if coverage_pct is None and commands_ok is None:
-            return _missing_metric_state(
-                "R0_build",
-                reasons=["Missing CI/coverage evidence for build gate"],
-                threshold=thr,
-                evidence=evidence,
-            )
         metric = {
             "line_coverage_pct": coverage_pct,
             "commands_passed": commands_ok,
             "tool_versions": ci.get("tool_versions", {}),
         }
+        if coverage_pct is None or commands_ok is None:
+            return _missing_metric_state(
+                "R0_build",
+                reasons=["Missing CI commands_passed and/or coverage metric for build gate"],
+                threshold=thr,
+                evidence=evidence,
+                metric=metric,
+            )
         reasons: list[str] = []
-        if commands_ok is False:
-            reasons.append("Required CI commands failed")
-        if coverage_pct is not None and coverage_pct < min_cov:
+        if commands_ok is not True:
+            reasons.append("Required CI commands did not pass")
+        if coverage_pct < min_cov:
             reasons.append(f"Line coverage {coverage_pct} < {min_cov}")
         if reasons:
             return _fail(
                 "R0_build", reasons=reasons, threshold=thr, metric=metric, evidence=evidence
-            )
-        if coverage_pct is None:
-            return _missing_metric_state(
-                "R0_build",
-                reasons=["Coverage metric missing or NaN"],
-                threshold=thr,
-                evidence=evidence,
-                metric=metric,
             )
         return _pass("R0_build", threshold=thr, metric=metric, evidence=evidence)
 
@@ -468,26 +469,29 @@ class RewardV2Evaluator:
         slope = _finite_from(metrics, "calibration_slope", "slope")
         ece_upper = _finite_from(metrics, "ece_bootstrap_upper", "ece_upper")
         outer = bool(nested.get("outer_fold") or backtest.get("rolling_origin_executed"))
-        if ece is None or intercept is None or slope is None:
+        if ece is None or intercept is None or slope is None or ece_upper is None:
             return _missing_metric_state(
                 "R4_calibration",
-                reasons=["Missing outer-fold calibration metrics (ECE/intercept/slope)"],
+                reasons=[
+                    "Missing outer-fold calibration metrics "
+                    "(ECE/intercept/slope/ece_bootstrap_upper)"
+                ],
                 threshold=thr,
                 evidence=evidence,
-                metric=metrics,
+                metric=metrics if isinstance(metrics, dict) else {},
             )
-        if not outer and not nested:
+        if outer is not True and nested.get("outer_fold") is not True:
             return _missing_metric_state(
                 "R4_calibration",
                 reasons=["Calibration metrics are not from an outer-fold evaluation"],
                 threshold=thr,
                 evidence=evidence,
-                metric=metrics,
+                metric=metrics if isinstance(metrics, dict) else {},
             )
         reasons: list[str] = []
         if ece > float(thr["max_ece"]):
             reasons.append(f"ECE {ece} > {thr['max_ece']}")
-        if ece_upper is not None and ece_upper > float(thr["max_ece_bootstrap_upper"]):
+        if ece_upper > float(thr["max_ece_bootstrap_upper"]):
             reasons.append(f"ECE bootstrap upper {ece_upper} > {thr['max_ece_bootstrap_upper']}")
         if abs(intercept) > float(thr["max_abs_intercept"]):
             reasons.append(f"|intercept| {abs(intercept)} > {thr['max_abs_intercept']}")
@@ -550,17 +554,24 @@ class RewardV2Evaluator:
                 threshold=thr,
                 evidence=evidence,
             )
+        if thr.get("require_log_score_ci_below_zero") and log_ci_upper is None:
+            return _missing_metric_state(
+                "R5_baseline_competition",
+                reasons=["Missing log-score paired CI upper bound"],
+                threshold=thr,
+                evidence=evidence,
+                metric={
+                    "independent_cycle_count": cycle_count,
+                    "beats_all_simple_baselines": bool(beats),
+                },
+            )
         reasons: list[str] = []
         min_cycles = float(thr.get("min_independent_cycles", 6))
         if cycle_count < min_cycles:
             reasons.append(f"Independent cycle count {cycle_count} < {min_cycles}")
-        if not bool(beats):
+        if beats is not True:
             reasons.append("Model does not beat every simple baseline")
-        if (
-            thr.get("require_log_score_ci_below_zero")
-            and log_ci_upper is not None
-            and log_ci_upper >= 0
-        ):
+        if thr.get("require_log_score_ci_below_zero") and log_ci_upper >= 0:
             reasons.append(f"Log-score paired CI upper {log_ci_upper} is not below zero")
         # Effective-n inflation canary.
         if nested.get("effective_n_inflated") is True:
@@ -675,10 +686,6 @@ class RewardV2Evaluator:
                 evidence=evidence,
             )
         public_null = tier_c_fc["winner_probability"].null_count() == tier_c_fc.height
-        # Control-bearing internal draws check if column present.
-        control_ok = True
-        control_policy = artifacts.get("run_manifest") or {}
-        withhold_control = bool(control_policy.get("withhold_aggregate_control"))
         if not public_null:
             return _fail(
                 "R7_sparse_honesty",
@@ -687,11 +694,28 @@ class RewardV2Evaluator:
                 metric={"tier_c_races": len(tier_c), "public_probs_null": False},
                 evidence=evidence,
             )
+        control_policy = artifacts.get("run_manifest") or {}
+        withhold_control = control_policy.get("withhold_aggregate_control")
         draws = artifacts.get("forecast_draws")
-        if draws is not None and "race_id" in draws.columns and not withhold_control:
+        control_ok = False
+        if withhold_control is True:
+            control_ok = True
+        elif draws is not None and "race_id" in draws.columns:
             missing_draws = set(tier_c) - set(draws["race_id"].unique().to_list())
-            if missing_draws and not withhold_control:
-                control_ok = False
+            control_ok = not missing_draws
+            if "forecast_draws.parquet" not in evidence:
+                evidence.append("forecast_draws.parquet")
+        else:
+            return _missing_metric_state(
+                "R7_sparse_honesty",
+                reasons=[
+                    "Tier C present but missing control-withhold policy and/or "
+                    "internal draw coverage evidence"
+                ],
+                threshold=thr,
+                evidence=evidence,
+                metric={"tier_c_races": len(tier_c), "public_probs_null": True},
+            )
         metric = {
             "tier_c_races": len(tier_c),
             "public_probs_null": public_null,
@@ -1067,19 +1091,16 @@ class RewardV2Evaluator:
         map_frame = artifacts.get("recalibration_map")
         map_present = map_frame is not None
         reasons: list[str] = []
-        # Simplex / range coherence.
         bad_range = published.filter(
             (pl.col("winner_probability") < 0.0) | (pl.col("winner_probability") > 1.0)
         ).height
         if bad_range:
             reasons.append(f"{bad_range} probabilities outside [0,1]")
-        # Group sum check when multi-option rows are present.
         if {"race_id", "winner_probability"}.issubset(set(published.columns)):
             if "option_id" in published.columns or "party" in published.columns:
                 sums = published.group_by("race_id").agg(
                     pl.col("winner_probability").sum().alias("s")
                 )
-                # Fail multi-row races whose probabilities do not sum near 1.
                 multi = (
                     published.group_by("race_id").agg(pl.len().alias("n")).filter(pl.col("n") > 1)
                 )
@@ -1090,14 +1111,34 @@ class RewardV2Evaluator:
                     if bad_sums.height:
                         reasons.append(f"{bad_sums.height} races fail probability simplex sum")
         lineage = artifacts.get("nested_eval") or {}
-        map_lineage_ok = True
-        if thr.get("require_outer_fold_map") and map_present:
-            map_lineage_ok = bool(lineage.get("calibration_map_outer_fold", True))
-            if lineage.get("calibration_map_outer_fold") is False:
-                reasons.append("Calibration map is not outer-fold compatible")
+        map_lineage_ok = False
+        if thr.get("require_outer_fold_map"):
+            if not map_present and not lineage.get("already_calibrated_without_map"):
+                return _missing_metric_state(
+                    "R14_calibrated_publication",
+                    reasons=[
+                        "Outer-fold calibration map missing and no already_calibrated "
+                        "without-map proof"
+                    ],
+                    threshold=thr,
+                    evidence=["race_forecasts.parquet"],
+                )
+            if map_present and lineage.get("calibration_map_outer_fold") is not True:
+                return _missing_metric_state(
+                    "R14_calibrated_publication",
+                    reasons=["Calibration map outer-fold compatibility not proven"],
+                    threshold=thr,
+                    evidence=["race_forecasts.parquet", "recalibration_map.parquet"],
+                )
+            map_lineage_ok = (
+                lineage.get("calibration_map_outer_fold") is True
+                or lineage.get("already_calibrated_without_map") is True
+            )
             if lineage.get("calibration_map_engine_mismatch") is True:
                 reasons.append("Calibration map engine/source mismatch")
                 map_lineage_ok = False
+        else:
+            map_lineage_ok = True
         metric = {
             "map_present": map_present,
             "published_rows": published.height,
@@ -1263,13 +1304,13 @@ class RewardV2Evaluator:
                 metric=metric,
                 evidence=evidence,
             )
-        if audit.get("time_travel_canaries_passed") is False:
-            return _fail(
+        if audit.get("time_travel_canaries_passed") is not True:
+            return _missing_metric_state(
                 "R17_as_of_integrity",
-                reasons=["Time-travel canaries failed"],
+                reasons=["Time-travel canaries must explicitly pass"],
                 threshold=thr,
-                metric=metric,
                 evidence=evidence,
+                metric=metric,
             )
         return _pass("R17_as_of_integrity", threshold=thr, metric=metric, evidence=evidence)
 
@@ -1285,12 +1326,26 @@ class RewardV2Evaluator:
                 threshold=thr,
             )
         reasons: list[str] = []
-        if thr.get("require_exact_pipeline") and not nested.get("exact_pipeline"):
-            reasons.append("Exact publication pipeline not used in outer folds")
-        if thr.get("require_outer_cycle_exclusion") and not nested.get("outer_cycle_excluded"):
-            reasons.append("Outer cycle not excluded from all fitting/promotion")
+        if thr.get("require_exact_pipeline") and nested.get("exact_pipeline") is not True:
+            reasons.append("Exact publication pipeline not proven for outer folds")
+        if (
+            thr.get("require_outer_cycle_exclusion")
+            and nested.get("outer_cycle_excluded") is not True
+        ):
+            reasons.append("Outer cycle exclusion from fitting/promotion not proven")
         if nested.get("held_out_permutation_affects_prior_folds") is True:
             reasons.append("Permuting held-out outcomes changed prior-fold forecasts")
+        if nested.get("held_out_permutation_affects_prior_folds") is None:
+            return _missing_metric_state(
+                "R18_nested_evaluation",
+                reasons=["Missing held-out permutation canary result"],
+                threshold=thr,
+                evidence=["nested_evaluation.json"],
+                metric={
+                    "exact_pipeline": nested.get("exact_pipeline"),
+                    "outer_cycle_excluded": nested.get("outer_cycle_excluded"),
+                },
+            )
         metric = {
             "exact_pipeline": nested.get("exact_pipeline"),
             "outer_cycle_excluded": nested.get("outer_cycle_excluded"),
@@ -1378,28 +1433,44 @@ class RewardV2Evaluator:
                 reasons=["Missing hierarchy_recovery.json"],
                 threshold=thr,
             )
-        reasons: list[str] = []
-        if report.get("all_control_bearing_races_in_model") is False:
-            reasons.append("Control-bearing races missing from joint model")
-        if thr.get("require_unpolled_propagation") and not report.get(
-            "unpolled_propagation_passed"
-        ):
-            reasons.append("Unpolled race national propagation failed")
-        if thr.get("require_label_symmetry") and report.get("label_symmetry_passed") is False:
-            reasons.append("Label symmetry failed")
         metric = {
             "all_control_bearing_races_in_model": report.get("all_control_bearing_races_in_model"),
             "unpolled_propagation_passed": report.get("unpolled_propagation_passed"),
             "label_symmetry_passed": report.get("label_symmetry_passed"),
         }
         evidence = ["hierarchy_recovery.json"]
-        if reasons:
+        missing_proof: list[str] = []
+        failed_proof: list[str] = []
+        checks = [
+            ("all_control_bearing_races_in_model", True),
+            ("unpolled_propagation_passed", bool(thr.get("require_unpolled_propagation"))),
+            ("label_symmetry_passed", bool(thr.get("require_label_symmetry"))),
+        ]
+        for key, required in checks:
+            if not required:
+                continue
+            value = report.get(key)
+            if value is True:
+                continue
+            if value is False:
+                failed_proof.append(key)
+            else:
+                missing_proof.append(key)
+        if failed_proof:
             return _fail(
                 "R20_all_race_hierarchy",
-                reasons=reasons,
+                reasons=[f"Hierarchy recovery failed for: {failed_proof}"],
                 threshold=thr,
                 metric=metric,
                 evidence=evidence,
+            )
+        if missing_proof:
+            return _missing_metric_state(
+                "R20_all_race_hierarchy",
+                reasons=[f"Missing positive hierarchy proofs: {missing_proof}"],
+                threshold=thr,
+                evidence=evidence,
+                metric=metric,
             )
         return _pass("R20_all_race_hierarchy", threshold=thr, metric=metric, evidence=evidence)
 
@@ -1414,12 +1485,27 @@ class RewardV2Evaluator:
                 reasons=["Missing poll_observation_manifest.json"],
                 threshold=thr,
             )
+        if "double_count_rows" not in manifest:
+            return _missing_metric_state(
+                "R21_poll_observation_identity",
+                reasons=["Missing double_count_rows in poll observation manifest"],
+                threshold=thr,
+                evidence=["poll_observation_manifest.json"],
+            )
         double_count = int(manifest.get("double_count_rows") or 0)
         reasons: list[str] = []
         if double_count > int(thr.get("max_double_count_rows", 0)):
             reasons.append(f"Double-counted poll rows: {double_count}")
         if manifest.get("option_double_count") is True:
             reasons.append("Option double count detected")
+        if manifest.get("pollster_lineage_auditable") is not True:
+            return _missing_metric_state(
+                "R21_poll_observation_identity",
+                reasons=["Pollster lineage must be explicitly auditable"],
+                threshold=thr,
+                evidence=["poll_observation_manifest.json"],
+                metric={"double_count_rows": double_count},
+            )
         metric = {
             "double_count_rows": double_count,
             "unique_questions": manifest.get("unique_questions"),
@@ -1449,15 +1535,40 @@ class RewardV2Evaluator:
                 reasons=["Missing feature_lineage.json"],
                 threshold=thr,
             )
-        reasons: list[str] = []
+        if "max_snapshots_per_feature_key" not in lineage:
+            return _missing_metric_state(
+                "R22_feature_validity",
+                reasons=["Missing max_snapshots_per_feature_key in feature lineage"],
+                threshold=thr,
+                evidence=["feature_lineage.json"],
+            )
         max_snaps = int(lineage.get("max_snapshots_per_feature_key") or 0)
+        reasons: list[str] = []
         if max_snaps > int(thr.get("max_snapshots_per_feature_key", 1)):
             reasons.append(f"Multiple snapshots per feature key: {max_snaps}")
+        if thr.get("require_incumbent_relative_sign"):
+            sign = lineage.get("incumbent_relative_sign")
+            if sign is False:
+                reasons.append("Economic features not incumbent-party relative")
+            elif sign is not True:
+                return _missing_metric_state(
+                    "R22_feature_validity",
+                    reasons=["Incumbent-relative economic sign must be explicitly proven"],
+                    threshold=thr,
+                    evidence=["feature_lineage.json"],
+                    metric={"max_snapshots_per_feature_key": max_snaps},
+                )
         if (
-            thr.get("require_incumbent_relative_sign")
-            and lineage.get("incumbent_relative_sign") is False
+            lineage.get("end_of_cycle_finance_in_early_fold") is None
+            or lineage.get("revised_macro_in_early_fold") is None
         ):
-            reasons.append("Economic features not incumbent-party relative")
+            return _missing_metric_state(
+                "R22_feature_validity",
+                reasons=["Missing vintage leakage canary results in feature lineage"],
+                threshold=thr,
+                evidence=["feature_lineage.json"],
+                metric={"max_snapshots_per_feature_key": max_snaps},
+            )
         if lineage.get("end_of_cycle_finance_in_early_fold") is True:
             reasons.append("End-of-cycle finance entered early folds")
         if lineage.get("revised_macro_in_early_fold") is True:
@@ -1488,55 +1599,54 @@ class RewardV2Evaluator:
             evidence.append("semantic_verification.json")
         if forecasts is not None:
             evidence.append("race_forecasts.parquet")
-        reasons: list[str] = []
-        metric: dict[str, Any] = {}
-        if semantic:
+        if not semantic:
+            return _missing_metric_state(
+                "R23_joint_outcome_coherence",
+                reasons=["Missing semantic_verification.json with reconciliation proof"],
+                threshold=thr,
+                evidence=evidence,
+            )
+        metric = {
+            "semantic_passed": semantic.get("passed"),
+            "reconciliation_ok": semantic.get("reconciliation_ok"),
+            "checks": semantic.get("checks", {}),
+        }
+        if semantic.get("passed") is not True:
             if semantic.get("passed") is False:
-                reasons.extend(
-                    list(semantic.get("failure_reasons") or ["semantic verification failed"])
+                return _fail(
+                    "R23_joint_outcome_coherence",
+                    reasons=list(
+                        semantic.get("failure_reasons") or ["semantic verification failed"]
+                    ),
+                    threshold=thr,
+                    metric=metric,
+                    evidence=evidence,
                 )
-            metric = {
-                "semantic_passed": semantic.get("passed"),
-                "reconciliation_ok": semantic.get("reconciliation_ok"),
-            }
-            if (
-                thr.get("require_exact_reconciliation")
-                and semantic.get("reconciliation_ok") is False
-            ):
-                reasons.append("Exact race/control reconciliation failed")
-        elif forecasts is not None and "winner_probability" in forecasts.columns:
-            published = forecasts.filter(pl.col("winner_probability").is_not_null())
-            bad = published.filter(
-                (pl.col("winner_probability") < float(thr.get("min_probability", 0.0)))
-                | (pl.col("winner_probability") > float(thr.get("max_probability", 1.0)))
-            ).height
-            metric = {"out_of_range": bad, "published_rows": published.height}
-            if bad:
-                reasons.append(f"{bad} probabilities outside allowed range")
-            # Without full reconciliation artifact, production cannot claim pass.
             return _missing_metric_state(
                 "R23_joint_outcome_coherence",
-                reasons=[
-                    "Probabilities range-checked but full joint reconciliation artifact missing"
-                ],
+                reasons=["semantic_verification.passed must be explicitly true"],
                 threshold=thr,
                 evidence=evidence,
                 metric=metric,
             )
-        else:
+        if (
+            thr.get("require_exact_reconciliation")
+            and semantic.get("reconciliation_ok") is not True
+        ):
+            if semantic.get("reconciliation_ok") is False:
+                return _fail(
+                    "R23_joint_outcome_coherence",
+                    reasons=["Exact race/control reconciliation failed"],
+                    threshold=thr,
+                    metric=metric,
+                    evidence=evidence,
+                )
             return _missing_metric_state(
                 "R23_joint_outcome_coherence",
-                reasons=["Missing semantic_verification and race_forecasts"],
+                reasons=["reconciliation_ok must be explicitly true"],
                 threshold=thr,
                 evidence=evidence,
-            )
-        if reasons:
-            return _fail(
-                "R23_joint_outcome_coherence",
-                reasons=reasons,
-                threshold=thr,
                 metric=metric,
-                evidence=evidence,
             )
         return _pass("R23_joint_outcome_coherence", threshold=thr, metric=metric, evidence=evidence)
 
@@ -1551,35 +1661,65 @@ class RewardV2Evaluator:
             for p in ("publication_decision.json", "promotion_manifest.json")
             if (run_dir / p).exists()
         ]
-        claimed_mode = str(
+        # Gate mode is the evaluation context, not a softer on-disk research label.
+        claimed_mode = getattr(self, "_evaluation_mode", None) or str(
             decision.get("publication_mode")
             or promotion.get("publication_mode")
             or self._infer_publication_mode(run_dir)
         )
-        # Research/fixture/shadow without promotion is fine if not claiming production.
-        if claimed_mode in {"research", "fixture", "shadow"} and not promotion.get("verified"):
+        if claimed_mode in {"research", "fixture", "shadow"}:
             return _pass(
                 "R24_atomic_publication",
                 threshold=thr,
                 metric={
                     "publication_mode": claimed_mode,
-                    "promotion_verified": False,
+                    "promotion_verified": bool(promotion.get("verified")),
                     "policy": "non-production modes need no promotion manifest",
+                    "evaluation_mode": getattr(self, "_evaluation_mode", None),
                 },
                 evidence=evidence,
             )
         if claimed_mode == "production":
-            if thr.get("require_verified_promotion_manifest") and not promotion.get("verified"):
-                return _fail(
+            attempt_id = promotion.get("attempt_id") or decision.get("attempt_id") or run_dir.name
+            promotion_candidate = bool(getattr(self, "_promotion_candidate", False))
+            if promotion_candidate:
+                # First-time promotion path: certify candidate immutability only.
+                if thr.get("require_immutable_attempt") and not attempt_id:
+                    return _fail(
+                        "R24_atomic_publication",
+                        reasons=["Promotion candidate missing immutable attempt_id"],
+                        threshold=thr,
+                        metric={"publication_mode": claimed_mode},
+                        evidence=evidence,
+                    )
+                return _pass(
                     "R24_atomic_publication",
-                    reasons=["Production publication_mode without verified promotion_manifest"],
                     threshold=thr,
-                    metric={"publication_mode": claimed_mode, "promotion_verified": False},
+                    metric={
+                        "publication_mode": claimed_mode,
+                        "promotion_verified": False,
+                        "promotion_candidate": True,
+                        "attempt_id": attempt_id,
+                        "policy": "candidate evaluated for atomic promotion",
+                    },
                     evidence=evidence,
                 )
-            if thr.get("require_immutable_attempt") and not (
-                promotion.get("attempt_id") or decision.get("attempt_id")
+            if (
+                thr.get("require_verified_promotion_manifest")
+                and promotion.get("verified") is not True
             ):
+                return _fail(
+                    "R24_atomic_publication",
+                    reasons=["Production evaluation requires verified promotion_manifest"],
+                    threshold=thr,
+                    metric={
+                        "publication_mode": claimed_mode,
+                        "promotion_verified": bool(promotion.get("verified")),
+                        "evaluation_mode": getattr(self, "_evaluation_mode", None),
+                    },
+                    evidence=evidence,
+                )
+            if thr.get("require_immutable_attempt") and not attempt_id:
                 return _fail(
                     "R24_atomic_publication",
                     reasons=["Production promotion missing immutable attempt_id"],
@@ -1587,21 +1727,29 @@ class RewardV2Evaluator:
                     metric={"publication_mode": claimed_mode},
                     evidence=evidence,
                 )
-        if not decision and not promotion:
-            return _missing_metric_state(
+            content_hashes = promotion.get("content_hashes") or {}
+            if not content_hashes:
+                return _missing_metric_state(
+                    "R24_atomic_publication",
+                    reasons=["Promotion manifest missing content_hashes of primary artifacts"],
+                    threshold=thr,
+                    evidence=evidence,
+                )
+            return _pass(
                 "R24_atomic_publication",
-                reasons=["Missing publication_decision and promotion_manifest"],
                 threshold=thr,
+                metric={
+                    "publication_mode": claimed_mode,
+                    "promotion_verified": True,
+                    "attempt_id": attempt_id,
+                    "content_hash_keys": sorted(content_hashes),
+                },
                 evidence=evidence,
             )
-        return _pass(
+        return _missing_metric_state(
             "R24_atomic_publication",
+            reasons=[f"Unrecognized publication_mode for evaluation: {claimed_mode}"],
             threshold=thr,
-            metric={
-                "publication_mode": claimed_mode,
-                "promotion_verified": bool(promotion.get("verified")),
-                "attempt_id": promotion.get("attempt_id") or decision.get("attempt_id"),
-            },
             evidence=evidence,
         )
 
@@ -1616,18 +1764,45 @@ class RewardV2Evaluator:
                 reasons=["Missing live_source_canaries.json"],
                 threshold=thr,
             )
+        history = canaries.get("history")
+        failures = canaries.get("injected_failure_results")
+        if thr.get("require_canary_history") and not history:
+            return _missing_metric_state(
+                "R25_live_source_resilience",
+                reasons=["Canary history empty or missing"],
+                threshold=thr,
+                evidence=["live_source_canaries.json"],
+            )
+        if canaries.get("all_passed") is not True:
+            if canaries.get("all_passed") is False:
+                return _fail(
+                    "R25_live_source_resilience",
+                    reasons=["One or more live-source canaries failed"],
+                    threshold=thr,
+                    evidence=["live_source_canaries.json"],
+                    metric={"all_passed": False, "history_count": len(history or [])},
+                )
+            return _missing_metric_state(
+                "R25_live_source_resilience",
+                reasons=["all_passed must be explicitly true"],
+                threshold=thr,
+                evidence=["live_source_canaries.json"],
+            )
+        if not failures:
+            return _missing_metric_state(
+                "R25_live_source_resilience",
+                reasons=["Missing injected_failure_results proving non-success statuses"],
+                threshold=thr,
+                evidence=["live_source_canaries.json"],
+            )
         reasons: list[str] = []
-        if thr.get("require_canary_history") and not canaries.get("history"):
-            reasons.append("Canary history empty")
-        if canaries.get("all_passed") is False:
-            reasons.append("One or more live-source canaries failed")
-        failures = list(canaries.get("injected_failure_results") or [])
         for item in failures:
             if isinstance(item, dict) and item.get("status") in {None, "success", "ok"}:
                 reasons.append(f"Injected failure incorrectly marked success: {item.get('name')}")
         metric = {
             "all_passed": canaries.get("all_passed"),
-            "history_count": len(canaries.get("history") or []),
+            "history_count": len(history or []),
+            "injected_failure_count": len(failures),
         }
         evidence = ["live_source_canaries.json"]
         if reasons:
@@ -1653,30 +1828,26 @@ class RewardV2Evaluator:
                 threshold=thr,
             )
         payload = report or dict(nested.get("paired_benchmarks") or {})
-        reasons: list[str] = []
-        if payload.get("preregistered") is False:
-            reasons.append("Comparisons were not preregistered")
-        if payload.get("metric_changed_after_scoring") is True:
-            reasons.append("Metric changed after scoring")
-        if payload.get("difficult_cycle_removed") is True:
-            reasons.append("Difficult cycle removed from claim")
-        if payload.get("scope_mismatch") is True:
-            reasons.append("Comparator scope mismatch")
+        evidence = [
+            p
+            for p in ("benchmark_superiority.json", "nested_evaluation.json")
+            if (run_dir / p).exists()
+        ]
+        if payload.get("preregistered") is not True:
+            return _missing_metric_state(
+                "R26_benchmark_superiority",
+                reasons=["Comparisons must be explicitly preregistered"],
+                threshold=thr,
+                evidence=evidence,
+                metric={"preregistered": payload.get("preregistered")},
+            )
         cycles = _finite_number(payload.get("independent_cycle_count"))
-        min_cycles = float(thr.get("min_independent_cycles", 6))
-        if cycles is not None and cycles < min_cycles:
-            reasons.append(f"Independent cycles {cycles} < {min_cycles}")
         if cycles is None:
             return _missing_metric_state(
                 "R26_benchmark_superiority",
                 reasons=["Independent cycle count missing for superiority claim"],
                 threshold=thr,
-                evidence=[
-                    p
-                    for p in ("benchmark_superiority.json", "nested_evaluation.json")
-                    if (run_dir / p).exists()
-                ],
-                metric=payload if isinstance(payload, dict) else {},
+                evidence=evidence,
             )
         gap = _finite_number(payload.get("max_comparator_log_score_gap"))
         if gap is None:
@@ -1684,34 +1855,33 @@ class RewardV2Evaluator:
                 "R26_benchmark_superiority",
                 reasons=["Missing max_comparator_log_score_gap for superiority claim"],
                 threshold=thr,
-                evidence=[
-                    p
-                    for p in ("benchmark_superiority.json", "nested_evaluation.json")
-                    if (run_dir / p).exists()
-                ],
-                metric={
-                    "independent_cycle_count": cycles,
-                    "max_comparator_log_score_gap": None,
-                    "preregistered": payload.get("preregistered"),
-                },
+                evidence=evidence,
+                metric={"independent_cycle_count": cycles},
             )
+        if payload.get("beats_all_simple_baselines") is not True:
+            return _missing_metric_state(
+                "R26_benchmark_superiority",
+                reasons=["beats_all_simple_baselines must be explicitly true"],
+                threshold=thr,
+                evidence=evidence,
+            )
+        reasons: list[str] = []
+        min_cycles = float(thr.get("min_independent_cycles", 6))
+        if cycles < min_cycles:
+            reasons.append(f"Independent cycles {cycles} < {min_cycles}")
         if gap > float(thr.get("max_comparator_log_score_gap", 0.005)):
             reasons.append(f"Comparator gap {gap} exceeds threshold")
-        if payload.get("beats_all_simple_baselines") is False:
-            reasons.append("Does not beat all simple baselines")
-        if payload.get("best_evidenced_claim") is True and reasons:
-            # claim invalidated
-            pass
+        if payload.get("metric_changed_after_scoring") is True:
+            reasons.append("Metric changed after scoring")
+        if payload.get("difficult_cycle_removed") is True:
+            reasons.append("Difficult cycle removed from claim")
+        if payload.get("scope_mismatch") is True:
+            reasons.append("Comparator scope mismatch")
         metric = {
             "independent_cycle_count": cycles,
             "max_comparator_log_score_gap": gap,
-            "preregistered": payload.get("preregistered"),
+            "preregistered": True,
         }
-        evidence = [
-            p
-            for p in ("benchmark_superiority.json", "nested_evaluation.json")
-            if (run_dir / p).exists()
-        ]
         if reasons:
             return _fail(
                 "R26_benchmark_superiority",
@@ -1731,12 +1901,32 @@ class RewardV2Evaluator:
                 reasons=["Missing contract_parity.json"],
                 threshold=thr,
             )
+        if report.get("passed") is not True:
+            if report.get("passed") is False:
+                return _fail(
+                    "R27_contract_parity",
+                    reasons=list(report.get("failure_reasons") or ["contract parity failed"]),
+                    threshold=thr,
+                    evidence=["contract_parity.json"],
+                    metric={"stale_claims": report.get("stale_claims")},
+                )
+            return _missing_metric_state(
+                "R27_contract_parity",
+                reasons=["contract_parity.passed must be explicitly true"],
+                threshold=thr,
+                evidence=["contract_parity.json"],
+            )
+        if "stale_claims" not in report:
+            return _missing_metric_state(
+                "R27_contract_parity",
+                reasons=["Missing stale_claims count in contract parity report"],
+                threshold=thr,
+                evidence=["contract_parity.json"],
+            )
         stale = int(report.get("stale_claims") or 0)
         reasons: list[str] = []
         if stale > int(thr.get("max_stale_claims", 0)):
             reasons.append(f"Stale documentation claims: {stale}")
-        if report.get("passed") is False:
-            reasons.extend(list(report.get("failure_reasons") or ["contract parity failed"]))
         metric = {
             "stale_claims": stale,
             "checked_documents": report.get("checked_documents"),
@@ -1761,5 +1951,4 @@ def legacy_passed_from_state(state: str) -> bool | None:
         return False
     if state == "not_applicable":
         return True
-    # insufficient_evidence
     return None

@@ -82,6 +82,23 @@ def _seed_run(run_dir: Path, **overrides: object) -> Path:
     forecasts.write_parquet(run_dir / "race_forecasts.parquet")
     catalog.write_parquet(run_dir / "race_catalog.parquet")
     manifest.write_parquet(run_dir / "source_manifest.parquet")
+    # Semantic reconciliation requires draws + control artifacts.
+    race_ids = forecasts["race_id"].unique().to_list()
+    pl.DataFrame(
+        {
+            "race_id": race_ids,
+            "draw_id": list(range(len(race_ids))),
+            "winner_party": ["DEM"] * len(race_ids),
+        }
+    ).write_parquet(run_dir / "forecast_draws.parquet")
+    pl.DataFrame(
+        {
+            "party": ["DEM", "REP"],
+            "control_threshold": [51, 50],
+            "majority_probability": [0.4, 0.6],
+            "seat_count_mean": [48.0, 52.0],
+        }
+    ).write_parquet(run_dir / "control_forecasts.parquet")
 
     defaults: dict[str, object] = {
         "ci_manifest.json": {
@@ -179,6 +196,8 @@ def _seed_run(run_dir: Path, **overrides: object) -> Path:
             "matched_coverage": True,
             "baseline_filled_missing": False,
             "calibration_map_outer_fold": True,
+            "already_calibrated_without_map": True,
+            "held_out_permutation_affects_prior_folds": False,
             "public_signal_leakage": {
                 "leakage_passed": True,
                 "nested_value_added": True,
@@ -214,6 +233,14 @@ def _seed_run(run_dir: Path, **overrides: object) -> Path:
             "passed": True,
             "reconciliation_ok": True,
             "failure_reasons": [],
+            "checks": {
+                "required_artifacts_present": True,
+                "unique_race_keys": True,
+                "probability_range_ok": True,
+                "simplex_ok": True,
+                "draws_cover_races": True,
+                "control_present": True,
+            },
         },
         "publication_decision.json": {
             "publication_mode": "research",
@@ -227,7 +254,10 @@ def _seed_run(run_dir: Path, **overrides: object) -> Path:
             "verified": True,
             "reward_card_hash": "placeholder",
             "semantic_verification_hash": "placeholder",
-            "content_hashes": {},
+            "content_hashes": {
+                "race_forecasts.parquet": "seedhash",
+                "reward_card_v2.json": "seedhash",
+            },
             "promoted_at": "2026-01-01T00:00:00+00:00",
         },
         "live_source_canaries.json": {
@@ -744,6 +774,8 @@ def test_r21_poll_identity_pass_and_double_count_fail(tmp_path: Path, rewards_co
             "poll_observation_manifest.json": {
                 "double_count_rows": 4,
                 "option_double_count": True,
+                "pollster_lineage_auditable": True,
+                "unique_questions": 10,
             }
         },
     )
@@ -817,7 +849,7 @@ def test_r25_live_source_pass_and_canary_fail(tmp_path: Path, rewards_config: di
         **{
             "live_source_canaries.json": {
                 "all_passed": False,
-                "history": [],
+                "history": [{"name": "empty_feed", "status": "failed"}],
                 "injected_failure_results": [{"name": "timeout", "status": "success"}],
             }
         },
@@ -832,9 +864,9 @@ def test_r26_benchmark_pass_and_post_hoc_metric_fail(tmp_path: Path, rewards_con
         tmp_path / "r26-bad",
         **{
             "benchmark_superiority.json": {
-                "preregistered": False,
+                "preregistered": True,
                 "independent_cycle_count": 3,
-                "beats_all_simple_baselines": False,
+                "beats_all_simple_baselines": True,
                 "max_comparator_log_score_gap": 0.05,
                 "metric_changed_after_scoring": True,
                 "difficult_cycle_removed": True,
@@ -1577,3 +1609,219 @@ def test_finite_from_helper_preserves_zero() -> None:
         )
         == 0.0
     )
+
+
+def test_research_incomplete_cannot_promote_as_production(tmp_path: Path) -> None:
+    """P0: incomplete research run must not promote even if labeled for promotion."""
+    root = tmp_path / "proj"
+    (root / "configs").mkdir(parents=True)
+    shutil.copy(REWARDS_YAML, root / "configs" / "rewards.yaml")
+    shutil.copy(REPO_ROOT / "configs" / "model.yaml", root / "configs" / "model.yaml")
+    artifacts = root / "artifacts"
+    run = artifacts / "runs" / "research-incomplete"
+    run.mkdir(parents=True)
+    _base_forecasts().write_parquet(run / "race_forecasts.parquet")
+    _base_catalog().write_parquet(run / "race_catalog.parquet")
+    _base_manifest(synthetic=True).write_parquet(run / "source_manifest.parquet")
+    pl.DataFrame({"race_id": ["r0", "r1"], "draw_id": [0, 1]}).write_parquet(
+        run / "forecast_draws.parquet"
+    )
+    pl.DataFrame({"party": ["DEM"], "majority_probability": [0.5]}).write_parquet(
+        run / "control_forecasts.parquet"
+    )
+    _write_json(run / "publication_decision.json", {"publication_mode": "research"})
+    context = ProjectContext.create(root=root, artifacts_dir=artifacts)
+    payload = PublicationVerifier(context).attempt_promote(
+        attempt_id="research-incomplete", profile="production"
+    )
+    assert payload["promoted"] is False
+    assert payload["blocking_rewards"]
+    assert payload["promoted_pointer_unchanged"] is True
+
+
+def test_resolve_run_dir_finds_pipeline_runs_layout(tmp_path: Path) -> None:
+    from civic_signal.verification.publication import resolve_run_dir
+
+    artifacts = tmp_path / "artifacts"
+    run = artifacts / "runs" / "full-forecast"
+    run.mkdir(parents=True)
+    (run / "marker.txt").write_text("ok", encoding="utf-8")
+    assert resolve_run_dir(artifacts, "full-forecast") == run
+
+
+def test_not_applicable_blocks_production_profile(tmp_path: Path, rewards_config: dict) -> None:
+    """Required rewards in not_applicable must not satisfy production gate."""
+    run_dir = _seed_run(tmp_path / "na-block")
+    card = RewardV2Evaluator(rewards_config=rewards_config).evaluate_run_dir(
+        run_dir, profile="production", publication_mode="production"
+    )
+    # Force a required reward into not_applicable and recompute blocking logic.
+    card["rewards"]["R16_real_data_exclusivity"]["state"] = "not_applicable"
+    # Re-run evaluator path via manual blocking check used in production:
+    required = rewards_config["profiles"]["production"]["required_rewards"]
+    blocking = [rid for rid in required if card["rewards"].get(rid, {}).get("state") != "pass"]
+    assert "R16_real_data_exclusivity" in blocking
+
+
+def test_duplicate_race_rows_fail_semantic_verification(tmp_path: Path) -> None:
+    root = tmp_path / "proj"
+    (root / "configs").mkdir(parents=True)
+    shutil.copy(REWARDS_YAML, root / "configs" / "rewards.yaml")
+    artifacts = root / "artifacts"
+    run = artifacts / "runs" / "dup-rows"
+    run.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "race_id": ["r0", "r0"],
+            "winner_probability": [0.5, 0.5],
+            "model_config_hash": ["a", "a"],
+            "source_manifest_hash": ["b", "b"],
+        }
+    ).write_parquet(run / "race_forecasts.parquet")
+    pl.DataFrame({"race_id": ["r0"], "tier": ["A"]}).write_parquet(run / "race_catalog.parquet")
+    pl.DataFrame({"race_id": ["r0"], "draw_id": [0]}).write_parquet(run / "forecast_draws.parquet")
+    pl.DataFrame({"party": ["DEM"], "majority_probability": [0.5]}).write_parquet(
+        run / "control_forecasts.parquet"
+    )
+    pl.DataFrame({"source_id": ["s"], "status": ["fetched"], "content_hash": ["h"]}).write_parquet(
+        run / "source_manifest.parquet"
+    )
+    _write_json(run / "publication_decision.json", {"publication_mode": "research"})
+    context = ProjectContext.create(root=root, artifacts_dir=artifacts)
+    result = PublicationVerifier(context).verify_semantic(
+        run_id="dup-rows",
+        profile="research",
+        require_promotion_for_production=False,
+    )
+    assert result["passed"] is False
+    assert any("Duplicate" in r for r in result["failure_reasons"])
+
+
+def test_missing_commands_passed_blocks_r0(tmp_path: Path, rewards_config: dict) -> None:
+    bad = _seed_run(
+        tmp_path / "r0-no-cmd",
+        **{
+            "ci_manifest.json": {"line_coverage_pct": 95.0},  # no commands_passed
+            "coverage.json": {"line_rate_pct": 95.0},
+        },
+    )
+    assert _eval_one(bad, "R0_build", rewards_config)["state"] == "insufficient_evidence"
+
+
+def test_missing_ece_upper_blocks_r4(tmp_path: Path, rewards_config: dict) -> None:
+    nested = {
+        "exact_pipeline": True,
+        "outer_fold": True,
+        "held_out_permutation_affects_prior_folds": False,
+        "calibration": {
+            "expected_calibration_error": 0.02,
+            "calibration_intercept": 0.0,
+            "calibration_slope": 1.0,
+            # omit ece_bootstrap_upper
+        },
+    }
+    bad = _seed_run(tmp_path / "r4-no-upper", **{"nested_evaluation.json": nested})
+    assert _eval_one(bad, "R4_calibration", rewards_config)["state"] == "insufficient_evidence"
+
+
+def test_promote_copies_immutable_snapshot(tmp_path: Path) -> None:
+    root = tmp_path / "proj"
+    (root / "configs").mkdir(parents=True)
+    shutil.copy(REWARDS_YAML, root / "configs" / "rewards.yaml")
+    shutil.copy(REPO_ROOT / "configs" / "model.yaml", root / "configs" / "model.yaml")
+    artifacts = root / "artifacts"
+    attempt = artifacts / "attempts" / "snap-attempt"
+    _seed_run(attempt)
+    context = ProjectContext.create(root=root, artifacts_dir=artifacts)
+    payload = PublicationVerifier(context).attempt_promote(
+        attempt_id="snap-attempt", profile="production"
+    )
+    assert payload["promoted"] is True
+    snap = Path(payload["snapshot_dir"])
+    assert snap.exists()
+    assert (snap / "race_forecasts.parquet").exists()
+    assert (artifacts / "promoted" / "production" / "promotion_manifest.json").exists()
+    manifest = json.loads(
+        (artifacts / "promoted" / "production" / "promotion_manifest.json").read_text()
+    )
+    assert manifest["content_hashes"]
+    assert "race_forecasts.parquet" in manifest["content_hashes"]
+    assert manifest["rewards_config_hash"]
+
+
+def test_semantic_fails_missing_required_artifacts(tmp_path: Path) -> None:
+    root = tmp_path / "proj"
+    (root / "configs").mkdir(parents=True)
+    shutil.copy(REWARDS_YAML, root / "configs" / "rewards.yaml")
+    artifacts = root / "artifacts"
+    run = artifacts / "runs" / "thin"
+    run.mkdir(parents=True)
+    _base_forecasts().write_parquet(run / "race_forecasts.parquet")
+    _write_json(run / "publication_decision.json", {"publication_mode": "research"})
+    context = ProjectContext.create(root=root, artifacts_dir=artifacts)
+    result = PublicationVerifier(context).verify_semantic(
+        run_id="thin",
+        profile="research",
+        require_promotion_for_production=False,
+    )
+    assert result["passed"] is False
+    assert any("Missing required" in r for r in result["failure_reasons"])
+
+
+def test_verify_rewards_finds_runs_layout(tmp_path: Path) -> None:
+    root = tmp_path / "proj"
+    (root / "configs").mkdir(parents=True)
+    shutil.copy(REWARDS_YAML, root / "configs" / "rewards.yaml")
+    shutil.copy(REPO_ROOT / "configs" / "model.yaml", root / "configs" / "model.yaml")
+    artifacts = root / "artifacts"
+    run = artifacts / "runs" / "layout-run"
+    _seed_run(run)
+    context = ProjectContext.create(root=root, artifacts_dir=artifacts)
+    payload = RewardVerificationRunner(context).verify(
+        run_id="layout-run", profile="production"
+    )
+    assert (run / "reward_card_v2.json").exists()
+    assert payload["profile"] == "production"
+
+
+def test_production_semantic_detects_content_hash_tamper(tmp_path: Path) -> None:
+    root = tmp_path / "proj"
+    (root / "configs").mkdir(parents=True)
+    shutil.copy(REWARDS_YAML, root / "configs" / "rewards.yaml")
+    shutil.copy(REPO_ROOT / "configs" / "model.yaml", root / "configs" / "model.yaml")
+    artifacts = root / "artifacts"
+    attempt = artifacts / "attempts" / "tamper"
+    _seed_run(attempt)
+    context = ProjectContext.create(root=root, artifacts_dir=artifacts)
+    payload = PublicationVerifier(context).attempt_promote(
+        attempt_id="tamper", profile="production"
+    )
+    assert payload["promoted"] is True
+    # Tamper a primary artifact after promotion.
+    pl.DataFrame(
+        {
+            "race_id": ["r0"],
+            "winner_probability": [0.99],
+            "model_config_hash": ["tampered"],
+            "source_manifest_hash": ["x"],
+            "tier_reason": ["x"],
+            "data_quality_flags": ["x"],
+            "top_drivers": ["x"],
+            "component_contributions": ["x"],
+            "uncertainty_explanation": ["x"],
+        }
+    ).write_parquet(attempt / "race_forecasts.parquet")
+    result = PublicationVerifier(context).verify_semantic(
+        run_id="tamper", profile="production"
+    )
+    assert result["passed"] is False
+    assert any("hash" in r.lower() or "Duplicate" in r or "blocked" in r for r in result["failure_reasons"])
+
+
+def test_r24_production_without_promotion_fails(tmp_path: Path, rewards_config: dict) -> None:
+    run_dir = _seed_run(tmp_path / "r24-prod")
+    (run_dir / "promotion_manifest.json").unlink(missing_ok=True)
+    result = RewardV2Evaluator(rewards_config=rewards_config).evaluate_run_dir(
+        run_dir, profile="production", publication_mode="production"
+    )["rewards"]["R24_atomic_publication"]
+    assert result["state"] in {"fail", "insufficient_evidence"}

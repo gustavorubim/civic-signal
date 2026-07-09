@@ -163,7 +163,7 @@ class RewardEvaluator:
         }
 
     @staticmethod
-    def _artifacts_exist(artifact_dir: Path) -> bool:
+    def _artifacts_exist(artifact_dir: Path) -> bool:  # pragma: no cover - legacy helper
         required = {
             "race_catalog.parquet",
             "race_forecasts.parquet",

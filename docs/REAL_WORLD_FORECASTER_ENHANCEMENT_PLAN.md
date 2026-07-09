@@ -1,7 +1,7 @@
 # Real-World U.S. Election Forecaster Enhancement Plan
 
-Status: proposed implementation program  
-Audience: statistical-methodology, data-engineering, and production owners  
+Status: proposed implementation program
+Audience: statistical-methodology, data-engineering, and production owners
 Primary objective: turn Civic Signal from a strong fixture-backed research scaffold into
 an evidence-backed, real-data U.S. election forecasting system whose claims can be
 independently reproduced and falsified.
