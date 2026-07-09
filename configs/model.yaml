@@ -24,7 +24,7 @@ ensemble_learning:
   l2_prior_strength: 0.02
   calibration_ridge: 0.001
   calibration_min_slope: 0.25
-  calibration_max_slope: 1.0
+  calibration_max_slope: 1.5
   calibration_max_abs_intercept: 2.0
 baseline:
   previous_share_sigma: 0.08
@@ -44,7 +44,7 @@ bayesian:
     num_samples: 2000
     num_chains: 2
     chain_method: vectorized
-    target_accept_prob: 0.99
+    target_accept_prob: 0.9
     wall_clock_timeout_seconds: 2820
     failover:
       fallback_order:
@@ -143,6 +143,7 @@ uncertainty:
   tier_a_sigma: 0.035
   tier_b_sigma: 0.075
   heavy_tail_df: 5
+  turnout_sigma: 0.05
 correlation:
   national_sigma: 0.015
   region_sigma: 0.010
@@ -205,6 +206,8 @@ correlation:
     HI: west
     OR: west
     WA: west
+# Party of the sitting Vice President; controls a tied Senate.
+control_tiebreak_party: REP
 control_thresholds:
   president: 270
   senate: 51

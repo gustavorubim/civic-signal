@@ -277,6 +277,10 @@ class BayesianPollingModel(KalmanPollingModel):
             eligible_polls,
             self._option_priors(bundle.options),
         )
+        election_day_by_race = self._election_day_by_race(bundle.race_catalog)
+        # House effects are estimated inside the model (pollster_effect); the
+        # empirical-Bayes estimates are kept for reporting artifacts only, so
+        # the same information is never subtracted twice from the observations.
         data = build_state_space_data(
             bundle,
             as_of=as_of.isoformat(),
@@ -290,8 +294,13 @@ class BayesianPollingModel(KalmanPollingModel):
                 )
             ),
             process_drift_sd_per_sqrt_day=self.forecast_drift_sd_per_sqrt_day,
-            pollster_house_effects={
-                key: estimate.effect for key, estimate in house_effects.items()
+            pollster_house_effects={},
+            election_day_by_race=election_day_by_race,
+            pollster_quality_weights={
+                str(key): float(value)
+                for key, value in dict(
+                    dict(self._config.get("polling", {})).get("pollster_quality_weights", {})
+                ).items()
             },
         )
         if data.poll_logit_y.size == 0:
@@ -331,7 +340,12 @@ class BayesianPollingModel(KalmanPollingModel):
 
         geography_by_race = self._geography_by_race(bundle.race_catalog)
         office_by_race = self._office_by_race(bundle.race_catalog)
-        election_day_by_race = self._election_day_by_race(bundle.race_catalog)
+        # Races on the reverse random walk already carry poll-to-election-day
+        # drift inside the posterior; adding the analytic horizon term would
+        # double-count that uncertainty.
+        walk_covered_races = (
+            set(data.margin_race_ids) if data.margin_poll_y.size else set()
+        )
         fitted_keys = set(data.race_option_keys)
         poll_counts = np.bincount(data.poll_s, minlength=len(data.race_option_keys))
         draw_rows: list[dict[str, object]] = []
@@ -346,8 +360,9 @@ class BayesianPollingModel(KalmanPollingModel):
             vote_share = float(shares.mean())
             current_sd = float(logits.std())
             forecast_sd_logit = self._forecast_logit_sd(current_sd, vote_share)
-            horizon_sd = self._forecast_horizon_logit_sd(race_id, as_of, election_day_by_race)
-            forecast_sd_logit = math.sqrt(forecast_sd_logit**2 + horizon_sd**2)
+            if race_id not in walk_covered_races:
+                horizon_sd = self._forecast_horizon_logit_sd(race_id, as_of, election_day_by_race)
+                forecast_sd_logit = math.sqrt(forecast_sd_logit**2 + horizon_sd**2)
             posterior_sds.append(forecast_sd_logit)
             marginal_win_probability = float(normal_cdf(mean_logit / max(forecast_sd_logit, 1e-8)))
             draw_logits = np.asarray(logits[selected_indices], dtype=np.float64)
@@ -429,6 +444,9 @@ class BayesianPollingModel(KalmanPollingModel):
             **result.diagnostics,
             "engine": "numpyro-nuts",
             "parameterization": self.parameterization,
+            "temporal_model": data.metadata.get("temporal_model"),
+            "margin_race_count": data.metadata.get("margin_race_count", 0),
+            "margin_poll_count": data.metadata.get("margin_poll_count", 0),
             "draw_count": self.posterior_draw_count,
             "nuts_sample_count": sample_count,
             "race_option_count": len(data.race_option_keys) + prior_only_count,
@@ -465,6 +483,14 @@ class BayesianPollingModel(KalmanPollingModel):
 
         bayesian = dict(self._config.get("bayesian", {}))
         state_space = dict(bayesian.get("state_space", {}))
+        # Weekly walk-innovation prior scale: backtest-learned drift when a
+        # promoted estimate exists, else the configured per-sqrt-day drift.
+        drift_per_sqrt_day = float(
+            self._config.get(
+                "_learned_horizon_drift_sd_per_sqrt_day", self.forecast_drift_sd_per_sqrt_day
+            )
+            or self.forecast_drift_sd_per_sqrt_day
+        )
         return HyperPriors(
             sigma_state=self.initial_state_logit_sd,
             tau_pollster=float(
@@ -475,6 +501,7 @@ class BayesianPollingModel(KalmanPollingModel):
             ),
             sigma_geography=float(state_space.get("geography_effect_sd", 0.06)),
             sigma_race=float(state_space.get("race_effect_sd", 0.08)),
+            sigma_walk=max(drift_per_sqrt_day * math.sqrt(7.0), 1e-4),
         )
 
     def _append_prior_only_draws(

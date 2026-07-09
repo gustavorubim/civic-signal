@@ -116,6 +116,13 @@ class ForecastPipeline:
         ) and not backtest_artifacts.recalibration_map.is_empty():
             recalibration_map = backtest_artifacts.recalibration_map
         recalibration_map = self._publication_recalibration_map(model_config, recalibration_map)
+        horizon_calibration = dict(
+            backtest_artifacts.payload.get("horizon_calibration") or {}
+        )
+        if horizon_calibration.get("status") == "fitted":
+            model_config["_learned_horizon_drift_sd_per_sqrt_day"] = float(
+                horizon_calibration["drift_sd_logit_per_sqrt_day"]
+            )
         source_manifest = pl.read_parquet(self.context.curated_dir / "source_manifest.parquet")
         fundamentals_model = FundamentalsModel(model_config).fit(training_bundle)
         fundamentals_prior = None

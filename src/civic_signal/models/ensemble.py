@@ -49,7 +49,10 @@ class EnsembleModel:
                 weighted_probability += weight * marginal
                 vote_share = float(row["vote_share"])
                 weighted_share += weight * vote_share
-                uncertainty_total += weight * float(row["uncertainty"])
+                # Mixture second moment: weight the component variances, not the
+                # sds; the between-component spread is reported separately as
+                # component_disagreement.
+                uncertainty_total += weight * float(row["uncertainty"]) ** 2
                 weight_total += weight
                 component_shares.append((weight, vote_share))
                 drivers.append(component)
@@ -74,7 +77,7 @@ class EnsembleModel:
                     "component": self.component,
                     "marginal_win_probability": clamp(weighted_probability / weight_total),
                     "vote_share": clamp(weighted_share / weight_total),
-                    "uncertainty": uncertainty_total / weight_total,
+                    "uncertainty": (uncertainty_total / weight_total) ** 0.5,
                     "component_disagreement": disagreement,
                     "admitted": True,
                     "explanation": " + ".join(drivers),

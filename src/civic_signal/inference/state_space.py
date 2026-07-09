@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
@@ -10,6 +10,14 @@ import polars as pl
 
 from civic_signal.features import FeatureBundle, filter_bundle_by_date, subset_bundle
 from civic_signal.models.common import logit
+
+
+def _empty_float_array() -> np.ndarray:
+    return np.array([], dtype=np.float64)
+
+
+def _empty_int_array() -> np.ndarray:
+    return np.array([], dtype=np.int64)
 
 
 @dataclass(frozen=True)
@@ -31,6 +39,25 @@ class StateSpaceData:
     race_ids: list[str]
     dims: tuple[int, int, int]
     metadata: dict[str, Any]
+    # Margin-mode structures (P0.1/P0.2/P1.1): one party-signed two-party-margin
+    # latent per two-way race, with a reverse random walk anchored on election
+    # day. Options of margin races are reconstructed deterministically; options
+    # not covered stay on the legacy per-option static path.
+    margin_race_ids: list[str] = field(default_factory=list)
+    margin_prior_logit: np.ndarray = field(default_factory=_empty_float_array)
+    margin_hierarchy_loading: np.ndarray = field(default_factory=_empty_float_array)
+    margin_race_office: np.ndarray = field(default_factory=_empty_int_array)
+    margin_race_geography: np.ndarray = field(default_factory=_empty_int_array)
+    margin_ref_option_index: np.ndarray = field(default_factory=_empty_int_array)
+    margin_other_option_index: np.ndarray = field(default_factory=_empty_int_array)
+    margin_poll_race: np.ndarray = field(default_factory=_empty_int_array)
+    margin_poll_week: np.ndarray = field(default_factory=_empty_int_array)
+    margin_poll_j: np.ndarray = field(default_factory=_empty_int_array)
+    margin_poll_y: np.ndarray = field(default_factory=_empty_float_array)
+    margin_poll_kappa: np.ndarray = field(default_factory=_empty_float_array)
+    margin_max_weeks: int = 0
+    residual_option_indices: np.ndarray = field(default_factory=_empty_int_array)
+    legacy_poll_indices: np.ndarray = field(default_factory=_empty_int_array)
 
 
 @dataclass(frozen=True)
@@ -40,6 +67,17 @@ class HyperPriors:
     sigma_office: float = 0.08
     sigma_geography: float = 0.06
     sigma_race: float = 0.08
+    # Prior scale for the weekly reverse-random-walk innovation sd (logit units).
+    sigma_walk: float = 0.016
+
+
+def _party_sign(party: object) -> float:
+    value = str(party or "").upper()
+    if value in {"DEM", "YES"}:
+        return 1.0
+    if value in {"REP", "NO"}:
+        return -1.0
+    return 0.0
 
 
 def build_state_space_data(
@@ -52,8 +90,17 @@ def build_state_space_data(
     poll_half_life_days: float = 21.0,
     process_drift_sd_per_sqrt_day: float = 0.0,
     pollster_house_effects: dict[tuple[str, str | None], float] | None = None,
+    election_day_by_race: dict[str, date] | None = None,
+    pollster_quality_weights: dict[str, float] | None = None,
 ) -> StateSpaceData:
-    """Build poll-level tensors consumed by the hierarchical NumPyro backend."""
+    """Build poll-level tensors consumed by the hierarchical NumPyro backend.
+
+    When `election_day_by_race` is provided, two-way races are additionally
+    encoded as margin observations with weekly time buckets so the model can fit
+    a reverse random walk anchored on election day. Races without an election
+    date or with a non-two-way option structure remain on the legacy per-option
+    static encoding.
+    """
 
     cutoff = date.fromisoformat(as_of)
     catalog = bundle.race_catalog
@@ -76,6 +123,7 @@ def build_state_space_data(
         return _empty_state_space_data({"as_of": as_of, "office_type": office_type, "cycle": cycle})
 
     option_prior = _option_prior(active.options)
+    option_party = _option_party(active.options)
     race_metadata = _race_metadata(active.race_catalog)
     keys = sorted(
         {
@@ -108,6 +156,7 @@ def build_state_space_data(
     kappa: list[float] = []
     observation_weights: list[float] = []
     house_effect_values: list[float] = []
+    poll_rows: list[dict[str, Any]] = []
     house_effect_lookup = pollster_house_effects or {}
     for row in polls.iter_rows(named=True):
         key = (str(row["race_id"]), str(row["option_id"]))
@@ -123,7 +172,11 @@ def build_state_space_data(
         )
         share = min(0.999, max(0.001, observed_share - house_effect))
         sample_size = max(float(row.get("sample_size") or 600.0), 50.0)
-        quality_weight = _poll_quality_weight(row)
+        # Track-record weighting hook: per-pollster multipliers (e.g. from a
+        # historical-accuracy table) sharpen or discount effective sample size.
+        quality_weight = _poll_quality_weight(row) * max(
+            float((pollster_quality_weights or {}).get(pollster, 1.0)), 0.1
+        )
         age_days = max((cutoff - poll_date).days, 0)
         recency_weight = _recency_weight(age_days, poll_half_life_days)
         observation_weight = max(quality_weight * recency_weight, 1e-3)
@@ -139,6 +192,24 @@ def build_state_space_data(
         kappa.append(max(math.sqrt(obs_sd_logit**2 + process_sd_logit**2), 0.02))
         observation_weights.append(observation_weight)
         house_effect_values.append(float(house_effect))
+        poll_rows.append(
+            {
+                "race_id": str(row["race_id"]),
+                "option_id": option_id,
+                "pollster": pollster,
+                "poll_date": poll_date,
+                "share": share,
+                "sample_size": sample_size,
+                "quality_weight": quality_weight,
+                "pair_key": (
+                    str(row["race_id"]),
+                    pollster,
+                    str(row.get("start_date") or ""),
+                    str(row.get("end_date") or ""),
+                    float(row.get("sample_size") or 0.0),
+                ),
+            }
+        )
 
     prior_lookup = prior_logit_by_key or {}
     prior_logit = np.array(
@@ -166,6 +237,22 @@ def build_state_space_data(
         [race_index[race_id] for race_id, _option_id in keys],
         dtype=np.int64,
     )
+
+    margin = _build_margin_structures(
+        keys=keys,
+        key_index=key_index,
+        prior_logit=prior_logit,
+        option_party=option_party,
+        race_metadata=race_metadata,
+        office_index=office_index,
+        geography_index=geography_index,
+        pollster_index=pollster_index,
+        poll_rows=poll_rows,
+        election_day_by_race=election_day_by_race or {},
+        cutoff=cutoff,
+        nonsampling_logit_floor=0.04,
+    )
+
     return StateSpaceData(
         poll_t=np.array(poll_t, dtype=np.int64),
         poll_s=np.array(poll_s, dtype=np.int64),
@@ -204,13 +291,181 @@ def build_state_space_data(
             "office_count": len(office_ids),
             "geography_count": len(geography_ids),
             "race_count": len(race_ids),
+            "margin_race_count": len(margin["margin_race_ids"]),
+            "margin_poll_count": int(margin["margin_poll_y"].size),
+            "margin_max_weeks": int(margin["margin_max_weeks"]),
+            "temporal_model": (
+                "reverse_random_walk_weekly"
+                if margin["margin_poll_y"].size
+                else "static_recency_weighted"
+            ),
             "hierarchy": {
                 "office_ids": office_ids,
                 "geography_ids": geography_ids,
                 "race_ids": race_ids,
             },
         },
+        **margin,
     )
+
+
+def _build_margin_structures(
+    *,
+    keys: list[tuple[str, str]],
+    key_index: dict[tuple[str, str], int],
+    prior_logit: np.ndarray,
+    option_party: dict[tuple[str, str], str],
+    race_metadata: dict[str, dict[str, str]],
+    office_index: dict[str, int],
+    geography_index: dict[str, int],
+    pollster_index: dict[str, int],
+    poll_rows: list[dict[str, Any]],
+    election_day_by_race: dict[str, date],
+    cutoff: date,
+    nonsampling_logit_floor: float,
+) -> dict[str, Any]:
+    empty = {
+        "margin_race_ids": [],
+        "margin_prior_logit": _empty_float_array(),
+        "margin_hierarchy_loading": _empty_float_array(),
+        "margin_race_office": _empty_int_array(),
+        "margin_race_geography": _empty_int_array(),
+        "margin_ref_option_index": _empty_int_array(),
+        "margin_other_option_index": _empty_int_array(),
+        "margin_poll_race": _empty_int_array(),
+        "margin_poll_week": _empty_int_array(),
+        "margin_poll_j": _empty_int_array(),
+        "margin_poll_y": _empty_float_array(),
+        "margin_poll_kappa": _empty_float_array(),
+        "margin_max_weeks": 0,
+        "residual_option_indices": np.arange(len(keys), dtype=np.int64),
+        "legacy_poll_indices": np.arange(len(poll_rows), dtype=np.int64),
+    }
+    if not election_day_by_race:
+        return empty
+
+    options_by_race: dict[str, list[tuple[str, str]]] = {}
+    for race_id, option_id in keys:
+        options_by_race.setdefault(race_id, []).append((race_id, option_id))
+
+    margin_race_ids: list[str] = []
+    margin_prior: list[float] = []
+    margin_loading: list[float] = []
+    margin_office: list[int] = []
+    margin_geography: list[int] = []
+    ref_option_index: list[int] = []
+    other_option_index: list[int] = []
+    race_to_margin: dict[str, int] = {}
+    ref_key_by_race: dict[str, tuple[str, str]] = {}
+    other_key_by_race: dict[str, tuple[str, str]] = {}
+
+    def _inv_logit(value: float) -> float:
+        return 1.0 / (1.0 + math.exp(-value))
+
+    for race_id, race_keys in sorted(options_by_race.items()):
+        if len(race_keys) != 2 or race_id not in election_day_by_race:
+            continue
+        signs = [_party_sign(option_party.get(key)) for key in race_keys]
+        if signs[0] > 0 or (signs[0] != 0 and signs[1] == 0):
+            ref, other = race_keys[0], race_keys[1]
+            ref_sign, other_sign = signs[0], signs[1]
+        elif signs[1] != 0:
+            ref, other = race_keys[1], race_keys[0]
+            ref_sign, other_sign = signs[1], signs[0]
+        else:
+            ref, other = race_keys[0], race_keys[1]
+            ref_sign, other_sign = 0.0, 0.0
+        loading = (ref_sign - other_sign) / 2.0
+        prior_ref = _inv_logit(float(prior_logit[key_index[ref]]))
+        prior_other = _inv_logit(float(prior_logit[key_index[other]]))
+        two_party = min(max(prior_ref / max(prior_ref + prior_other, 1e-9), 1e-4), 1.0 - 1e-4)
+        meta = race_metadata.get(race_id, {})
+        race_to_margin[race_id] = len(margin_race_ids)
+        ref_key_by_race[race_id] = ref
+        other_key_by_race[race_id] = other
+        margin_race_ids.append(race_id)
+        margin_prior.append(logit(two_party))
+        margin_loading.append(loading)
+        margin_office.append(office_index.get(meta.get("office", "unknown"), 0))
+        margin_geography.append(geography_index.get(meta.get("geography_group", "unknown"), 0))
+        ref_option_index.append(key_index[ref])
+        other_option_index.append(key_index[other])
+
+    if not margin_race_ids:
+        return empty
+
+    paired: dict[tuple, dict[str, dict[str, Any]]] = {}
+    for row_index, row in enumerate(poll_rows):
+        race_id = row["race_id"]
+        if race_id not in race_to_margin:
+            continue
+        if (race_id, row["option_id"]) == ref_key_by_race[race_id]:
+            role = "ref"
+        elif (race_id, row["option_id"]) == other_key_by_race[race_id]:
+            role = "other"
+        else:
+            continue
+        paired.setdefault(row["pair_key"], {})[role] = {**row, "row_index": row_index}
+
+    margin_poll_race: list[int] = []
+    margin_poll_week: list[int] = []
+    margin_poll_j: list[int] = []
+    margin_poll_y: list[float] = []
+    margin_poll_kappa: list[float] = []
+    consumed_rows: set[int] = set()
+    for pair in paired.values():
+        if "ref" not in pair or "other" not in pair:
+            continue
+        ref_row, other_row = pair["ref"], pair["other"]
+        race_id = ref_row["race_id"]
+        total = ref_row["share"] + other_row["share"]
+        if total <= 1e-9:
+            continue
+        two_party = min(max(ref_row["share"] / total, 1e-4), 1.0 - 1e-4)
+        election_day = election_day_by_race[race_id]
+        week = max(int((election_day - ref_row["poll_date"]).days // 7), 0)
+        effective_sample_size = max(
+            ref_row["sample_size"] * max(ref_row["quality_weight"], 1e-3), 50.0
+        )
+        share_sd = math.sqrt(max(two_party * (1.0 - two_party) / effective_sample_size, 1e-8))
+        obs_sd_logit = share_sd / max(two_party * (1.0 - two_party), 1e-6)
+        margin_poll_race.append(race_to_margin[race_id])
+        margin_poll_week.append(week)
+        margin_poll_j.append(pollster_index.get(ref_row["pollster"], 0))
+        margin_poll_y.append(logit(two_party))
+        margin_poll_kappa.append(math.sqrt(obs_sd_logit**2 + nonsampling_logit_floor**2))
+        consumed_rows.add(ref_row["row_index"])
+        consumed_rows.add(other_row["row_index"])
+
+    if not margin_poll_y:
+        return empty
+
+    covered_option_indices = set(ref_option_index) | set(other_option_index)
+    residual_option_indices = np.array(
+        [index for index in range(len(keys)) if index not in covered_option_indices],
+        dtype=np.int64,
+    )
+    legacy_poll_indices = np.array(
+        [index for index in range(len(poll_rows)) if index not in consumed_rows],
+        dtype=np.int64,
+    )
+    return {
+        "margin_race_ids": margin_race_ids,
+        "margin_prior_logit": np.array(margin_prior, dtype=np.float64),
+        "margin_hierarchy_loading": np.array(margin_loading, dtype=np.float64),
+        "margin_race_office": np.array(margin_office, dtype=np.int64),
+        "margin_race_geography": np.array(margin_geography, dtype=np.int64),
+        "margin_ref_option_index": np.array(ref_option_index, dtype=np.int64),
+        "margin_other_option_index": np.array(other_option_index, dtype=np.int64),
+        "margin_poll_race": np.array(margin_poll_race, dtype=np.int64),
+        "margin_poll_week": np.array(margin_poll_week, dtype=np.int64),
+        "margin_poll_j": np.array(margin_poll_j, dtype=np.int64),
+        "margin_poll_y": np.array(margin_poll_y, dtype=np.float64),
+        "margin_poll_kappa": np.array(margin_poll_kappa, dtype=np.float64),
+        "margin_max_weeks": int(max(margin_poll_week, default=0)),
+        "residual_option_indices": residual_option_indices,
+        "legacy_poll_indices": legacy_poll_indices,
+    }
 
 
 def state_space_model(
@@ -219,8 +474,129 @@ def state_space_model(
     *,
     parameterization: str = "noncentered",
 ) -> None:  # pragma: no cover
-    """NumPyro hierarchical polling model used by the opt-in NUTS backend."""
+    """NumPyro hierarchical polling model used by the opt-in NUTS backend.
 
+    Margin mode (two-way races with election dates): one party-signed
+    two-party-margin latent per race with office/geography effects entering the
+    margin, plus a weekly reverse random walk anchored on election day. The
+    legacy static per-option encoding remains for everything else.
+    """
+
+    if data.margin_poll_y.size and parameterization == "noncentered":
+        _margin_state_space_model(data, hyperpriors or HyperPriors())
+        return
+    _legacy_state_space_model(data, hyperpriors, parameterization=parameterization)
+
+
+def _margin_state_space_model(
+    data: StateSpaceData,
+    priors: HyperPriors,
+) -> None:  # pragma: no cover
+    try:
+        import jax.numpy as jnp
+        import numpyro
+        import numpyro.distributions as dist
+    except ImportError as exc:
+        raise RuntimeError("NumPyro/JAX are required; run `uv sync`.") from exc
+
+    option_count = len(data.race_option_keys)
+    pollster_count = max(len(data.pollster_ids), 1)
+    office_count = max(len(data.office_ids), 1)
+    geography_count = max(len(data.geography_ids), 1)
+    margin_count = len(data.margin_race_ids)
+    max_weeks = int(data.margin_max_weeks)
+
+    sigma_office = numpyro.sample("sigma_office", dist.HalfNormal(priors.sigma_office))
+    sigma_geography = numpyro.sample("sigma_geography", dist.HalfNormal(priors.sigma_geography))
+    sigma_race = numpyro.sample("sigma_race", dist.HalfNormal(priors.sigma_race))
+    tau_pollster = numpyro.sample("tau_pollster", dist.HalfNormal(priors.tau_pollster))
+    sigma_walk = numpyro.sample("sigma_walk", dist.HalfNormal(priors.sigma_walk))
+
+    office_z = numpyro.sample("office_z", dist.Normal(0.0, 1.0).expand([office_count]))
+    geography_z = numpyro.sample("geography_z", dist.Normal(0.0, 1.0).expand([geography_count]))
+    office_effect = numpyro.deterministic(
+        "office_effect", _centered_effect(sigma_office * office_z)
+    )
+    geography_effect = numpyro.deterministic(
+        "geography_effect", _centered_effect(sigma_geography * geography_z)
+    )
+    race_z = numpyro.sample("race_z", dist.Normal(0.0, 1.0).expand([margin_count]))
+    numpyro.deterministic("race_effect", _centered_effect(sigma_race * race_z))
+
+    loading = jnp.asarray(data.margin_hierarchy_loading)
+    margin_t0 = numpyro.deterministic(
+        "race_margin_logit",
+        jnp.asarray(data.margin_prior_logit)
+        + loading
+        * (
+            office_effect[jnp.asarray(data.margin_race_office)]
+            + geography_effect[jnp.asarray(data.margin_race_geography)]
+        )
+        + sigma_race * race_z,
+    )
+
+    raw_pollster = numpyro.sample("pollster_raw", dist.Normal(0.0, 1.0).expand([pollster_count]))
+    pollster_effect = numpyro.deterministic(
+        "pollster_effect",
+        tau_pollster * (raw_pollster - jnp.mean(raw_pollster)),
+    )
+
+    poll_race = jnp.asarray(data.margin_poll_race)
+    if max_weeks > 0:
+        walk_z = numpyro.sample("walk_z", dist.Normal(0.0, 1.0).expand([margin_count, max_weeks]))
+        walk = jnp.cumsum(sigma_walk * walk_z, axis=1)
+        poll_week = jnp.asarray(data.margin_poll_week)
+        theta = jnp.where(
+            poll_week > 0,
+            margin_t0[poll_race] + walk[poll_race, jnp.clip(poll_week - 1, 0, max_weeks - 1)],
+            margin_t0[poll_race],
+        )
+    else:
+        theta = margin_t0[poll_race]
+
+    margin_mu = theta + loading[poll_race] * pollster_effect[jnp.asarray(data.margin_poll_j)]
+    numpyro.sample(
+        "margin_poll_y",
+        dist.Normal(margin_mu, jnp.asarray(data.margin_poll_kappa)),
+        obs=jnp.asarray(data.margin_poll_y),
+    )
+
+    state_logit = jnp.zeros(option_count)
+    state_logit = state_logit.at[jnp.asarray(data.margin_ref_option_index)].set(margin_t0)
+    state_logit = state_logit.at[jnp.asarray(data.margin_other_option_index)].set(-margin_t0)
+
+    residual_indices = np.asarray(data.residual_option_indices, dtype=np.int64)
+    if residual_indices.size:
+        sigma_state = numpyro.sample("sigma_state", dist.HalfNormal(priors.sigma_state))
+        residual_z = numpyro.sample(
+            "state_z", dist.Normal(0.0, 1.0).expand([int(residual_indices.size)])
+        )
+        residual_logit = jnp.asarray(data.prior_logit[residual_indices]) + sigma_state * residual_z
+        state_logit = state_logit.at[jnp.asarray(residual_indices)].set(residual_logit)
+        legacy = np.asarray(data.legacy_poll_indices, dtype=np.int64)
+        if legacy.size:
+            residual_set = {int(v) for v in residual_indices}
+            legacy_obs = [index for index in legacy if int(data.poll_s[index]) in residual_set]
+            if legacy_obs:
+                obs_idx = np.array(legacy_obs, dtype=np.int64)
+                mu = state_logit[jnp.asarray(data.poll_s[obs_idx])] + pollster_effect[
+                    jnp.asarray(data.poll_j[obs_idx])
+                ]
+                numpyro.sample(
+                    "poll_logit_y",
+                    dist.Normal(mu, jnp.asarray(data.poll_kappa[obs_idx])),
+                    obs=jnp.asarray(data.poll_logit_y[obs_idx]),
+                )
+
+    numpyro.deterministic("state_logit", state_logit)
+
+
+def _legacy_state_space_model(
+    data: StateSpaceData,
+    hyperpriors: HyperPriors | None = None,
+    *,
+    parameterization: str = "noncentered",
+) -> None:  # pragma: no cover
     try:
         import jax.numpy as jnp
         import numpyro
@@ -336,6 +712,15 @@ def _option_prior(options: pl.DataFrame) -> dict[tuple[str, str], float]:
     return priors
 
 
+def _option_party(options: pl.DataFrame) -> dict[tuple[str, str], str]:
+    if options.is_empty() or "party" not in options.columns:
+        return {}
+    return {
+        (str(row["race_id"]), str(row["option_id"])): str(row.get("party") or "")
+        for row in options.iter_rows(named=True)
+    }
+
+
 def _race_metadata(races: pl.DataFrame) -> dict[str, dict[str, str]]:
     if races.is_empty():
         return {}
@@ -417,6 +802,10 @@ def _empty_state_space_data(metadata: dict[str, Any]) -> StateSpaceData:
             "office_count": 0,
             "geography_count": 0,
             "race_count": 0,
+            "margin_race_count": 0,
+            "margin_poll_count": 0,
+            "margin_max_weeks": 0,
+            "temporal_model": "static_recency_weighted",
             "hierarchy": {"office_ids": [], "geography_ids": [], "race_ids": []},
         },
     )

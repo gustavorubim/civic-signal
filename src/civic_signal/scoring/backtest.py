@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
@@ -167,6 +168,7 @@ class BacktestRunner:
             "ensemble_learning": ensemble_learning["weight_learning"],
             "probability_calibration": ensemble_learning["probability_calibration"],
             "bayesian_hyperpriors": hyperprior_search,
+            "horizon_calibration": self._horizon_calibration(rolling_predictions),
         }
         recalibration_map = recalibration_map_from_calibration(
             ensemble_learning["probability_calibration"],
@@ -651,63 +653,131 @@ class BacktestRunner:
             str(key): str(value)
             for key, value in dict(correlation_config.get("geographic_groups", {})).items()
         }
-        shrinkage = float(correlation_config.get("residual_covariance_shrinkage", 0.60))
         min_variance = float(correlation_config.get("residual_min_variance", 0.0004))
-        same_region_corr = float(correlation_config.get("residual_same_region_correlation", 0.35))
-        cross_region_corr = float(correlation_config.get("residual_cross_region_correlation", 0.12))
-        index_columns = ["cycle"]
-        if "as_of" in frame.columns:
-            index_columns.append("as_of")
+        # Cycles are the unit of independent evidence: as-of cuts within a cycle
+        # share one election outcome, so they are averaged, never counted as
+        # separate samples. With so few cycles a free covariance over ~50 groups
+        # is unidentified; instead estimate a three-level factor structure
+        # (national + region + state idiosyncratic) with pooled variances.
         residuals = (
             frame.with_columns(
                 (pl.col("predicted_vote_share") - pl.col("actual_vote_share")).alias("residual")
             )
-            .group_by([*index_columns, "geography"])
+            .group_by(["cycle", "geography"])
             .agg(pl.col("residual").mean().alias("residual"))
         )
         pivot = residuals.pivot(
-            index=index_columns,
+            index=["cycle"],
             on="geography",
             values="residual",
             aggregate_function="mean",
         )
-        groups = [column for column in pivot.columns if column not in set(index_columns)]
+        groups = [column for column in pivot.columns if column != "cycle"]
         if not groups or pivot.height < 2:
             return pl.DataFrame(schema=schema)
-        matrix_rows = []
         data = pivot.select(groups).fill_null(0.0).to_numpy().astype(np.float64)
-        covariance = np.atleast_2d(np.cov(data, rowvar=False))
-        diagonal_variance = np.maximum(np.diag(covariance), min_variance)
-        empirical = covariance.copy()
-        np.fill_diagonal(empirical, diagonal_variance)
-        target = BacktestRunner._structured_covariance_target(
-            groups,
-            diagonal_variance,
-            geographic_groups,
-            same_region_corr,
-            cross_region_corr,
+        cycle_count = int(data.shape[0])
+        region_of = {
+            group: geographic_groups.get(str(group).split("-")[0], str(group)) for group in groups
+        }
+        regions = sorted(set(region_of.values()))
+        region_columns = {
+            region: [index for index, group in enumerate(groups) if region_of[group] == region]
+            for region in regions
+        }
+        national = data.mean(axis=1)
+        national_variance = max(float(np.var(national, ddof=1)), 0.0)
+        region_deviations: list[float] = []
+        state_deviations: list[float] = []
+        region_means = np.zeros((cycle_count, len(regions)), dtype=np.float64)
+        for region_index, region in enumerate(regions):
+            columns = region_columns[region]
+            region_means[:, region_index] = data[:, columns].mean(axis=1)
+            region_deviations.extend(
+                (region_means[:, region_index] - national).tolist()
+            )
+            for column in columns:
+                state_deviations.extend(
+                    (data[:, column] - region_means[:, region_index]).tolist()
+                )
+        region_variance = max(
+            float(np.var(np.array(region_deviations), ddof=1)) if len(region_deviations) > 1 else 0.0,
+            0.0,
         )
-        covariance = (1.0 - shrinkage) * empirical + shrinkage * target
-        covariance = BacktestRunner._nearest_psd(covariance, min_variance=min_variance * 0.01)
-        matrix_rank = int(np.linalg.matrix_rank(covariance))
-        diagonal = np.sqrt(np.maximum(np.diag(covariance), 1e-12))
-        for row_index, row_group in enumerate(groups):
-            for column_index, column_group in enumerate(groups):
-                denom = diagonal[row_index] * diagonal[column_index]
-                correlation = covariance[row_index, column_index] / denom if denom else 0.0
+        state_variance = max(
+            float(np.var(np.array(state_deviations), ddof=1)) if len(state_deviations) > 1 else 0.0,
+            min_variance * 0.25,
+        )
+        matrix_rows = []
+        total_variance = max(national_variance + region_variance + state_variance, min_variance)
+        matrix_rank = min(1 + len(regions) + len(groups), len(groups))
+        for row_group in groups:
+            for column_group in groups:
+                covariance = national_variance
+                if region_of[row_group] == region_of[column_group]:
+                    covariance += region_variance
+                if row_group == column_group:
+                    covariance += state_variance
+                    covariance = max(covariance, min_variance)
+                correlation = covariance / total_variance
                 matrix_rows.append(
                     {
                         "row_group": row_group,
                         "column_group": column_group,
-                        "covariance": float(covariance[row_index, column_index]),
-                        "correlation": float(correlation),
-                        "sample_size": int(data.shape[0]),
-                        "shrinkage": shrinkage,
+                        "covariance": float(covariance),
+                        "correlation": float(min(correlation, 1.0)),
+                        "sample_size": cycle_count,
+                        "shrinkage": 0.0,
                         "matrix_rank": matrix_rank,
-                        "covariance_method": "structured_shrinkage_by_geography",
+                        "covariance_method": "structured_factor_cycle_level",
                     }
                 )
         return pl.DataFrame(matrix_rows)
+
+    @staticmethod
+    def _horizon_calibration(frame: pl.DataFrame) -> dict[str, Any]:
+        """Estimate forecast-error drift per sqrt(day) from rolling-origin cuts.
+
+        Fits var(residual | horizon h) = base + drift^2 * h across the as-of
+        offsets, giving an empirical replacement for the hand-set
+        forecast_drift_sd_per_sqrt_day constant.
+        """
+        required = {"as_of_offset_days", "predicted_vote_share", "actual_vote_share"}
+        if frame.is_empty() or not required.issubset(frame.columns):
+            return {"status": "no_rows"}
+        rows = (
+            frame.drop_nulls(list(required))
+            .with_columns(
+                ((pl.col("predicted_vote_share") - pl.col("actual_vote_share")) ** 2).alias(
+                    "_squared_residual"
+                )
+            )
+            .group_by("as_of_offset_days")
+            .agg(
+                pl.col("_squared_residual").mean().alias("variance"),
+                pl.len().alias("row_count"),
+            )
+            .sort("as_of_offset_days")
+        )
+        if rows.height < 2:
+            return {"status": "insufficient_horizons", "horizon_count": rows.height}
+        horizons = rows["as_of_offset_days"].cast(pl.Float64).to_numpy()
+        variances = rows["variance"].to_numpy()
+        design = np.column_stack([np.ones_like(horizons), horizons])
+        coefficients, *_ = np.linalg.lstsq(design, variances, rcond=None)
+        slope = float(coefficients[1])
+        drift_share = math.sqrt(max(slope, 0.0))
+        # Share-scale sd converts to logit scale by 1/(p(1-p)) ~= 4 near p=0.5.
+        drift_logit = drift_share * 4.0
+        return {
+            "status": "fitted" if slope > 0 else "no_positive_drift",
+            "drift_sd_share_per_sqrt_day": drift_share,
+            "drift_sd_logit_per_sqrt_day": drift_logit,
+            "base_variance_share": float(max(coefficients[0], 0.0)),
+            "horizons_days": [int(value) for value in horizons.tolist()],
+            "horizon_variances_share": [float(value) for value in variances.tolist()],
+            "row_counts": rows["row_count"].to_list(),
+        }
 
     @staticmethod
     def _structured_covariance_target(

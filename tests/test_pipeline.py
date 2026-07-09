@@ -2550,19 +2550,10 @@ def test_fundamentals_ridge_fits_when_training_rows_meet_threshold(tmp_path: Pat
     assert estimates["explanation"].str.contains("standardized_ridge_fit").all()
 
 
-def test_residual_covariance_requires_multiple_observations() -> None:
-    one_observation = pl.DataFrame(
-        {
-            "cycle": [2024, 2024],
-            "as_of": ["2024-11-04", "2024-11-04"],
-            "geography": ["WI", "WI"],
-            "predicted_vote_share": [0.51, 0.49],
-            "actual_vote_share": [0.495, 0.501],
-        }
-    )
-    assert BacktestRunner._residual_covariance(one_observation).is_empty()
-
-    two_observations = pl.DataFrame(
+def test_residual_covariance_requires_multiple_cycles() -> None:
+    # As-of cuts within one cycle share the same election outcome, so a single
+    # cycle is one observation regardless of how many cuts it has.
+    one_cycle = pl.DataFrame(
         {
             "cycle": [2024, 2024, 2024, 2024],
             "as_of": ["2024-10-29", "2024-10-29", "2024-11-04", "2024-11-04"],
@@ -2571,10 +2562,21 @@ def test_residual_covariance_requires_multiple_observations() -> None:
             "actual_vote_share": [0.495, 0.501, 0.495, 0.501],
         }
     )
-    covariance = BacktestRunner._residual_covariance(two_observations)
+    assert BacktestRunner._residual_covariance(one_cycle).is_empty()
+
+    two_cycles = pl.DataFrame(
+        {
+            "cycle": [2022, 2022, 2024, 2024],
+            "as_of": ["2022-11-01", "2022-11-01", "2024-11-04", "2024-11-04"],
+            "geography": ["WI", "WI", "WI", "WI"],
+            "predicted_vote_share": [0.51, 0.49, 0.50, 0.50],
+            "actual_vote_share": [0.495, 0.501, 0.495, 0.501],
+        }
+    )
+    covariance = BacktestRunner._residual_covariance(two_cycles)
     assert covariance.height == 1
     assert covariance["sample_size"].to_list() == [2]
-    assert covariance["covariance_method"].to_list() == ["structured_shrinkage_by_geography"]
+    assert covariance["covariance_method"].to_list() == ["structured_factor_cycle_level"]
 
 
 def test_score_predictions_handles_empty_and_real_rows(tmp_path: Path) -> None:

@@ -21,6 +21,10 @@ class FundamentalsModel:
         "demographic_turnout_index": 1.0 / 80.0,
         "incumbent": 0.01,
         "fundraising_usd": 1.0 / 1_000_000_000,
+        # Mean-reversion on the previous result: the effective coefficient on
+        # (previous - 0.5) is 1 + this value, so 0.0 falls back to persistence
+        # and a fitted negative value shrinks landslides toward the mean.
+        "previous_share_centered": 0.0,
     }
 
     def __init__(self, config: dict[str, object] | None = None) -> None:
@@ -169,6 +173,7 @@ class FundamentalsModel:
                 + coef["demographic_turnout_index"] * demographic * sign
                 + coef["incumbent"] * incumbent
                 + coef["fundraising_usd"] * finance
+                + coef.get("previous_share_centered", 0.0) * (base - 0.5)
             )
             shares[str(row["option_id"])] = clamp(prediction, 0.05, 0.95)
         return shares
@@ -293,6 +298,7 @@ class FundamentalsModel:
             ),
             pl.col("incumbent_value").alias("incumbent"),
             pl.col("fundraising_value").alias("fundraising_usd"),
+            (pl.col("previous_share") - 0.5).alias("previous_share_centered"),
             (pl.col("actual_vote_share") - pl.col("previous_share")).alias("target"),
         )
         output = joined.select(
@@ -304,6 +310,7 @@ class FundamentalsModel:
                 "demographic_turnout_index",
                 "incumbent",
                 "fundraising_usd",
+                "previous_share_centered",
                 "target",
             ]
         )
@@ -315,6 +322,7 @@ class FundamentalsModel:
                 "demographic_turnout_index",
                 "incumbent",
                 "fundraising_usd",
+                "previous_share_centered",
                 "target",
             ]
         )

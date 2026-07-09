@@ -27,6 +27,8 @@ def binary_draw_kernel(
     turnout_bases: np.ndarray,
     national_errors: np.ndarray,
     local_errors: np.ndarray,
+    party_signs: np.ndarray,
+    turnout_multipliers: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     race_count = first_shares.shape[0]
     draw_count = national_errors.shape[0]
@@ -42,17 +44,19 @@ def binary_draw_kernel(
     for race_index in prange(race_count):
         first_share = first_shares[race_index]
         turnout_base = turnout_bases[race_index]
+        sign = party_signs[race_index]
         for draw_id in range(draw_count):
-            share_zero = first_share + national_errors[draw_id] + local_errors[race_index, draw_id]
+            share_zero = (
+                first_share
+                + sign * national_errors[draw_id]
+                + local_errors[race_index, draw_id]
+            )
             if share_zero < 0.02:
                 share_zero = 0.02
             elif share_zero > 0.98:
                 share_zero = 0.98
             share_one = 1.0 - share_zero
-            turnout_multiplier = 1.0 + national_errors[draw_id]
-            if turnout_multiplier < 0.6:
-                turnout_multiplier = 0.6
-            turnout = int(np.rint(turnout_base * turnout_multiplier))
+            turnout = int(np.rint(turnout_base * turnout_multipliers[draw_id]))
             winner_zero = share_zero >= share_one
             offset = (race_index * draw_count + draw_id) * 2
 
@@ -90,10 +94,32 @@ def simulate_binary_draw_arrays(
     national_errors: np.ndarray,
     local_errors: np.ndarray,
     use_numba: bool,
+    party_signs: np.ndarray | None = None,
+    turnout_multipliers: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if party_signs is None:
+        party_signs = np.ones(first_shares.shape[0], dtype=np.float64)
+    if turnout_multipliers is None:
+        turnout_multipliers = np.ones(national_errors.shape[0], dtype=np.float64)
+    party_signs = np.ascontiguousarray(party_signs, dtype=np.float64)
+    turnout_multipliers = np.ascontiguousarray(turnout_multipliers, dtype=np.float64)
     if use_numba and NUMBA_AVAILABLE:
-        return binary_draw_kernel(first_shares, turnout_bases, national_errors, local_errors)
-    return python_binary_draw_kernel(first_shares, turnout_bases, national_errors, local_errors)
+        return binary_draw_kernel(
+            first_shares,
+            turnout_bases,
+            national_errors,
+            local_errors,
+            party_signs,
+            turnout_multipliers,
+        )
+    return python_binary_draw_kernel(
+        first_shares,
+        turnout_bases,
+        national_errors,
+        local_errors,
+        party_signs,
+        turnout_multipliers,
+    )
 
 
 def python_binary_draw_kernel(
@@ -101,6 +127,8 @@ def python_binary_draw_kernel(
     turnout_bases: np.ndarray,
     national_errors: np.ndarray,
     local_errors: np.ndarray,
+    party_signs: np.ndarray,
+    turnout_multipliers: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     race_count = first_shares.shape[0]
     draw_count = national_errors.shape[0]
@@ -117,13 +145,13 @@ def python_binary_draw_kernel(
         for draw_id in range(draw_count):
             share_zero = np.clip(
                 first_shares[race_index]
-                + national_errors[draw_id]
+                + party_signs[race_index] * national_errors[draw_id]
                 + local_errors[race_index, draw_id],
                 0.02,
                 0.98,
             )
             share_one = 1.0 - share_zero
-            turnout = round(turnout_bases[race_index] * max(0.6, 1.0 + national_errors[draw_id]))
+            turnout = round(turnout_bases[race_index] * turnout_multipliers[draw_id])
             winner_zero = bool(share_zero >= share_one)
             offset = (race_index * draw_count + draw_id) * 2
             draw_ids[offset : offset + 2] = draw_id
