@@ -1,0 +1,15 @@
+{
+  "aggregator_count": 6,
+  "aggregators": {
+    "Decision Desk HQ": 5.3,
+    "FiftyPlusOne": 5.6,
+    "Nate Silver": 6.2,
+    "Race to the WH": 6.1,
+    "RealClearPolitics": 5.6,
+    "VoteHub": 6.0
+  },
+  "generic_ballot_margin_d": 5.8,
+  "measured_at": "2026-07-09T11:58:40.940860+00:00",
+  "method": "median_of_public_aggregators",
+  "source": "https://en.wikipedia.org/wiki/2026_United_States_House_of_Representatives_elections?action=raw"
+}

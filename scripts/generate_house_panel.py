@@ -56,10 +56,24 @@ CYCLE_D_ENVIRONMENT: dict[int, float] = {
     2020: +3.0,  # D edge
     2022: -2.0,  # R edge
     2024: -2.5,  # R edge
-    # 2026 midterm under R presidency; generic-ballot average ~D+6 as of July 2026.
-    # Replace with a live poll-aggregate value once the polling adapter is wired in.
+    # 2026 fallback if no measured value exists; overridden below by
+    # fixtures/measured_environment.json (scripts/measure_environment.py).
     2026: +6.0,
 }
+
+
+def _apply_measured_environment() -> None:
+    """Override the 2026 environment with the measured generic-ballot margin."""
+    measured_path = ROOT / "fixtures" / "measured_environment.json"
+    if not measured_path.exists():
+        return
+    import json
+
+    payload = json.loads(measured_path.read_text(encoding="utf-8"))
+    CYCLE_D_ENVIRONMENT[2026] = float(payload["generic_ballot_margin_d"])
+
+
+_apply_measured_environment()
 
 CYCLE_ECONOMY: dict[int, float] = {
     2012: -0.1,
