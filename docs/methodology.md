@@ -11,7 +11,8 @@ seat/control or Electoral College count, and `a` is the forecast `as_of` date.
 
 The current implementation is an auditable approximation to that posterior:
 
-1. **Polling**: The Bayesian path is the production default. Forecast and backtest
+1. **Polling**: The Bayesian path is the production default polling engine in config for
+  research runs; public-production labels require reward-v2. Forecast and backtest
    commands resolve their default inference engine from `configs/model.yaml`; use
    `--inference-engine kalman` to force the legacy Gaussian state-space/Kalman polling
    model. The default Bayesian backend is compact hierarchical NumPyro/NUTS with
@@ -50,7 +51,8 @@ rows are accepted as neutral public-signal metadata for provenance and scope aud
 but they are not model-bearing observations while public signals remain untrusted. The
 FRED UNRATE adapter is model-bearing because it contributes a live national macro
 fundamentals signal; the remaining race-specific priors in that adapter are configured
-assumptions. The Bayesian path is the production default in config for operational
+assumptions. The Bayesian path is the production default polling engine in config for operational
+research
 forecasts, and the current broad live-scope rolling-origin comparison is eligible:
 Bayes/NUTS beats the legacy Kalman ensemble log score without coverage degradation.
 NUTS observations use the same empirical-Bayes pollster house-effect adjustment as the

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "promotion_manifest.schema.json",
+  "title": "Promotion manifest",
+  "type": "object",
+  "required": [
+    "attempt_id",
+    "profile",
+    "publication_mode",
+    "promoted_at",
+    "reward_card_hash",
+    "semantic_verification_hash",
+    "content_hashes",
+    "verified"
+  ],
+  "properties": {
+    "attempt_id": {"type": "string"},
+    "profile": {"type": "string"},
+    "publication_mode": {
+      "type": "string",
+      "enum": ["research", "shadow", "production", "fixture"]
+    },
+    "promoted_at": {"type": "string"},
+    "reward_card_hash": {"type": "string"},
+    "semantic_verification_hash": {"type": "string"},
+    "content_hashes": {"type": "object"},
+    "verified": {"type": "boolean"},
+    "blocking_rewards": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "reward_card_v2.schema.json",
+  "title": "Reward card v2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "generated_at",
+    "profile",
+    "publication_mode",
+    "rewards",
+    "blocks_publication",
+    "recomputed"
+  ],
+  "properties": {
+    "schema_version": {"type": "string"},
+    "run_id": {"type": "string"},
+    "generated_at": {"type": "string"},
+    "profile": {"type": "string"},
+    "publication_mode": {
+      "type": "string",
+      "enum": ["research", "shadow", "production", "fixture"]
+    },
+    "recomputed": {"type": "boolean"},
+    "blocks_publication": {"type": "boolean"},
+    "blocking_rewards": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "lineage": {"type": "object"},
+    "rewards": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "reward_id",
+          "state",
+          "scope",
+          "metric",
+          "threshold",
+          "evidence",
+          "lineage",
+          "negative_tests_passed",
+          "failure_reasons",
+          "blocks_publication"
+        ],
+        "properties": {
+          "reward_id": {"type": "string"},
+          "state": {
+            "type": "string",
+            "enum": ["pass", "fail", "insufficient_evidence", "not_applicable"]
+          },
+          "scope": {"type": "object"},
+          "metric": {"type": "object"},
+          "threshold": {"type": "object"},
+          "evidence": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "lineage": {"type": "object"},
+          "negative_tests_passed": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "failure_reasons": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "blocks_publication": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

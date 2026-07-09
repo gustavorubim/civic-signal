@@ -392,6 +392,110 @@ def verify_readiness(
     console.print(payload["output_dir"])
 
 
+@verify_app.command("rewards")
+def verify_rewards(
+    run_id: str = typer.Option(..., help="Forecast or attempt run id to recompute rewards for."),
+    profile: str = typer.Option(
+        "production",
+        help="Reward profile: fixture, research, shadow, or production.",
+    ),
+    publication_mode: str | None = typer.Option(
+        None, help="Override publication_mode label for recomputation."
+    ),
+    root: Path | None = typer.Option(None, help="Project root."),
+    sources_config: str = typer.Option("sources.yaml", help="Source registry config file."),
+    data_dir: Path | None = typer.Option(None, help="Data directory override."),
+    artifacts_dir: Path | None = typer.Option(None, help="Artifacts directory override."),
+) -> None:
+    """Recompute reward-v2 from primary artifacts for a profile (never trusts stored booleans)."""
+    from civic_signal.verification.rewards import RewardVerificationRunner
+
+    context = _context(
+        root=root,
+        sources_config=sources_config,
+        data_dir=data_dir,
+        artifacts_dir=artifacts_dir,
+    )
+    payload = RewardVerificationRunner(context).verify(
+        run_id=run_id,
+        profile=profile,
+        publication_mode=publication_mode,
+    )
+    color = "green" if payload["passed"] else "red"
+    console.print(
+        f"[{color}]Reward verification[/{color}]: profile={profile} "
+        f"passed={payload['passed']} blocking={payload['blocking_rewards']}"
+    )
+    console.print(payload["reward_card_path"])
+    if payload.get("exit_nonzero"):
+        raise typer.Exit(code=1)
+
+
+@verify_app.command("publication")
+def verify_publication(
+    run_id: str = typer.Option(..., help="Attempt or forecast run id."),
+    profile: str = typer.Option("production", help="Promotion profile name."),
+    root: Path | None = typer.Option(None, help="Project root."),
+    sources_config: str = typer.Option("sources.yaml", help="Source registry config file."),
+    data_dir: Path | None = typer.Option(None, help="Data directory override."),
+    artifacts_dir: Path | None = typer.Option(None, help="Artifacts directory override."),
+) -> None:
+    """Semantic publication verification; production requires verified promotion manifest."""
+    from civic_signal.verification.publication import PublicationVerifier
+
+    context = _context(
+        root=root,
+        sources_config=sources_config,
+        data_dir=data_dir,
+        artifacts_dir=artifacts_dir,
+    )
+    payload = PublicationVerifier(context).verify_semantic(run_id=run_id, profile=profile)
+    color = "green" if payload["passed"] else "red"
+    console.print(
+        f"[{color}]Publication verification[/{color}]: passed={payload['passed']} "
+        f"mode={payload['publication_mode']}"
+    )
+    if payload.get("failure_reasons"):
+        console.print(payload["failure_reasons"])
+    if not payload["passed"]:
+        raise typer.Exit(code=1)
+
+
+@verify_app.command("as-of")
+def verify_as_of(
+    run_id: str = typer.Option(..., help="As-of audit run id."),
+    scenario_family: str | None = typer.Option(None, help="Scenario family under audit."),
+    cycles: str | None = typer.Option(None, help="Cycle range, e.g. 2004:2024."),
+    offsets: str | None = typer.Option(None, help="Comma-separated horizon offsets."),
+    as_of: str | None = typer.Option(None, help="As-of date YYYY-MM-DD."),
+    root: Path | None = typer.Option(None, help="Project root."),
+    sources_config: str = typer.Option("sources.yaml", help="Source registry config file."),
+    data_dir: Path | None = typer.Option(None, help="Data directory override."),
+    artifacts_dir: Path | None = typer.Option(None, help="Artifacts directory override."),
+) -> None:
+    """Verify as-of integrity; missing historical archive yields insufficient evidence."""
+    from civic_signal.verification.as_of import AsOfVerificationRunner
+
+    context = _context(
+        root=root,
+        sources_config=sources_config,
+        data_dir=data_dir,
+        artifacts_dir=artifacts_dir,
+    )
+    payload = AsOfVerificationRunner(context).verify(
+        run_id=run_id,
+        scenario_family=scenario_family,
+        cycles=cycles,
+        offsets=offsets,
+        as_of=as_of,
+    )
+    color = "green" if payload["passed"] else "yellow"
+    console.print(f"[{color}]As-of verification[/{color}]: passed={payload['passed']}")
+    console.print(payload["audit_path"])
+    if payload.get("exit_nonzero"):
+        raise typer.Exit(code=1)
+
+
 @verify_app.command("historical-calibration")
 def verify_historical_calibration(
     run_id: str | None = typer.Option(None, help="Stable historical calibration audit id."),

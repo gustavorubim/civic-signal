@@ -47,9 +47,7 @@ def binary_draw_kernel(
         sign = party_signs[race_index]
         for draw_id in range(draw_count):
             share_zero = (
-                first_share
-                + sign * national_errors[draw_id]
-                + local_errors[race_index, draw_id]
+                first_share + sign * national_errors[draw_id] + local_errors[race_index, draw_id]
             )
             if share_zero < 0.02:
                 share_zero = 0.02

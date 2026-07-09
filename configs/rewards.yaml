@@ -1,0 +1,219 @@
+# Single threshold and profile registry for reward-v2.
+# Python must not hide production thresholds outside this file.
+version: "2.0.0"
+publication_mode_default: research
+
+states:
+  - pass
+  - fail
+  - insufficient_evidence
+  - not_applicable
+
+# Profiles list reward IDs that must recompute to pass for that profile.
+# fail and insufficient_evidence hard-block publication for required rewards.
+profiles:
+  fixture:
+    description: Schema and orchestration only; never public-production skill.
+    required_rewards:
+      - R0_build
+      - R2_provenance
+      - R7_sparse_honesty
+      - R10_explainability
+      - R11_plot_contract
+      - R23_joint_outcome_coherence
+    blocks_publication: false
+  research:
+    description: Local research forecasts; not public probabilities.
+    required_rewards:
+      - R0_build
+      - R1_reproducibility
+      - R2_provenance
+      - R3_sync_integrity
+      - R7_sparse_honesty
+      - R9_public_signal_discipline
+      - R10_explainability
+      - R11_plot_contract
+      - R12_performance_contract
+      - R13_posterior_quality
+      - R14_calibrated_publication
+      - R23_joint_outcome_coherence
+      - R24_atomic_publication
+      - R27_contract_parity
+    blocks_publication: false
+  shadow:
+    description: Scheduled forecasts not presented as public probabilities.
+    required_rewards:
+      - R0_build
+      - R1_reproducibility
+      - R2_provenance
+      - R3_sync_integrity
+      - R4_calibration
+      - R7_sparse_honesty
+      - R8_uncertainty_quality
+      - R10_explainability
+      - R11_plot_contract
+      - R12_performance_contract
+      - R13_posterior_quality
+      - R14_calibrated_publication
+      - R15_daily_update_quality
+      - R16_real_data_exclusivity
+      - R17_as_of_integrity
+      - R23_joint_outcome_coherence
+      - R24_atomic_publication
+      - R25_live_source_resilience
+      - R27_contract_parity
+    blocks_publication: false
+  production:
+    description: Public general-election race and control probabilities.
+    required_rewards:
+      - R0_build
+      - R1_reproducibility
+      - R2_provenance
+      - R3_sync_integrity
+      - R4_calibration
+      - R5_baseline_competition
+      - R6_component_admission
+      - R7_sparse_honesty
+      - R8_uncertainty_quality
+      - R10_explainability
+      - R11_plot_contract
+      - R12_performance_contract
+      - R13_posterior_quality
+      - R14_calibrated_publication
+      - R15_daily_update_quality
+      - R16_real_data_exclusivity
+      - R17_as_of_integrity
+      - R18_nested_evaluation
+      - R19_covariance_recovery
+      - R20_all_race_hierarchy
+      - R21_poll_observation_identity
+      - R22_feature_validity
+      - R23_joint_outcome_coherence
+      - R24_atomic_publication
+      - R25_live_source_resilience
+      - R26_benchmark_superiority
+      - R27_contract_parity
+    # R9 required only when public-signal features are admitted (handled in evaluator).
+    conditional_rewards:
+      R9_public_signal_discipline:
+        when: public_signals_admitted
+    blocks_publication: true
+
+thresholds:
+  R0_build:
+    min_line_coverage_pct: 90.0
+  R1_reproducibility:
+    require_cross_run_verified: true
+  R2_provenance:
+    min_provenance_share: 1.0
+  R3_sync_integrity:
+    max_failed_sources: 0
+    max_failed_auth: 0
+    require_original_snapshot_age: true
+  R4_calibration:
+    max_ece: 0.04
+    max_ece_bootstrap_upper: 0.06
+    max_abs_intercept: 0.05
+    slope_min: 0.8
+    slope_max: 1.2
+  R5_baseline_competition:
+    min_independent_cycles: 6
+    require_log_score_ci_below_zero: true
+  R6_component_admission:
+    max_calibration_degradation: 0.02
+    require_matched_coverage: true
+  R7_sparse_honesty:
+    public_tier_c_must_be_null: true
+  R8_uncertainty_quality:
+    nominal_levels: [0.5, 0.8, 0.9]
+    coverage_tolerance: 0.05
+  R9_public_signal_discipline:
+    require_leakage_audit: true
+    require_nested_value: true
+  R10_explainability:
+    require_driver_evidence: true
+    reject_placeholder_drivers: true
+  R11_plot_contract:
+    require_calibration_plots: true
+    require_projection_plots: true
+    require_source_ids: true
+  R12_performance_contract:
+    max_wall_clock_regression: 0.10
+    max_mcse: 0.0025
+  R13_posterior_quality:
+    max_divergences: 0
+    max_r_hat: 1.01
+    min_bulk_ess: 400
+    min_tail_ess: 400
+    min_e_bfmi: 0.3
+    min_draw_count: 100
+  R14_calibrated_publication:
+    require_outer_fold_map: true
+    require_simplex_coherence: true
+  R15_daily_update_quality:
+    max_probability_mae_vs_refit: 0.005
+    max_probability_diff_vs_refit: 0.02
+  R16_real_data_exclusivity:
+    max_synthetic_rows: 0
+    max_fixture_sources: 0
+  R17_as_of_integrity:
+    max_future_eligible_rows: 0
+  R18_nested_evaluation:
+    require_exact_pipeline: true
+    require_outer_cycle_exclusion: true
+  R19_covariance_recovery:
+    max_factor_variance_rel_error: 0.20
+    max_correlation_rmse: 0.10
+    require_psd: true
+  R20_all_race_hierarchy:
+    require_unpolled_propagation: true
+    require_label_symmetry: true
+  R21_poll_observation_identity:
+    max_double_count_rows: 0
+  R22_feature_validity:
+    max_snapshots_per_feature_key: 1
+    require_incumbent_relative_sign: true
+  R23_joint_outcome_coherence:
+    max_probability: 1.0
+    min_probability: 0.0
+    require_exact_reconciliation: true
+  R24_atomic_publication:
+    require_immutable_attempt: true
+    require_verified_promotion_manifest: true
+  R25_live_source_resilience:
+    require_canary_history: true
+  R26_benchmark_superiority:
+    min_independent_cycles: 6
+    max_comparator_log_score_gap: 0.005
+  R27_contract_parity:
+    max_stale_claims: 0
+
+reward_ids:
+  - R0_build
+  - R1_reproducibility
+  - R2_provenance
+  - R3_sync_integrity
+  - R4_calibration
+  - R5_baseline_competition
+  - R6_component_admission
+  - R7_sparse_honesty
+  - R8_uncertainty_quality
+  - R9_public_signal_discipline
+  - R10_explainability
+  - R11_plot_contract
+  - R12_performance_contract
+  - R13_posterior_quality
+  - R14_calibrated_publication
+  - R15_daily_update_quality
+  - R16_real_data_exclusivity
+  - R17_as_of_integrity
+  - R18_nested_evaluation
+  - R19_covariance_recovery
+  - R20_all_race_hierarchy
+  - R21_poll_observation_identity
+  - R22_feature_validity
+  - R23_joint_outcome_coherence
+  - R24_atomic_publication
+  - R25_live_source_resilience
+  - R26_benchmark_superiority
+  - R27_contract_parity

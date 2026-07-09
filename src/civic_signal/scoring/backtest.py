@@ -772,9 +772,7 @@ class BacktestRunner:
         # and synthetic panels contain none by construction. Floor the national
         # factor at a historically grounded sd (~2pp national House poll misses
         # in 2016/2020) so seat distributions never claim it away.
-        national_floor_sd = float(
-            correlation_config.get("national_error_floor_sd", 0.02)
-        )
+        national_floor_sd = float(correlation_config.get("national_error_floor_sd", 0.02))
         national_variance = max(float(np.var(national, ddof=1)), national_floor_sd**2)
         region_deviations: list[float] = []
         state_deviations: list[float] = []
@@ -782,15 +780,13 @@ class BacktestRunner:
         for region_index, region in enumerate(regions):
             columns = region_columns[region]
             region_means[:, region_index] = data[:, columns].mean(axis=1)
-            region_deviations.extend(
-                (region_means[:, region_index] - national).tolist()
-            )
+            region_deviations.extend((region_means[:, region_index] - national).tolist())
             for column in columns:
-                state_deviations.extend(
-                    (data[:, column] - region_means[:, region_index]).tolist()
-                )
+                state_deviations.extend((data[:, column] - region_means[:, region_index]).tolist())
         region_variance = max(
-            float(np.var(np.array(region_deviations), ddof=1)) if len(region_deviations) > 1 else 0.0,
+            float(np.var(np.array(region_deviations), ddof=1))
+            if len(region_deviations) > 1
+            else 0.0,
             0.0,
         )
         state_variance = max(

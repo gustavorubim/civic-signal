@@ -49,6 +49,8 @@ from civic_signal.scoring import (
     RewardEvaluator,
     score_predictions,
 )
+from civic_signal.scoring.reward_registry import publication_mode_default
+from civic_signal.scoring.reward_v2 import RewardV2Evaluator
 from civic_signal.storage.io import read_json, write_json, write_parquet, write_text
 
 _FINGERPRINT_EXCLUDED_FIELDS = frozenset(
@@ -116,9 +118,7 @@ class ForecastPipeline:
         ) and not backtest_artifacts.recalibration_map.is_empty():
             recalibration_map = backtest_artifacts.recalibration_map
         recalibration_map = self._publication_recalibration_map(model_config, recalibration_map)
-        horizon_calibration = dict(
-            backtest_artifacts.payload.get("horizon_calibration") or {}
-        )
+        horizon_calibration = dict(backtest_artifacts.payload.get("horizon_calibration") or {})
         if horizon_calibration.get("status") == "fitted":
             model_config["_learned_horizon_drift_sd_per_sqrt_day"] = float(
                 horizon_calibration["drift_sd_logit_per_sqrt_day"]
@@ -343,6 +343,49 @@ class ForecastPipeline:
             polling_diagnostics if inference_engine == "bayes" else None,
         )
         write_json(reward_card, out_dir / "reward_card.json")
+        publication_mode = self._publication_mode()
+        run_manifest = {
+            "run_id": run_id,
+            "as_of": as_of,
+            "scenario": scenario,
+            "publication_mode": publication_mode,
+            "forecast_status": publication_mode,
+            "evidence_scope": "fixture_or_research"
+            if publication_mode in {"research", "fixture"}
+            else publication_mode,
+            "promotion_profile_id": None,
+            "inference_engine": inference_engine,
+            "bayesian_backend": bayesian_backend,
+            "generated_at": datetime.now(UTC).isoformat(),
+        }
+        write_json(run_manifest, out_dir / "run_manifest.json")
+        # Persist a research-safe backtest summary for reward recomputation.
+        write_json(backtest_payload, out_dir / "backtest_summary.json")
+        reward_card_v2 = RewardV2Evaluator(model_config=model_config).evaluate_run_dir(
+            out_dir,
+            run_id=run_id,
+            profile="research",
+            publication_mode=publication_mode,
+        )
+        write_json(reward_card_v2, out_dir / "reward_card_v2.json")
+        write_json(
+            {
+                "run_id": run_id,
+                "profile": "research",
+                "publication_mode": publication_mode,
+                "allowed": publication_mode != "production",
+                "blocks_publication": publication_mode == "production"
+                and bool(reward_card_v2.get("blocking_rewards")),
+                "blocking_rewards": reward_card_v2.get("blocking_rewards", []),
+                "reason": (
+                    "Default publication_mode is research until production profile passes"
+                    if publication_mode != "production"
+                    else "Production requires verified promotion"
+                ),
+                "generated_at": datetime.now(UTC).isoformat(),
+            },
+            out_dir / "publication_decision.json",
+        )
         diagnostics = DiagnosticsReport().render(
             run_id,
             race_catalog,
@@ -1385,6 +1428,15 @@ class ForecastPipeline:
             "detail": {"missing_columns": missing_columns, "row_count": frame.height},
         }
 
+    def _publication_mode(self) -> str:
+        rewards_path = self.context.config_dir / "rewards.yaml"
+        if rewards_path.exists():
+            try:
+                return publication_mode_default(self.context.read_yaml("rewards.yaml"))
+            except (KeyError, ValueError, TypeError):
+                return "research"
+        return "research"
+
     @staticmethod
     def _verify_reward_card(out_dir: Path) -> dict[str, Any]:
         path = out_dir / "reward_card.json"
@@ -1406,6 +1458,19 @@ class ForecastPipeline:
             )
             if key in failed
         ]
+        # Production label without verified promotion is a hard failure.
+        decision = {}
+        decision_path = out_dir / "publication_decision.json"
+        promotion_path = out_dir / "promotion_manifest.json"
+        if decision_path.exists():
+            decision = read_json(decision_path)
+        mode = str(decision.get("publication_mode") or "research")
+        if mode == "production":
+            promotion_ok = promotion_path.exists() and bool(
+                read_json(promotion_path).get("verified")
+            )
+            if not promotion_ok:
+                hard_gate_failures.append("R24_atomic_publication")
         return {
             "name": "reward_card",
             "passed": bool(rewards) and not hard_gate_failures,
@@ -1413,6 +1478,7 @@ class ForecastPipeline:
                 "failed": failed,
                 "hard_gate_failures": hard_gate_failures,
                 "reward_count": len(rewards),
+                "publication_mode": mode,
             },
         }
 

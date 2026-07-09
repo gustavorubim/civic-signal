@@ -101,7 +101,19 @@ Forecasts must distinguish:
 
 ## Verifiable Rewards
 
-Use vector rewards so the system cannot hide weak behavior behind one aggregate score:
+Use vector rewards so the system cannot hide weak behavior behind one aggregate score.
+Reward-v2 (`configs/rewards.yaml`, `reward_card_v2.json`) is the promotion contract:
+each reward is `pass`, `fail`, `insufficient_evidence`, or `not_applicable`; thresholds
+live only in config; production verification **recomputes** rewards from primary
+artifacts; `fail` and `insufficient_evidence` hard-block the `production` profile.
+Default `publication_mode` is `research` until the production profile can pass.
+`verify rewards --profile <name>` is the recompute entry point. Rewards `R0`–`R15` are
+strengthened; `R16`–`R27` cover real-data exclusivity, as-of integrity, nested evaluation,
+covariance recovery, hierarchy, poll identity, feature validity, joint coherence, atomic
+publication, live-source resilience, benchmark superiority, and contract parity.
+
+Legacy `reward_card.json` continues to emit a simplified `passed` field for existing
+dashboards. Strengthened pass rules (summary):
 
 - `R0_build`: `uv sync`, `ruff check`, `ruff format --check`, and
   `pytest --cov=src/civic_signal --cov-fail-under=90` pass.
@@ -144,6 +156,18 @@ Use vector rewards so the system cannot hide weak behavior behind one aggregate 
   recalibration map or demonstrate acceptable rolling-origin calibration without a map.
 - `R15_daily_update_quality`: daily Bayesian updates pass strategy-specific quality
   gates and do not require a full refit.
+- `R16_real_data_exclusivity`: production inputs contain zero synthetic/fixture rows.
+- `R17_as_of_integrity`: selected records satisfy `available_at ≤ as_of`.
+- `R18_nested_evaluation`: outer-cycle exact-pipeline evaluation with fold lineage.
+- `R19_covariance_recovery`: one signed residual per race; PSD covariance; recovery tolerances.
+- `R20_all_race_hierarchy`: control-bearing races in the joint model; unpolled propagation.
+- `R21_poll_observation_identity`: canonical survey/question identity without double count.
+- `R22_feature_validity`: one eligible snapshot per feature key; vintage-correct inputs.
+- `R23_joint_outcome_coherence`: probabilities and draws reconcile to control outcomes.
+- `R24_atomic_publication`: only a verified immutable attempt can replace the promoted pointer.
+- `R25_live_source_resilience`: adapter canaries for empty/stale/malformed live feeds.
+- `R26_benchmark_superiority`: preregistered “best evidenced” criteria for a named scope.
+- `R27_contract_parity`: README/SPEC/config/schema/CLI claims agree.
 
 Primary baselines:
 
@@ -166,6 +190,7 @@ civic-signal/
     model.yaml
     backtests.yaml
     tiers.yaml
+    rewards.yaml
   fixtures/
     *.csv
   schemas/
@@ -258,9 +283,10 @@ Canonical latent targets:
 
 Component models:
 
-- Polling model: the Bayesian path is the production default. The legacy deterministic
-  Kalman/state-space polling estimates remain available through
-  `--inference-engine kalman`; they are initialized from previous vote share when
+- Polling model: the Bayesian path is the production default polling engine in config for
+  research/operational engineering runs; public-production publication remains gated by
+  reward-v2. The legacy deterministic Kalman/state-space polling estimates remain available
+  through `--inference-engine kalman`; they are initialized from previous vote share when
   available, with sample-size observation variance, methodology/population/sponsor
   effective-sample adjustments, iterative empirical-Bayes pollster house-effect
   shrinkage, and posterior uncertainty proxy. Forecast and backtest commands resolve
@@ -322,10 +348,11 @@ Component models:
   sources contribute model-bearing target-year rows for every expected verification
   office. Neutral race-presence or other metadata-only rows must be reported separately
   as `metadata_only` and must not unlock a production-default switch.
-- Production promotion: the Bayesian path is the production default in config for
-  operational forecasts, and the plan is accepted as production-promoted only when the
-  broader rolling-origin readiness comparison shows Bayes/NUTS beating the legacy
-  Kalman scorecard without interval-coverage degradation.
+- Production promotion: the Bayesian path is the production default polling engine in
+  config for operational research forecasts, but artifact `publication_mode` defaults to
+  `research`. A run may be labeled public production only after reward-v2 production
+  profile recomputation passes and a verified `promotion_manifest.json` is written. Fixture
+  Phase 8 success proves orchestration only.
 
 Statistical upgrade path:
 

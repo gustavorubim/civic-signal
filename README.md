@@ -36,6 +36,8 @@ Core project documents:
 
 - [`SPEC.md`](SPEC.md): durable implementation contract.
 - [`AGENTS.md`](AGENTS.md): required agent operating rules.
+- [`docs/REAL_WORLD_FORECASTER_ENHANCEMENT_PLAN.md`](docs/REAL_WORLD_FORECASTER_ENHANCEMENT_PLAN.md):
+  dependency-ordered real-data methodology roadmap and reward-v2 verification contract.
 - [`docs/technical_appendix.md`](docs/technical_appendix.md): model details.
 - [`docs/performance.md`](docs/performance.md): Numba and performance contract.
 - [`docs/api_requirements.md`](docs/api_requirements.md): live-ingestion API notes.
@@ -92,11 +94,14 @@ uv run civic-signal forecast run \
 ```
 
 The default polling engine is resolved from `configs/model.yaml`.
-The Bayesian path is the production default in config, so operational forecasts emit
-Bayesian posterior artifacts. The broad live-scope readiness gate is eligible with the
-current Bayes/NUTS run: ensemble log loss `0.124907` versus legacy Kalman `0.125154`,
-with 90% interval coverage `0.9662` versus legacy `0.9610`. To force the legacy
-Kalman/state-space path, run:
+The Bayesian path is the production default **polling engine** in config for research
+and operational engineering runs, so those forecasts emit Bayesian posterior artifacts.
+**Publication mode defaults to `research`** (`configs/rewards.yaml`); fixture-backed
+Phase 8 orchestration success is **not** evidence of public-production forecasting skill.
+Public-production publication is hard-blocked until every required reward-v2 gate in the
+`production` profile recomputes to `pass` from primary artifacts (see
+`verify rewards --profile production`). Comparative live-scope scorecards remain research
+diagnostics only. To force the legacy Kalman/state-space path, run:
 
 ```bash
 uv run civic-signal forecast run \
@@ -131,6 +136,27 @@ uv run civic-signal forecast run \
 If the runtime environment is missing NumPyro/JAX or NUTS exceeds the configured wall-clock timeout, the run
 falls back through the configured policy and records that status in
 `posterior_diagnostics.json`.
+
+### Reward-v2 verification
+
+Recompute every reward from primary artifacts (never trust a previously written boolean):
+
+```bash
+uv run civic-signal verify rewards --profile production --run-id <run-id>
+```
+
+On a fixture-only or research run this command exits nonzero and lists real-data,
+nested-backtest, and publication rewards as `fail` or `insufficient_evidence`.
+Semantic publication checks refuse a `production` label without a verified
+`promotion_manifest.json`:
+
+```bash
+uv run civic-signal verify publication --run-id <attempt-id> --profile production
+```
+
+Thresholds and profile membership live only in `configs/rewards.yaml`. Forecast runs
+write `reward_card.json` (legacy), `reward_card_v2.json`, `run_manifest.json` (with
+`publication_mode`), and `publication_decision.json`.
 
 Open the main report:
 

@@ -42,10 +42,11 @@ seat-count or control probabilities.
 ## Readiness Interpretation
 
 The Phase 8 fixture pass means the orchestration and artifact contract are operational
-for the current 2026 midterm panel. The Kalman path remains available through
-`--inference-engine kalman`. Bayes is the configured operational default, and broad
-production promotion is eligible after the live-scope rolling-origin Bayes/NUTS score
-beat the legacy Kalman score without coverage degradation.
+for the current 2026 midterm panel. It is **not** public-production forecasting skill.
+The Kalman path remains available through `--inference-engine kalman`. Bayes is the
+configured operational research default polling engine. Public-production publication
+defaults to blocked (`publication_mode: research`) until `verify rewards --profile
+production` recomputes every required reward-v2 gate to `pass` from primary artifacts.
 
 The default-switch decision is now machine-audited by:
 
@@ -64,17 +65,18 @@ pass, live 2026 source scope is claimed, and rolling-origin Bayes evidence beats
 legacy Kalman scorecard without degrading interval coverage. Current publication
 calibration is intentionally slope-bounded at `2.0` to avoid a default-switch decision
 being driven by an overfit calibration transform rather than forecasting signal.
-The current broad live-scope evidence is sufficient for the implemented gate:
-`live-scope-prod-bayes-nuts-houseadj-norm` scored `0.124907` ensemble log loss versus
-legacy Kalman `0.125154`, with 90% interval coverage `0.9662` versus legacy `0.9610`.
+Comparative live-scope scorecards (for example Bayes/NUTS versus legacy Kalman log loss
+and interval coverage) are **research diagnostics**, not a public-production skill claim.
 The live-source scope claim is evidence-based: Phase 8 inspects the curated source
 manifest and curated tables and only reports `claimed` when successful non-file sources
 contribute model-bearing 2026 rows for every office listed in the scenario's
 `live_source_required_offices`. Neutral Wikipedia race-presence rows are reported as
 `metadata_only`: they prove keyless HTTP text ingestion and source provenance, but they
-are not enough to make Bayes the production default. The President tracker is
-deliberately excluded from that list because it is a synthetic non-control artifact
-exercise for a midterm year.
+are not enough to make Bayes the production default public publisher. The President
+tracker is deliberately excluded from that list because it is a synthetic non-control
+artifact exercise for a midterm year. Reward-v2 production promotion additionally requires
+real-data exclusivity (R16), nested exact-pipeline evaluation (R18), and the remaining
+R16–R27 evidence paths.
 
 ## Manual Review Checklist
 

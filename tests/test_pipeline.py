@@ -649,6 +649,10 @@ def test_forecast_run_writes_required_artifacts_and_rewards(tmp_path: Path) -> N
         "source_manifest.parquet",
         "diagnostics.html",
         "reward_card.json",
+        "reward_card_v2.json",
+        "run_manifest.json",
+        "backtest_summary.json",
+        "publication_decision.json",
         "methodology_snapshot.md",
         "model_card.md",
         "silver_benchmark.html",
@@ -713,6 +717,12 @@ def test_forecast_run_writes_required_artifacts_and_rewards(tmp_path: Path) -> N
     assert isinstance(rewards["R8_uncertainty_quality"]["passed"], bool)
     assert rewards["R12_performance_contract"]["passed"] is True
     assert "R14_calibrated_publication" in rewards
+    reward_card_v2 = json.loads((out_dir / "reward_card_v2.json").read_text(encoding="utf-8"))
+    assert reward_card_v2["recomputed"] is True
+    assert reward_card_v2["publication_mode"] == "research"
+    assert "R16_real_data_exclusivity" in reward_card_v2["rewards"]
+    run_manifest = json.loads((out_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    assert run_manifest["publication_mode"] == "research"
     performance = json.loads((out_dir / "performance.json").read_text(encoding="utf-8"))
     assert performance["engine"] in {"numba", "python"}
     assert performance["simulation_count"] == 1000
