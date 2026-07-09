@@ -149,6 +149,10 @@ uncertainty:
   turnout_sigma: 0.05
 correlation:
   national_sigma: 0.015
+  # Floor on the learned national-factor sd (share scale): correlated national
+  # polling misses of ~2pp are historically routine and cannot be estimated
+  # away from a handful of cycles (or from synthetic panels).
+  national_error_floor_sd: 0.02
   region_sigma: 0.010
   office_sigma: 0.008
   residual_covariance_shrinkage: 0.60

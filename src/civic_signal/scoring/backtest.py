@@ -735,14 +735,22 @@ class BacktestRunner:
         # (national + region + state idiosyncratic) with pooled variances.
         residuals = (
             frame.with_columns(
-                (pl.col("predicted_vote_share") - pl.col("actual_vote_share")).alias("residual")
+                (pl.col("predicted_vote_share") - pl.col("actual_vote_share")).alias("residual"),
+                # Aggregate district geographies (e.g. "AK-01") to their state so
+                # the covariance groups match SimulationEngine's state-level
+                # covariance lookup keys.
+                pl.col("geography")
+                .cast(pl.Utf8)
+                .str.split("-")
+                .list.first()
+                .alias("_covariance_group"),
             )
-            .group_by(["cycle", "geography"])
+            .group_by(["cycle", "_covariance_group"])
             .agg(pl.col("residual").mean().alias("residual"))
         )
         pivot = residuals.pivot(
             index=["cycle"],
-            on="geography",
+            on="_covariance_group",
             values="residual",
             aggregate_function="mean",
         )
@@ -760,7 +768,14 @@ class BacktestRunner:
             for region in regions
         }
         national = data.mean(axis=1)
-        national_variance = max(float(np.var(national, ddof=1)), 0.0)
+        # A handful of cycles cannot rule out correlated national polling error,
+        # and synthetic panels contain none by construction. Floor the national
+        # factor at a historically grounded sd (~2pp national House poll misses
+        # in 2016/2020) so seat distributions never claim it away.
+        national_floor_sd = float(
+            correlation_config.get("national_error_floor_sd", 0.02)
+        )
+        national_variance = max(float(np.var(national, ddof=1)), national_floor_sd**2)
         region_deviations: list[float] = []
         state_deviations: list[float] = []
         region_means = np.zeros((cycle_count, len(regions)), dtype=np.float64)

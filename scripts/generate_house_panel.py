@@ -291,7 +291,9 @@ def _actual_d_share(cycle: int, state: str, district: int) -> float:
     pvi = _district_pvi(state, district, era)
     incumbent_party = _incumbent_party(state, district, cycle)
     incumbent_pp = 4.0 if incumbent_party == "DEM" else -4.0
-    environment_pp = CYCLE_D_ENVIRONMENT[cycle]
+    # The national environment does not land uniformly: districts see the swing
+    # with ~±2pp of local variation (elasticity, candidate exposure, salience).
+    environment_pp = CYCLE_D_ENVIRONMENT[cycle] + (rng.random() - 0.5) * 4.0
     candidate_quality_pp = (rng.random() - 0.5) * 4.0
     expected_d_share_pp = 50.0 + pvi + environment_pp + candidate_quality_pp + incumbent_pp
     actual_d_pp = expected_d_share_pp + (rng.random() - 0.5) * 5.0
