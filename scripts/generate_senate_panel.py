@@ -270,6 +270,10 @@ STATE_NAMES: dict[str, str] = {
 # popular-vote senate national share trends: 2014/2016 R-leaning; 2018 D wave;
 # 2020 split; 2022 D held; 2024 R wave.
 CYCLE_D_ENVIRONMENT: dict[int, float] = {
+    # 2008-2012 exist only to seed previous-cycle results for the same Senate class.
+    2008: +6.0,
+    2010: -7.0,
+    2012: +1.5,
     2014: -3.0,
     2016: -1.0,
     2018: +5.0,
@@ -416,6 +420,19 @@ def _incumbency_for_cycle(cycle: int, state: str) -> str:
     return ("REP" if base == "DEM" else "DEM") if rng.random() < flip_probability else base
 
 
+def _actual_d_share(cycle: int, state: str) -> float:
+    """Deterministic simulated D vote share for a state-cycle."""
+    rng = _seeded_random(f"sen-outcome-{state}-{cycle}")
+    incumbent_party = _incumbency_for_cycle(cycle, state)
+    incumbent_pp = 3.5 if incumbent_party == "DEM" else -3.5
+    candidate_quality_pp = (rng.random() - 0.5) * 5.0  # ±2.5pp
+    expected_d_share_pp = (
+        50.0 + STATE_LEAN[state] + CYCLE_D_ENVIRONMENT[cycle] + candidate_quality_pp + incumbent_pp
+    )
+    actual_d_pp = expected_d_share_pp + (rng.random() - 0.5) * 4.0
+    return max(0.30, min(0.72, actual_d_pp / 100.0))
+
+
 def _generate_row(cycle: int, state: str) -> dict[str, object]:
     rng = _seeded_random(f"sen-{state}-{cycle}")
     incumbent_party = _incumbency_for_cycle(cycle, state)
@@ -429,8 +446,7 @@ def _generate_row(cycle: int, state: str) -> dict[str, object]:
     expected_d_share_pp = (
         50.0 + state_lean_pp + environment_pp + candidate_quality_pp + incumbent_pp
     )
-    actual_d_pp = expected_d_share_pp + (rng.random() - 0.5) * 4.0
-    actual_d = max(0.30, min(0.72, actual_d_pp / 100.0))
+    actual_d = _actual_d_share(cycle, state)
     actual_r = round(1.0 - actual_d, 4)
     actual_d = round(actual_d, 4)
 
@@ -439,7 +455,9 @@ def _generate_row(cycle: int, state: str) -> dict[str, object]:
     poll_r = round(1.0 - poll_d, 4)
     poll_d = round(poll_d, 4)
 
-    previous_d = max(0.30, min(0.72, actual_d - (rng.random() - 0.5) * 6.0 / 100.0))
+    # Previous share is the same class seat's result six years earlier — never a
+    # peek at the current cycle's outcome (forecast cycles must not leak).
+    previous_d = _actual_d_share(cycle - 6, state)
     previous_r = round(1.0 - previous_d, 4)
     previous_d = round(previous_d, 4)
 

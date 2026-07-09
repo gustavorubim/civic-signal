@@ -748,13 +748,11 @@ class BayesianPollingModel(KalmanPollingModel):
         return (
             frame.join(option_counts, on="race_id", how="left")
             .with_columns(
-                pl.col("latent_logit").max().over(["draw_id", "race_id"]).alias("_max_logit")
+                pl.col("latent_share").sum().over(["draw_id", "race_id"]).alias("_sum_share")
             )
-            .with_columns((pl.col("latent_logit") - pl.col("_max_logit")).exp().alias("_exp"))
-            .with_columns(pl.col("_exp").sum().over(["draw_id", "race_id"]).alias("_sum_exp"))
             .with_columns(
                 pl.when(pl.col("_option_count").fill_null(1) > 1)
-                .then((pl.col("_exp") / pl.col("_sum_exp")).clip(1e-6, 1.0 - 1e-6))
+                .then((pl.col("latent_share") / pl.col("_sum_share")).clip(1e-6, 1.0 - 1e-6))
                 .otherwise(pl.col("latent_share"))
                 .alias("latent_share")
             )
@@ -769,7 +767,7 @@ class BayesianPollingModel(KalmanPollingModel):
                     - pl.col("latent_logit").mean().over(["race_id", "option_id"])
                 ).alias("systematic_error")
             )
-            .drop(["_option_count", "_max_logit", "_exp", "_sum_exp"])
+            .drop(["_option_count", "_sum_share"])
             .select(list(cls.POSTERIOR_SCHEMA))
             .sort(["race_id", "option_id", "draw_id"])
         )

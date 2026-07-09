@@ -106,6 +106,10 @@ class ForecastPipeline:
         if bayesian_backend:
             model_config["_bayesian_backend"] = bayesian_backend.lower().strip()
         residual_covariance = self._load_residual_covariance(scenario_obj)
+        if (
+            residual_covariance is None or residual_covariance.is_empty()
+        ) and not backtest_artifacts.residual_covariance.is_empty():
+            residual_covariance = backtest_artifacts.residual_covariance
         recalibration_map = self._load_recalibration_map(scenario_obj)
         if (
             recalibration_map is None or recalibration_map.is_empty()
@@ -1755,6 +1759,13 @@ class ForecastPipeline:
         )
         if active_weight > 0:
             return model_config
+        expected_trusted = [
+            component
+            for component, is_trusted in trusted.items()
+            if is_trusted and weights.get(component, 0.0) > 0.0
+        ]
+        if not expected_trusted:
+            return model_config
         fallback = next(
             (
                 component
@@ -1787,6 +1798,7 @@ class ForecastPipeline:
             "status": "activated",
             "reason": "learned_trusted_components_unavailable_for_current_forecast",
             "available_components": sorted(available),
+            "expected_trusted_components": sorted(expected_trusted),
             "fallback_component": fallback,
             "previous_trusted_components": trusted,
             "previous_component_weights": weights,

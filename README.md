@@ -57,14 +57,24 @@ chflags -R nohidden .venv
 
 The `chflags` command is included because this macOS environment has repeatedly hidden
 `.venv` metadata after package syncs, which can break editable imports.
+If `uv run civic-signal --help` raises `ModuleNotFoundError` after a plain `uv sync`
+because the local interpreter did not process uv's editable path file, run CLI commands
+with `PYTHONPATH=src` prefixed, for example:
+
+```bash
+PYTHONPATH=src uv run civic-signal forecast run --help
+```
 
 Validate the repo:
 
 ```bash
 uv run ruff check
 uv run ruff format --check
-PYTHONPATH=src uv run pytest --cov=src/civic_signal --cov-fail-under=90
+uv run pytest --cov=src/civic_signal --cov-fail-under=90
 ```
+
+The pytest configuration declares `pythonpath = ["src"]`, so the coverage command can
+be run without a shell-level `PYTHONPATH` override.
 
 ## Core Workflows
 
@@ -599,6 +609,15 @@ seats are forecast through fundamentals only.
 - `majority_probability` — `P(seat_count >= control_threshold)`.
 - `seats_to_majority_mean` — seats short of majority on average.
 - `tipping_point_races`, `pivotal_rates` — most pivotal contests for control.
+
+Forecast runs prefer promoted scenario residual covariance from
+`artifacts/backtests/latest/`. If no promoted covariance exists yet, the run uses the
+same rolling-origin covariance it just evaluated in memory so seat/control simulations
+do not fall back to only the small configured national/region/office shock terms.
+If rolling-origin component admission rejects every available component for a scenario,
+the run does not resurrect a rejected component to publish trusted probabilities; those
+races remain tracked without trusted control probabilities until a component passes the
+admission gate or better sources are added.
 
 `cycle_eval.html` and `narrative.md` lead with chamber name + threshold, then per-cycle
 DEM/REP majority probabilities, mean seat counts, race accuracy, and missed

@@ -213,7 +213,14 @@ writes `rolling_predictions.parquet`, `component_admission.json`, `ensemble_lear
 harness evaluates multiple pre-election as-of cuts when data exists
 (`T-90/T-60/T-30/T-7/T-1` by default). It must not certify `R5`, `R6`, or `R8` until the
 historical race store reaches the configured sample threshold. Latest trusted backtest
-artifacts under `artifacts/backtests/latest/` are consumed by later forecast runs. The
+artifacts under `artifacts/backtests/latest/` are consumed by later forecast runs. When
+no promoted residual covariance exists for a scenario, `forecast run` uses the same-run
+rolling-origin covariance it already evaluated as a provisional simulation input rather
+than reverting to only configured national/region/office shock terms. The
+component-admission runtime fallback is only for trusted components that are expected
+but unavailable in the current forecast slice; it must not override learned admission
+when rolling-origin evidence rejects every available component. In that case races stay
+tracked without trusted probabilities until better evidence or sources are added. The
 same harness supports `backtest run --inference-engine bayes` plus
 `--bayesian-backend analytic|nuts` so the Bayesian bridge and production NUTS backend
 can both be scored against the legacy Kalman path without changing global model

@@ -37,6 +37,7 @@ ELECTION_DATE: dict[int, str] = {
 }
 
 REDISTRICTING_ERA: dict[int, str] = {
+    2012: "2012_2020",
     2014: "2012_2020",
     2016: "2012_2020",
     2018: "2012_2020",
@@ -48,6 +49,7 @@ REDISTRICTING_ERA: dict[int, str] = {
 
 # Approximate cycle-level D environment (House popular vote bias).
 CYCLE_D_ENVIRONMENT: dict[int, float] = {
+    2012: +1.0,  # D House popular vote edge (D+1.2), R holds chamber on map skew
     2014: -5.0,  # R wave (House popular vote R+5.7)
     2016: -1.0,  # near tie
     2018: +8.5,  # D wave
@@ -60,6 +62,7 @@ CYCLE_D_ENVIRONMENT: dict[int, float] = {
 }
 
 CYCLE_ECONOMY: dict[int, float] = {
+    2012: -0.1,
     2014: -0.2,
     2016: -0.1,
     2018: +0.1,
@@ -238,6 +241,20 @@ def _seeded_random(seed: str) -> random.Random:
     return rng
 
 
+# Structural R skew of the seat-vote curve per redistricting era: Democratic votes
+# concentrate in lopsided urban districts, so the median district leans R of the
+# national vote. The post-2020 maps are less skewed than the 2012-2020 maps.
+ERA_R_SKEW: dict[str, float] = {
+    "2012_2020": 4.0,
+    "2022_plus": 2.0,
+}
+
+# Stretch factor on district lean dispersion. Safe-seat sorting means only a
+# small fraction of districts sit near the tipping margin (~3-4 seats flip per
+# point of national swing, not 6+).
+PVI_POLARIZATION = 1.8
+
+
 def _district_pvi(state: str, district: int, era: str) -> float:
     """Generate a synthetic Cook PVI for a district. Wider than state lean.
 
@@ -252,6 +269,7 @@ def _district_pvi(state: str, district: int, era: str) -> float:
     # Wave-style sorting: pull extremes further apart to mimic safe-seat dominance.
     if abs(pvi) > 6:
         pvi = pvi * 1.15
+    pvi = pvi * PVI_POLARIZATION - ERA_R_SKEW[era]
     return round(pvi, 2)
 
 
@@ -266,6 +284,20 @@ def _incumbent_party(state: str, district: int, cycle: int) -> str:
     return base_party
 
 
+def _actual_d_share(cycle: int, state: str, district: int) -> float:
+    """Deterministic simulated D vote share for a district-cycle."""
+    rng = _seeded_random(f"hou-outcome-{state}-{district}-{cycle}")
+    era = REDISTRICTING_ERA[cycle]
+    pvi = _district_pvi(state, district, era)
+    incumbent_party = _incumbent_party(state, district, cycle)
+    incumbent_pp = 4.0 if incumbent_party == "DEM" else -4.0
+    environment_pp = CYCLE_D_ENVIRONMENT[cycle]
+    candidate_quality_pp = (rng.random() - 0.5) * 4.0
+    expected_d_share_pp = 50.0 + pvi + environment_pp + candidate_quality_pp + incumbent_pp
+    actual_d_pp = expected_d_share_pp + (rng.random() - 0.5) * 5.0
+    return max(0.10, min(0.92, actual_d_pp / 100.0))
+
+
 def _generate_row(cycle: int, state: str, district: int) -> dict[str, object]:
     rng = _seeded_random(f"hou-{state}-{district}-{cycle}")
     era = REDISTRICTING_ERA[cycle]
@@ -277,8 +309,7 @@ def _generate_row(cycle: int, state: str, district: int) -> dict[str, object]:
     environment_pp = CYCLE_D_ENVIRONMENT[cycle]
     candidate_quality_pp = (rng.random() - 0.5) * 4.0
     expected_d_share_pp = 50.0 + pvi + environment_pp + candidate_quality_pp + incumbent_pp
-    actual_d_pp = expected_d_share_pp + (rng.random() - 0.5) * 5.0
-    actual_d = max(0.10, min(0.92, actual_d_pp / 100.0))
+    actual_d = _actual_d_share(cycle, state, district)
     actual_r = round(1.0 - actual_d, 4)
     actual_d = round(actual_d, 4)
 
@@ -288,7 +319,9 @@ def _generate_row(cycle: int, state: str, district: int) -> dict[str, object]:
     poll_r = round(1.0 - poll_d, 4)
     poll_d = round(poll_d, 4)
 
-    previous_d = max(0.10, min(0.92, actual_d - (rng.random() - 0.5) * 6.0 / 100.0))
+    # Previous share is the prior cycle's simulated actual result — never a
+    # peek at the current cycle's outcome (forecast cycles must not leak).
+    previous_d = _actual_d_share(cycle - 2, state, district)
     previous_r = round(1.0 - previous_d, 4)
     previous_d = round(previous_d, 4)
 

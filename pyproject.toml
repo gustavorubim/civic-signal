@@ -60,6 +60,7 @@ indent-style = "space"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["src"]
 
 [tool.coverage.run]
 source = ["src/civic_signal"]
