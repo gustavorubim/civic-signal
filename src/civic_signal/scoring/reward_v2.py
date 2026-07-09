@@ -87,6 +87,21 @@ def _finite_number(value: Any) -> float | None:
     return number
 
 
+def _first_key(mapping: dict[str, Any] | None, *keys: str) -> Any:
+    """Return the first present non-None value for keys (0.0 is valid, not missing)."""
+    if not mapping:
+        return None
+    for key in keys:
+        if key in mapping and mapping[key] is not None:
+            return mapping[key]
+    return None
+
+
+def _finite_from(mapping: dict[str, Any] | None, *keys: str) -> float | None:
+    """First finite number among keys; never treats 0.0 as missing via truthiness."""
+    return _finite_number(_first_key(mapping, *keys))
+
+
 def _missing_metric_state(
     reward_id: str,
     *,
@@ -272,9 +287,9 @@ class RewardV2Evaluator:
             evidence.append("ci_manifest.json")
         if (run_dir / "coverage.json").exists():
             evidence.append("coverage.json")
-        coverage_pct = _finite_number(coverage.get("line_rate_pct") or coverage.get("percent"))
+        coverage_pct = _finite_from(coverage, "line_rate_pct", "percent")
         if coverage_pct is None and ci:
-            coverage_pct = _finite_number(ci.get("line_coverage_pct"))
+            coverage_pct = _finite_from(ci, "line_coverage_pct")
         commands_ok = ci.get("commands_passed")
         if coverage_pct is None and commands_ok is None:
             return _missing_metric_state(
@@ -448,10 +463,10 @@ class RewardV2Evaluator:
         evidence = [
             p for p in ("nested_evaluation.json", "backtest_summary.json") if (run_dir / p).exists()
         ]
-        ece = _finite_number(metrics.get("expected_calibration_error") or metrics.get("ece"))
-        intercept = _finite_number(metrics.get("calibration_intercept") or metrics.get("intercept"))
-        slope = _finite_number(metrics.get("calibration_slope") or metrics.get("slope"))
-        ece_upper = _finite_number(metrics.get("ece_bootstrap_upper") or metrics.get("ece_upper"))
+        ece = _finite_from(metrics, "expected_calibration_error", "ece")
+        intercept = _finite_from(metrics, "calibration_intercept", "intercept")
+        slope = _finite_from(metrics, "calibration_slope", "slope")
+        ece_upper = _finite_from(metrics, "ece_bootstrap_upper", "ece_upper")
         outer = bool(nested.get("outer_fold") or backtest.get("rolling_origin_executed"))
         if ece is None or intercept is None or slope is None:
             return _missing_metric_state(
@@ -511,17 +526,23 @@ class RewardV2Evaluator:
             )
             if (run_dir / p).exists()
         ]
-        cycle_count = _finite_number(
-            bench.get("independent_cycle_count")
-            or nested.get("independent_cycle_count")
-            or backtest.get("independent_cycle_count")
-        )
+        cycle_count = None
+        for source in (bench, nested, backtest if isinstance(backtest, dict) else {}):
+            if isinstance(source, dict):
+                value = _finite_from(source, "independent_cycle_count")
+                if value is not None:
+                    cycle_count = value
+                    break
         beats = bench.get("beats_all_simple_baselines")
         if beats is None:
             beats = ablations.get("ensemble", {}).get("beats_or_matches_baseline")
-        log_ci_upper = _finite_number(
-            bench.get("log_score_diff_ci_upper") or nested.get("log_score_diff_ci_upper")
-        )
+        log_ci_upper = None
+        for source in (bench, nested):
+            if isinstance(source, dict):
+                value = _finite_from(source, "log_score_diff_ci_upper")
+                if value is not None:
+                    log_ci_upper = value
+                    break
         if cycle_count is None or beats is None:
             return _missing_metric_state(
                 "R5_baseline_competition",
@@ -909,7 +930,7 @@ class RewardV2Evaluator:
                     "numba",
                 }:
                     reasons.append("Unexpected fallback engine")
-        mcse = _finite_number(performance.get("max_mcse") or performance.get("mcse_max"))
+        mcse = _finite_from(performance, "max_mcse", "mcse_max")
         max_mcse = float(thr.get("max_mcse", 0.0025))
         if mcse is None:
             # Every published probability must meet MCSE; missing metric is not a pass.
@@ -970,9 +991,9 @@ class RewardV2Evaluator:
         if draw_count < int(thr.get("min_draw_count", 100)):
             reasons.append(f"Draw count {draw_count} below minimum")
         r_hat = _finite_number(diagnostics.get("r_hat_max"))
-        ess = _finite_number(diagnostics.get("ess_min") or diagnostics.get("bulk_ess_min"))
-        tail_ess = _finite_number(diagnostics.get("tail_ess_min"))
-        e_bfmi = _finite_number(diagnostics.get("e_bfmi_min") or diagnostics.get("e_bfmi"))
+        ess = _finite_from(diagnostics, "ess_min", "bulk_ess_min")
+        tail_ess = _finite_from(diagnostics, "tail_ess_min")
+        e_bfmi = _finite_from(diagnostics, "e_bfmi_min", "e_bfmi")
         missing_mcmc: list[str] = []
         if r_hat is None:
             missing_mcmc.append("r_hat_max")
@@ -1115,12 +1136,8 @@ class RewardV2Evaluator:
             reasons.append("Full refit required but not executed")
         if update.get("quality_passed") is False:
             reasons.append("Update quality_passed is false")
-        mae = _finite_number(
-            update.get("probability_mae_vs_full_refit") or update.get("mae_vs_refit")
-        )
-        max_diff = _finite_number(
-            update.get("probability_max_diff_vs_full_refit") or update.get("max_diff_vs_refit")
-        )
+        mae = _finite_from(update, "probability_mae_vs_full_refit", "mae_vs_refit")
+        max_diff = _finite_from(update, "probability_max_diff_vs_full_refit", "max_diff_vs_refit")
         if mae is not None and mae > float(thr.get("max_probability_mae_vs_refit", 0.005)):
             reasons.append(f"MAE vs full refit {mae} exceeds threshold")
         if max_diff is not None and max_diff > float(

@@ -1490,3 +1490,90 @@ def test_incomplete_primary_metrics_never_pass_matrix(tmp_path: Path, rewards_co
         state = _eval_one(run_dir, reward_id, rewards_config)["state"]
         assert state != "pass", f"{reward_id} auto-passed with incomplete evidence: {state}"
         assert state in {"fail", "insufficient_evidence"}
+
+
+def test_zero_calibration_metrics_pass_r4(tmp_path: Path, rewards_config: dict) -> None:
+    """ECE=0 and intercept=0 are perfect calibration and must pass, not missing."""
+    nested = {
+        "exact_pipeline": True,
+        "outer_fold": True,
+        "calibration": {
+            "expected_calibration_error": 0.0,
+            "ece_bootstrap_upper": 0.0,
+            "calibration_intercept": 0.0,
+            "calibration_slope": 1.0,
+        },
+    }
+    good = _seed_run(tmp_path / "r4-zero", **{"nested_evaluation.json": nested})
+    result = _eval_one(good, "R4_calibration", rewards_config)
+    assert result["state"] == "pass", result
+    assert result["metric"]["ece"] == 0.0
+    assert result["metric"]["intercept"] == 0.0
+
+
+def test_zero_mcse_passes_r12(tmp_path: Path, rewards_config: dict) -> None:
+    """max_mcse=0.0 is valid and must pass threshold, not insufficient_evidence."""
+    good = _seed_run(
+        tmp_path / "r12-zero",
+        **{
+            "performance.json": {
+                "requested_engine": "python",
+                "engine": "python",
+                "parallel": False,
+                "numba_available": False,
+                "simulation_count": 1000,
+                "max_mcse": 0.0,
+            }
+        },
+    )
+    result = _eval_one(good, "R12_performance_contract", rewards_config)
+    assert result["state"] == "pass", result
+    assert result["metric"]["max_mcse"] == 0.0
+
+
+def test_zero_mae_and_max_diff_pass_r15(tmp_path: Path, rewards_config: dict) -> None:
+    """Perfect daily-update agreement (MAE=0, max_diff=0) must pass."""
+    good = _seed_run(
+        tmp_path / "r15-zero",
+        **{
+            "latest_daily_update.json": {
+                "quality_passed": True,
+                "needs_full_refit": False,
+                "strategy": "reweighting",
+                "probability_mae_vs_full_refit": 0.0,
+                "probability_max_diff_vs_full_refit": 0.0,
+                "full_refit_executed": False,
+                "weights_degenerate": False,
+                "noop": False,
+            }
+        },
+    )
+    result = _eval_one(good, "R15_daily_update_quality", rewards_config)
+    assert result["state"] == "pass", result
+    assert result["metric"]["mae_vs_refit"] == 0.0
+    assert result["metric"]["max_diff_vs_refit"] == 0.0
+
+
+def test_finite_from_helper_preserves_zero() -> None:
+    from civic_signal.scoring.reward_v2 import _finite_from, _first_key
+
+    assert _first_key({"a": 0.0, "b": 1.0}, "a", "b") == 0.0
+    assert _first_key({"a": None, "b": 0.0}, "a", "b") == 0.0
+    assert _first_key({}, "a", "b") is None
+    assert (
+        _finite_from(
+            {"expected_calibration_error": 0.0, "ece": 0.5},
+            "expected_calibration_error",
+            "ece",
+        )
+        == 0.0
+    )
+    assert _finite_from({"max_mcse": 0.0, "mcse_max": 0.01}, "max_mcse", "mcse_max") == 0.0
+    assert (
+        _finite_from(
+            {"probability_mae_vs_full_refit": 0.0},
+            "probability_mae_vs_full_refit",
+            "mae_vs_refit",
+        )
+        == 0.0
+    )
