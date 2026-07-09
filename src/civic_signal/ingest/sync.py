@@ -16,9 +16,13 @@ from civic_signal.config import ProjectContext
 from civic_signal.ingest.sources import SourceDefinition, SourceRegistry
 from civic_signal.storage.io import read_json, write_json, write_parquet
 
-HTTP_RETRY_ATTEMPTS = 2
-HTTP_BACKOFF_SECONDS = (1.0, 2.0)
-HTTP_TIMEOUT_SECONDS = 20
+HTTP_RETRY_ATTEMPTS = 3
+HTTP_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
+# The archived FiveThirtyEight Datasette mirror routinely takes ~30s to respond.
+HTTP_TIMEOUT_SECONDS = 60
+# Wikipedia returns 403 for the default Python urllib User-Agent; identify per
+# https://meta.wikimedia.org/wiki/User-Agent_policy.
+HTTP_USER_AGENT = "civic-signal/0.1 (election forecasting research; +https://github.com/gustavorubim/civic-signal)"
 HTTP_MAX_BYTES = 500 * 1024 * 1024
 HTTP_ALLOWED_CONTENT_TYPES = (
     "text/csv",
@@ -203,7 +207,7 @@ class SyncRunner:
 
     @staticmethod
     def _http_get_with_retry(url: str) -> bytes:
-        request = urllib.request.Request(url)
+        request = urllib.request.Request(url, headers={"User-Agent": HTTP_USER_AGENT})
         last_exc: Exception | None = None
         for attempt in range(HTTP_RETRY_ATTEMPTS):
             try:

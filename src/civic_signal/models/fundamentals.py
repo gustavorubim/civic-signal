@@ -15,6 +15,9 @@ class FundamentalsModel:
     DEFAULT_COEFFICIENTS: ClassVar[dict[str, float]] = {
         "partisan_lean": 1.0 / 100.0,
         "economic_index": 1.0 / 50.0,
+        # Uniform-swing prior: 1pp of national environment change since the seat's
+        # previous contest moves the D share by ~1pp in every race.
+        "national_swing": 1.0 / 100.0,
         "demographic_turnout_index": 1.0 / 80.0,
         "incumbent": 0.01,
         "fundraising_usd": 1.0 / 1_000_000_000,
@@ -147,6 +150,7 @@ class FundamentalsModel:
     ) -> dict[str, float]:
         lean = float(fundamental.get("partisan_lean") or 0.0)
         economy = float(fundamental.get("economic_index") or 0.0)
+        swing = float(fundamental.get("national_swing") or 0.0)
         demographic = float(fundamental.get("demographic_turnout_index") or 0.0)
         coef = self.coefficients
         shares: dict[str, float] = {}
@@ -161,6 +165,7 @@ class FundamentalsModel:
                 + self.intercept
                 + coef["partisan_lean"] * lean * sign
                 + coef["economic_index"] * economy * sign
+                + coef["national_swing"] * swing * sign
                 + coef["demographic_turnout_index"] * demographic * sign
                 + coef["incumbent"] * incumbent
                 + coef["fundraising_usd"] * finance
@@ -252,9 +257,14 @@ class FundamentalsModel:
         options = bundle.options.select(
             ["race_id", "option_id", "party", "incumbent", "previous_vote_share", "fundraising_usd"]
         )
-        fundamentals = bundle.fundamentals.select(
-            ["race_id", "partisan_lean", "economic_index", "demographic_turnout_index"]
-        )
+        fundamentals_columns = ["race_id", "partisan_lean", "economic_index", "demographic_turnout_index"]
+        if "national_swing" in bundle.fundamentals.columns:
+            fundamentals_columns.insert(3, "national_swing")
+        fundamentals = bundle.fundamentals.select(fundamentals_columns)
+        if "national_swing" not in fundamentals.columns:
+            fundamentals = fundamentals.with_columns(
+                pl.lit(0.0, dtype=pl.Float64).alias("national_swing")
+            )
         joined = results.join(options, on=["race_id", "option_id"], how="inner").join(
             fundamentals, on="race_id", how="inner"
         )
@@ -275,6 +285,9 @@ class FundamentalsModel:
             (pl.col("economic_index").fill_null(0.0) * pl.col("party_sign")).alias(
                 "economic_index"
             ),
+            (pl.col("national_swing").fill_null(0.0) * pl.col("party_sign")).alias(
+                "national_swing"
+            ),
             (pl.col("demographic_turnout_index").fill_null(0.0) * pl.col("party_sign")).alias(
                 "demographic_turnout_index"
             ),
@@ -287,6 +300,7 @@ class FundamentalsModel:
                 "cycle",
                 "partisan_lean",
                 "economic_index",
+                "national_swing",
                 "demographic_turnout_index",
                 "incumbent",
                 "fundraising_usd",
@@ -297,6 +311,7 @@ class FundamentalsModel:
             [
                 "partisan_lean",
                 "economic_index",
+                "national_swing",
                 "demographic_turnout_index",
                 "incumbent",
                 "fundraising_usd",

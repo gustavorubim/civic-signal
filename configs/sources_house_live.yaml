@@ -1,0 +1,39 @@
+extends: sources_house.yaml
+sources:
+  # Live 2026 House polling overlay on top of the synthetic district panel.
+  # NOTE: the FiveThirtyEight Datasette mirror is a frozen archive (538 shut down
+  # before the 2026 cycle) and currently returns zero rows for cycle=2026. The
+  # adapter is wired so the run degrades gracefully to panel polls until the URL
+  # is pointed at a real 2026 aggregate. house_race_id_format is hyphenated to
+  # match the panel's US-HOUSE-{ST}-{NN}-2026 race ids.
+  - id: fivethirtyeight_house_polls_2026
+    table: polls
+    type: http_csv
+    path: house_polls_2026.csv
+    parser_version: fivethirtyeight-general-polls-v1
+    license: Public FiveThirtyEight/Datasette polling table; record terms before redistribution.
+    auth_mode: public
+    url: https://fivethirtyeight.datasettes.com/polls/house_polls.csv?cycle=2026&_stream=on
+    parser_args:
+      cycle: 2026
+      office: house
+      stage: general
+      parties: [DEM, REP]
+      house_race_id_format: hyphenated
+  - id: wikipedia_house_2026_race_presence
+    table: public_signals
+    type: http_text
+    path: wikipedia_2026_house.wikitext
+    parser_version: wikipedia-race-presence-signals-v1
+    license: Wikipedia article text under CC BY-SA/GFDL; used only as opt-in race-presence metadata.
+    auth_mode: public
+    url: https://en.wikipedia.org/wiki/2026_United_States_House_of_Representatives_elections?action=raw
+    parser_args:
+      cycle: 2026
+      observed_at: "2026-07-08T00:00:00Z"
+      races:
+        - race_id: US-HOUSE-CA-45-2026
+          office_type: house
+          patterns:
+            - "\\{\\{ushr\\|CA\\|45\\|X\\}\\}"
+            - "2024 California's 45th congressional district election"

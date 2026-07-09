@@ -96,6 +96,7 @@ class CuratedDataBuilder:
         "partisan_lean",
         "incumbency_advantage",
         "economic_index",
+        "national_swing",
         "demographic_turnout_index",
         "historical_turnout_rate",
         "registered_voters",
@@ -492,6 +493,8 @@ class CuratedDataBuilder:
                 pl.lit(None, dtype=pl.Int64).alias("as_of_offset_days"),
             )
         self._require_non_nulls(base, ["as_of"], parser_version)
+        if "national_swing" not in base.columns:
+            base = base.with_columns(pl.lit(None, dtype=pl.Float64).alias("national_swing"))
         return base.select(
             "cycle",
             "state",
@@ -501,6 +504,7 @@ class CuratedDataBuilder:
             "partisan_lean",
             "incumbency_advantage",
             "economic_index",
+            "national_swing",
             "demographic_turnout_index",
             "historical_turnout_rate",
             "registered_voters",
@@ -914,6 +918,8 @@ class CuratedDataBuilder:
                 pl.lit(None, dtype=pl.Int64).alias("as_of_offset_days"),
             )
         self._require_non_nulls(base, ["as_of"], parser_version)
+        if "national_swing" not in base.columns:
+            base = base.with_columns(pl.lit(None, dtype=pl.Float64).alias("national_swing"))
         return base.select(
             "cycle",
             "state",
@@ -923,6 +929,7 @@ class CuratedDataBuilder:
             "partisan_lean",
             "incumbency_advantage",
             "economic_index",
+            "national_swing",
             "demographic_turnout_index",
             "historical_turnout_rate",
             "registered_voters",
@@ -1143,6 +1150,8 @@ class CuratedDataBuilder:
                 pl.lit(None, dtype=pl.Int64).alias("as_of_offset_days"),
             )
         self._require_non_nulls(base, ["as_of"], parser_version)
+        if "national_swing" not in base.columns:
+            base = base.with_columns(pl.lit(None, dtype=pl.Float64).alias("national_swing"))
         return base.select(
             "cycle",
             "state",
@@ -1152,6 +1161,7 @@ class CuratedDataBuilder:
             "partisan_lean",
             "incumbency_advantage",
             "economic_index",
+            "national_swing",
             "demographic_turnout_index",
             "historical_turnout_rate",
             "registered_voters",

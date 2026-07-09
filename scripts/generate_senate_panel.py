@@ -280,9 +280,10 @@ CYCLE_D_ENVIRONMENT: dict[int, float] = {
     2020: +1.0,
     2022: +1.5,
     2024: -2.5,
-    # 2026 midterm under R presidency; out-party historical advantage. Replace with a
-    # poll-aggregate value once a real polling adapter is wired in.
-    2026: +3.0,
+    # 2026 midterm under R presidency; generic-ballot average ~D+6 as of July 2026,
+    # tempered for Senate race candidate effects. Replace with a live poll-aggregate
+    # value once the polling adapter is wired in.
+    2026: +5.0,
 }
 
 # Approximate D economic index per cycle (synthetic).
@@ -495,6 +496,9 @@ def _generate_row(cycle: int, state: str) -> dict[str, object]:
         "partisan_lean": round(state_lean_pp, 4),
         "incumbency_advantage": incumbent_advantage if incumbent_party != "" else 0.0,
         "economic_index": round(CYCLE_ECONOMY[cycle], 4),
+        # Observable uniform-swing input: national environment change since this
+        # class's previous contest (generic-ballot delta in a live pipeline).
+        "national_swing": round(CYCLE_D_ENVIRONMENT[cycle] - CYCLE_D_ENVIRONMENT[cycle - 6], 4),
         "demographic_turnout_index": round((rng.random() - 0.5) * 4.0, 4),
         "historical_turnout_rate": historical_turnout,
         "registered_voters": registered_voters,
