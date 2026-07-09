@@ -47,8 +47,9 @@ def fit_nuts(
     except ImportError as exc:
         raise RuntimeError("NumPyro/JAX are required; run `uv sync`.") from exc
 
-    numpyro.enable_x64()
     cfg = config or NutsConfig()
+    _configure_jax_runtime(cfg.num_chains)
+    numpyro.enable_x64()
     kernel = NUTS(
         lambda: state_space_model(
             data,
@@ -80,6 +81,43 @@ def fit_nuts(
     diagnostics = _diagnostics(mcmc, cfg, data, elapsed, grouped_samples)
     diagnostics["failover_audit"] = timeout_result.audit
     return InferenceResult(samples=samples, diagnostics=diagnostics, elapsed_seconds=elapsed)
+
+
+_JAX_RUNTIME_CONFIGURED = False
+
+
+def _configure_jax_runtime(num_chains: int) -> None:  # pragma: no cover
+    """One-time JAX runtime setup: parallel-chain devices and compile cache.
+
+    Must run before the JAX backend initializes. The persistent compilation
+    cache removes the per-process re-JIT cost (~10-20s per model shape) and is
+    shared across backtest fold workers and sessions.
+    """
+    global _JAX_RUNTIME_CONFIGURED
+    if _JAX_RUNTIME_CONFIGURED:
+        return
+    _JAX_RUNTIME_CONFIGURED = True
+    import os
+    from pathlib import Path
+
+    try:
+        import numpyro
+
+        if num_chains > 1:
+            numpyro.set_host_device_count(num_chains)
+    except Exception:
+        pass
+    try:
+        import jax
+
+        cache_dir = os.environ.get("JAX_COMPILATION_CACHE_DIR") or str(
+            Path.home() / ".cache" / "civic-signal-jax"
+        )
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        jax.config.update("jax_compilation_cache_dir", cache_dir)
+        jax.config.update("jax_persistent_cache_min_compile_time_secs", 1.0)
+    except Exception:
+        pass
 
 
 def _diagnostics(  # pragma: no cover

@@ -1,5 +1,7 @@
 rolling_origin:
   holdout_cycles: [2022, 2024]
+  # Folds are independent refits; run them across processes (1 = serial).
+  parallel_folds: 5
   min_races: 2
   as_of_offsets_days: [90, 60, 30, 7, 1]
 minimum_rows_for_trust: 30

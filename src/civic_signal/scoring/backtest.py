@@ -113,6 +113,17 @@ class BacktestRunner:
             if inference_engine == "bayes"
             else None
         )
+        # Rolling-origin scoring does not need publication-grade posteriors;
+        # apply the backtest sampler budget to every fold in this runner.
+        sampler_overrides = dict(
+            dict(dict(model_config.get("bayesian", {})).get("nuts", {})).get(
+                "backtest_overrides", {}
+            )
+            or {}
+        )
+        if sampler_overrides and inference_engine == "bayes":
+            model_config = json.loads(json.dumps(model_config))
+            model_config["bayesian"]["nuts"].update(sampler_overrides)
         backtest_config = self.context.read_yaml("backtests.yaml")
         scenario_obj = ScenarioRegistry.from_context(self.context).get(scenario)
         rolling_predictions = self._rolling_origin_predictions(
@@ -224,7 +235,7 @@ class BacktestRunner:
             target_cycles = sorted(
                 int(value) for value in target_catalog["cycle"].unique().to_list()
             )
-        frames: list[pl.DataFrame] = []
+        fold_specs: list[dict[str, Any]] = []
         for target_cycle in target_cycles:
             train_catalog = base_catalog.filter(pl.col("cycle") < target_cycle)
             test_catalog = base_catalog.filter(pl.col("cycle") == target_cycle)
@@ -233,20 +244,83 @@ class BacktestRunner:
                 continue
             offsets = self._as_of_offsets(backtest_config)
             for offset_days, as_of in self._cycle_as_of_dates(test_catalog, offsets):
-                train_bundle = filter_bundle_by_date(subset_bundle(bundle, train_catalog), as_of)
-                test_bundle = filter_bundle_by_date(subset_bundle(bundle, test_catalog), as_of)
-                predictions = self._predict_cycle(
-                    train_bundle=train_bundle,
-                    test_bundle=test_bundle,
-                    target_cycle=target_cycle,
-                    as_of=as_of,
-                    as_of_offset_days=offset_days,
-                    model_config=model_config,
-                    inference_engine=inference_engine,
+                fold_specs.append(
+                    {
+                        "target_cycle": target_cycle,
+                        "as_of": as_of,
+                        "as_of_offset_days": offset_days,
+                    }
+                )
+        if not fold_specs:
+            return self._empty_predictions()
+        parallel_folds = int(
+            dict(backtest_config.get("rolling_origin", {})).get("parallel_folds", 1) or 1
+        )
+        frames: list[pl.DataFrame] = []
+        if parallel_folds > 1 and len(fold_specs) > 1:
+            frames = self._run_folds_parallel(
+                fold_specs=fold_specs,
+                scenario=scenario,
+                model_config=model_config,
+                inference_engine=inference_engine,
+                max_workers=min(parallel_folds, len(fold_specs)),
+            )
+        else:
+            for spec in fold_specs:
+                predictions = _execute_backtest_fold(
+                    {
+                        "context": self.context,
+                        "scenario": scenario,
+                        "model_config": model_config,
+                        "inference_engine": inference_engine,
+                        **spec,
+                    }
                 )
                 if not predictions.is_empty():
                     frames.append(predictions)
         return pl.concat(frames, how="diagonal_relaxed") if frames else self._empty_predictions()
+
+    def _run_folds_parallel(
+        self,
+        *,
+        fold_specs: list[dict[str, Any]],
+        scenario: Scenario | None,
+        model_config: dict[str, Any],
+        inference_engine: str,
+        max_workers: int,
+    ) -> list[pl.DataFrame]:
+        """Run rolling-origin folds across processes.
+
+        Folds are independent refits, so this is embarrassingly parallel. The
+        spawn context is mandatory: JAX runtimes are not fork-safe. Results are
+        reassembled in fold order so artifacts stay byte-stable regardless of
+        completion order.
+        """
+        import concurrent.futures
+        import multiprocessing
+
+        payloads = [
+            {
+                "context": self.context,
+                "scenario": scenario,
+                "model_config": model_config,
+                "inference_engine": inference_engine,
+                **spec,
+            }
+            for spec in fold_specs
+        ]
+        spawn = multiprocessing.get_context("spawn")
+        results: list[pl.DataFrame | None] = [None] * len(payloads)
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=max_workers, mp_context=spawn
+        ) as executor:
+            futures = {
+                executor.submit(_execute_backtest_fold, payload): index
+                for index, payload in enumerate(payloads)
+            }
+            for future in concurrent.futures.as_completed(futures):
+                results[futures[future]] = future.result()
+        return [frame for frame in results if frame is not None and not frame.is_empty()]
 
     def _predict_cycle(
         self,
@@ -927,3 +1001,48 @@ class BacktestRunner:
             "residual_covariance": f"residual_covariance_{key}.parquet",
         }
         write_json(index, index_path)
+
+
+# --- Fold worker (module level so it is picklable by the spawn context) ---
+
+_WORKER_BUNDLE_CACHE: dict[tuple[str, str, str], FeatureBundle] = {}
+
+
+def _worker_feature_bundle(context: ProjectContext) -> FeatureBundle:
+    """Build (and per-process cache) the feature bundle from curated parquet."""
+    key = (str(context.root), str(context.sources_config), str(context.data_dir))
+    bundle = _WORKER_BUNDLE_CACHE.get(key)
+    if bundle is None:
+        bundle = FeatureBuilder(context).run()
+        _WORKER_BUNDLE_CACHE[key] = bundle
+    return bundle
+
+
+def _execute_backtest_fold(payload: dict[str, Any]) -> pl.DataFrame:
+    """Run one rolling-origin fold; usable serially or in a worker process."""
+    context: ProjectContext = payload["context"]
+    scenario: Scenario | None = payload["scenario"]
+    target_cycle = int(payload["target_cycle"])
+    as_of = str(payload["as_of"])
+    bundle = _worker_feature_bundle(context)
+    base_catalog = (
+        scenario.filter_catalog(bundle.race_catalog, include_cycle=False)
+        if scenario
+        else bundle.race_catalog
+    )
+    train_catalog = base_catalog.filter(pl.col("cycle") < target_cycle)
+    test_catalog = base_catalog.filter(pl.col("cycle") == target_cycle)
+    train_catalog = BacktestRunner._restrict_to_era(train_catalog, test_catalog)
+    if train_catalog.is_empty() or test_catalog.is_empty():
+        return BacktestRunner._empty_predictions()
+    train_bundle = filter_bundle_by_date(subset_bundle(bundle, train_catalog), as_of)
+    test_bundle = filter_bundle_by_date(subset_bundle(bundle, test_catalog), as_of)
+    return BacktestRunner(context)._predict_cycle(
+        train_bundle=train_bundle,
+        test_bundle=test_bundle,
+        target_cycle=target_cycle,
+        as_of=as_of,
+        as_of_offset_days=int(payload["as_of_offset_days"]),
+        model_config=payload["model_config"],
+        inference_engine=str(payload["inference_engine"]),
+    )

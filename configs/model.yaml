@@ -43,7 +43,10 @@ bayesian:
     num_warmup: 500
     num_samples: 2000
     num_chains: 2
-    chain_method: vectorized
+    chain_method: parallel
+    backtest_overrides:
+      num_warmup: 300
+      num_samples: 800
     target_accept_prob: 0.9
     wall_clock_timeout_seconds: 2820
     failover:
