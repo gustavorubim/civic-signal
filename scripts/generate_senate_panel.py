@@ -287,12 +287,26 @@ CYCLE_D_ENVIRONMENT: dict[int, float] = {
 
 
 def _apply_measured_environment() -> None:
-    """Override the 2026 environment with the measured generic-ballot margin."""
+    """Set the 2026 environment: explicit override > measured margin > fallback.
+
+    fixtures/environment_override.json pins a scenario (analyst's choice);
+    fixtures/measured_environment.json carries the live aggregator median.
+    Both are tempered 1pp for Senate candidate effects.
+    """
+    import json
+
+    override_path = ROOT / "fixtures" / "environment_override.json"
+    if override_path.exists():
+        payload = json.loads(override_path.read_text(encoding="utf-8"))
+        CYCLE_D_ENVIRONMENT[2026] = float(payload["generic_ballot_margin_d"]) - 1.0
+        print(
+            f"senate 2026 environment OVERRIDE active: D+{CYCLE_D_ENVIRONMENT[2026]} "
+            f"({payload.get('reason', 'no reason recorded')})"
+        )
+        return
     measured_path = ROOT / "fixtures" / "measured_environment.json"
     if not measured_path.exists():
         return
-    import json
-
     payload = json.loads(measured_path.read_text(encoding="utf-8"))
     CYCLE_D_ENVIRONMENT[2026] = float(payload["generic_ballot_margin_d"]) - 1.0
 

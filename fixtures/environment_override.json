@@ -1,0 +1,5 @@
+{
+  "generic_ballot_margin_d": 2.5,
+  "reason": "Analyst scenario override requested 2026-07-09; measured aggregator median was D+5.8. Delete this file to return to the measured value.",
+  "set_at": "2026-07-09"
+}
