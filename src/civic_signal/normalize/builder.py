@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 from typing import ClassVar
 
@@ -120,10 +121,23 @@ class CuratedDataBuilder:
     UNIQUE_KEYS_BY_TABLE: ClassVar[dict[str, list[str]]] = {
         "races": ["race_id"],
         "options": ["race_id", "option_id"],
-        "polls": ["poll_id", "race_id", "option_id"],
+        "polls": ["question_id", "race_id", "option_id"],
         "market_quotes": ["market_id", "race_id", "option_id", "observed_at"],
         "public_signals": ["signal_id", "race_id", "option_id", "observed_at"],
-        "fundamentals": ["race_id", "as_of"],
+        "fundamentals": [
+            "race_id",
+            "feature_id",
+            "series_id",
+            "rating_id",
+            "finance_id",
+            "feature_type",
+            "option_id",
+            "observed_at",
+            "as_of",
+            "published_at",
+            "available_at",
+            "revision_id",
+        ],
         "results": ["race_id", "option_id"],
         "backtest_predictions": ["race_id", "option_id", "cycle"],
     }
@@ -185,6 +199,10 @@ class CuratedDataBuilder:
         "house-district-panel-fundamentals-v1": "fundamentals",
         "house-district-panel-polls-v1": "polls",
     }
+    MEDSL_HOUSE_TABLES: ClassVar[dict[str, str]] = {
+        "medsl-house-constituency-races-v1": "races",
+        "medsl-house-constituency-results-v1": "results",
+    }
 
     def __init__(self, context: ProjectContext) -> None:
         self.context = context
@@ -193,7 +211,9 @@ class CuratedDataBuilder:
         manifest_path = self.context.raw_dir / "source_manifest.parquet"
         if not manifest_path.exists():
             raise FileNotFoundError("Run sync before build-features")
-        manifest = pl.read_parquet(manifest_path).filter(pl.col("status") != "failed")
+        manifest = pl.read_parquet(manifest_path).filter(
+            pl.col("status").is_in(["fetched", "unchanged", "stale_reused"])
+        )
         table_frames: dict[str, list[pl.DataFrame]] = {}
         self.context.curated_dir.mkdir(parents=True, exist_ok=True)
 
@@ -201,15 +221,19 @@ class CuratedDataBuilder:
             table = str(row["table"])
             frame = self._read_source(row)
             table_frames.setdefault(table, []).append(frame)
-        tables = {
-            table: self._canonical_order(
-                self._dedupe(
-                    pl.concat(frames, how="diagonal_relaxed") if len(frames) > 1 else frames[0],
-                    table,
-                )
-            )
-            for table, frames in table_frames.items()
-        }
+        tables: dict[str, pl.DataFrame] = {}
+        poll_history: pl.DataFrame | None = None
+        for table, frames in table_frames.items():
+            merged = pl.concat(frames, how="diagonal_relaxed") if len(frames) > 1 else frames[0]
+            if table == "polls":
+                merged = self._ensure_poll_identity(merged)
+                poll_history = merged
+            selected = self._canonical_order(self._dedupe(merged, table))
+            if table == "polls":
+                selected = selected.drop("survey_id", "question_id", "revision_id", strict=False)
+            tables[table] = selected
+        if poll_history is not None:
+            tables.update(self._poll_entity_tables(poll_history))
         for table, frame in tables.items():
             write_parquet(frame, self.context.curated_dir / f"{table}.parquet")
         usage_manifest = manifest.with_columns(
@@ -242,6 +266,14 @@ class CuratedDataBuilder:
             frame = self._normalize_538_general_polls(frame, parser_args)
         elif parser_version == "fred-national-fundamentals-v1":
             frame = self._normalize_fred_national_fundamentals(frame, parser_args)
+        elif parser_version in self.MEDSL_HOUSE_TABLES:
+            expected_table = self.MEDSL_HOUSE_TABLES[parser_version]
+            if table != expected_table:
+                raise ValueError(
+                    f"{parser_version} must be registered for table {expected_table!r}; "
+                    f"got {table!r}"
+                )
+            frame = self._normalize_medsl_house(frame, parser_version, parser_args)
         elif parser_version in self.PRESIDENT_STATE_PANEL_TABLES:
             expected_table = self.PRESIDENT_STATE_PANEL_TABLES[parser_version]
             if table != expected_table:
@@ -267,11 +299,40 @@ class CuratedDataBuilder:
                 )
             frame = self._normalize_house_district_panel(frame, parser_version, parser_args)
         frame = self._coerce(frame)
+        availability_expr, availability_basis = self._availability_fields(frame, row, table)
         return frame.with_columns(
             pl.lit(row["source_id"]).alias("source_id"),
             pl.lit(row["content_hash"]).alias("source_hash"),
             pl.lit(row["parser_version"]).alias("parser_version"),
+            pl.lit(row.get("source_class") or "unknown").alias("_source_class"),
+            pl.lit(int(row.get("source_priority") or 0)).alias("_source_priority"),
+            pl.lit(row.get("retrieved_at")).cast(pl.Utf8).alias("_source_retrieved_at"),
+            availability_expr.alias("available_at"),
+            availability_basis.alias("availability_basis"),
         )
+
+    @staticmethod
+    def _availability_fields(
+        frame: pl.DataFrame, row: dict[str, object], table: str
+    ) -> tuple[pl.Expr, pl.Expr]:
+        if "available_at" in frame.columns:
+            return pl.col("available_at").cast(pl.Utf8), pl.lit("source_record")
+        source_class = str(row.get("source_class") or "").lower()
+        source_type = str(row.get("type") or "").lower()
+        if source_class in {"fixture", "synthetic"} or source_type == "fixture":
+            proxy_columns = {
+                "polls": ("published_at", "end_date"),
+                "market_quotes": ("observed_at",),
+                "public_signals": ("observed_at",),
+                "fundamentals": ("release_at", "as_of"),
+            }
+            proxy = next(
+                (column for column in proxy_columns.get(table, ()) if column in frame.columns),
+                None,
+            )
+            if proxy is not None:
+                return pl.col(proxy).cast(pl.Utf8), pl.lit("event_date_proxy")
+        return pl.lit(row["retrieved_at"]).cast(pl.Utf8), pl.lit("retrieved_at")
 
     @staticmethod
     def _parser_args_from_row(row: dict[str, object]) -> dict[str, object]:
@@ -296,7 +357,151 @@ class CuratedDataBuilder:
         present = [key for key in keys if key in frame.columns]
         if not present:
             return frame
-        return frame.unique(subset=present, keep="first", maintain_order=True)
+        ranked = cls._rank_sources(frame)
+        return ranked.unique(subset=present, keep="first", maintain_order=True).drop(
+            "_source_class_rank",
+            "_source_class",
+            "_source_priority",
+            "_source_retrieved_at",
+            strict=False,
+        )
+
+    @staticmethod
+    def _rank_sources(frame: pl.DataFrame) -> pl.DataFrame:
+        """Put real sources ahead of fixtures, then apply stable explicit tie-breakers."""
+        source_class_column = (
+            "_source_class" if "_source_class" in frame.columns else "source_class"
+        )
+        source_class = (
+            pl.col(source_class_column).cast(pl.Utf8).str.to_lowercase()
+            if source_class_column in frame.columns
+            else pl.lit("unknown")
+        )
+        ranked = frame.with_columns(
+            pl.when(source_class.is_in(["official_public", "production_web", "production"]))
+            .then(pl.lit(3))
+            .when(source_class == "fixture")
+            .then(pl.lit(1))
+            .otherwise(pl.lit(0))
+            .alias("_source_class_rank")
+        )
+        columns: list[str] = ["_source_class_rank"]
+        descending: list[bool] = [True]
+        for column, desc in (
+            ("_source_priority", True),
+            ("source_priority", True),
+            ("_source_retrieved_at", True),
+            ("source_id", False),
+            ("source_hash", False),
+        ):
+            if column in ranked.columns:
+                columns.append(column)
+                descending.append(desc)
+        # Equal-ranked rows still need a total order: Polars does not promise
+        # that a parallel sort preserves input order for equal keys.
+        for column in ranked.columns:
+            if column not in columns and column != "_source_class_rank":
+                columns.append(column)
+                descending.append(False)
+        return ranked.sort(columns, descending=descending, nulls_last=True)
+
+    @classmethod
+    def _ensure_poll_identity(cls, frame: pl.DataFrame) -> pl.DataFrame:
+        """Attach option-independent survey/question IDs and immutable revision IDs."""
+        survey = (
+            pl.col("survey_id").cast(pl.Utf8)
+            if "survey_id" in frame.columns
+            else pl.col("poll_id").cast(pl.Utf8).str.replace(r"-(?:DEM|REP|IND|OTHER|D|R|I|O)$", "")
+        )
+        with_survey = frame.with_columns(survey.alias("survey_id"))
+        question = (
+            pl.col("question_id").cast(pl.Utf8)
+            if "question_id" in with_survey.columns
+            else pl.concat_str([pl.col("survey_id"), pl.lit(":q1")])
+        )
+        with_question = with_survey.with_columns(question.alias("question_id"))
+        revision = (
+            pl.col("revision_id").cast(pl.Utf8)
+            if "revision_id" in with_question.columns
+            else pl.concat_str(
+                [pl.col("question_id"), pl.lit("@"), pl.col("source_hash").cast(pl.Utf8)]
+            )
+        )
+        return with_question.with_columns(revision.alias("revision_id"))
+
+    @classmethod
+    def _poll_entity_tables(cls, polls: pl.DataFrame) -> dict[str, pl.DataFrame]:
+        """Materialize normalized survey, question, and immutable revision entities."""
+        provenance = [
+            column
+            for column in (
+                "source_id",
+                "source_hash",
+                "_source_class",
+                "_source_priority",
+                "_source_retrieved_at",
+                "parser_version",
+                "available_at",
+                "availability_basis",
+            )
+            if column in polls.columns
+        ]
+        surveys = cls._select_existing(
+            polls,
+            [
+                "survey_id",
+                "pollster",
+                "start_date",
+                "end_date",
+                "population",
+                "sample_size",
+                "sponsor_class",
+                "methodology",
+                *provenance,
+            ],
+        )
+        questions = cls._select_existing(
+            polls,
+            ["question_id", "survey_id", "race_id", "cycle", "office_type", *provenance],
+        )
+        revisions = cls._select_existing(
+            polls,
+            [
+                "revision_id",
+                "question_id",
+                "survey_id",
+                "published_at",
+                "available_at",
+                *provenance,
+            ],
+        )
+        return {
+            "poll_surveys": cls._entity_unique(surveys, ["survey_id"]),
+            "poll_questions": cls._entity_unique(questions, ["question_id", "race_id"]),
+            "poll_revisions": cls._entity_unique(revisions, ["revision_id"]),
+        }
+
+    @classmethod
+    def _entity_unique(cls, frame: pl.DataFrame, keys: list[str]) -> pl.DataFrame:
+        present = [key for key in keys if key in frame.columns]
+        return (
+            cls._rank_sources(frame)
+            .unique(subset=present, keep="first", maintain_order=True)
+            .drop(
+                "_source_class_rank",
+                "_source_class",
+                "_source_priority",
+                "_source_retrieved_at",
+                strict=False,
+            )
+            .sort(present)
+        )
+
+    @staticmethod
+    def _select_existing(frame: pl.DataFrame, columns: list[str]) -> pl.DataFrame:
+        return frame.select(
+            list(dict.fromkeys(column for column in columns if column in frame.columns))
+        )
 
     @staticmethod
     def _canonical_order(frame: pl.DataFrame) -> pl.DataFrame:
@@ -312,6 +517,250 @@ class CuratedDataBuilder:
         ]
         sort_columns = [column for column in priority if column in frame.columns]
         return frame.sort(sort_columns) if sort_columns else frame
+
+    def _normalize_medsl_house(
+        self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
+    ) -> pl.DataFrame:
+        base = self._medsl_house_base(frame, parser_version, parser_args)
+        if parser_version == "medsl-house-constituency-races-v1":
+            return (
+                base.select(
+                    "race_id",
+                    "cycle",
+                    "state",
+                    "district",
+                    "election_date",
+                    pl.lit("district").alias("geography_type"),
+                    pl.concat_str([pl.col("state"), pl.lit("-"), pl.col("district")]).alias(
+                        "geography"
+                    ),
+                    pl.lit("house").alias("office_type"),
+                    pl.lit("candidate").alias("race_type"),
+                    pl.lit("general").alias("stage"),
+                    pl.lit(1, dtype=pl.Int64).alias("seats"),
+                    pl.lit("house").alias("control_body"),
+                    pl.lit(None, dtype=pl.Float64).alias("measure_threshold"),
+                    pl.lit("Office of the Clerk, U.S. House").alias("result_authority"),
+                )
+                .unique(subset=["race_id"], maintain_order=True)
+                .sort(["cycle", "state", "district"])
+            )
+        if parser_version != "medsl-house-constituency-results-v1":
+            raise ValueError(f"Unsupported MEDSL House parser: {parser_version}")
+
+        candidates = (
+            base.with_columns(
+                pl.col("candidate")
+                .fill_null("WRITE-IN/OTHER")
+                .cast(pl.Utf8)
+                .str.strip_chars()
+                .str.to_uppercase()
+                .alias("_candidate_key"),
+                pl.when(pl.col("party").cast(pl.Utf8).str.to_lowercase().str.contains("democrat"))
+                .then(pl.lit(0))
+                .when(pl.col("party").cast(pl.Utf8).str.to_lowercase().str.contains("republican"))
+                .then(pl.lit(1))
+                .when(pl.col("party").cast(pl.Utf8).str.to_lowercase().str.contains("independent"))
+                .then(pl.lit(2))
+                .otherwise(pl.lit(3))
+                .alias("_party_rank"),
+            )
+            .group_by(["race_id", "_candidate_key"], maintain_order=True)
+            .agg(
+                pl.col("cycle").first(),
+                pl.col("state").first(),
+                pl.col("district").first(),
+                pl.col("election_date").first(),
+                pl.col("candidate").drop_nulls().first().fill_null("WRITE-IN/OTHER"),
+                pl.col("_party_rank").min(),
+                pl.col("writein").fill_null(False).any(),
+                pl.col("candidatevotes").sum().alias("vote_count"),
+                pl.col("totalvotes").max().alias("turnout"),
+                pl.col("version").max().cast(pl.Utf8).alias("result_version"),
+            )
+            .with_columns(
+                pl.when(pl.col("_party_rank") == 0)
+                .then(pl.lit("DEM"))
+                .when(pl.col("_party_rank") == 1)
+                .then(pl.lit("REP"))
+                .when(pl.col("_party_rank") == 2)
+                .then(pl.lit("IND"))
+                .otherwise(pl.lit("OTHER"))
+                .alias("party"),
+                pl.col("_candidate_key")
+                .str.replace_all(r"[^A-Z0-9]+", "-")
+                .str.strip_chars("-")
+                .fill_null("OTHER")
+                .alias("_candidate_slug"),
+            )
+            .with_columns(
+                pl.concat_str(
+                    [
+                        pl.col("race_id"),
+                        pl.lit("-"),
+                        pl.col("party"),
+                        pl.lit("-"),
+                        pl.col("_candidate_slug"),
+                    ]
+                ).alias("option_id"),
+                (pl.col("vote_count") / pl.col("turnout")).alias("vote_share"),
+                pl.col("vote_count").max().over("race_id").alias("_top_vote_count"),
+            )
+            .with_columns(
+                (pl.col("vote_count") == pl.col("_top_vote_count"))
+                .sum()
+                .over("race_id")
+                .alias("_top_count")
+            )
+            .with_columns(
+                (
+                    (pl.col("_top_count") == 1)
+                    & (pl.col("vote_count") == pl.col("_top_vote_count"))
+                ).alias("winner"),
+                pl.when(pl.col("_top_count") > 1)
+                .then(pl.lit("tie_unresolved"))
+                .when(pl.col("vote_count") == pl.col("_top_vote_count"))
+                .then(pl.lit("certified_winner"))
+                .otherwise(pl.lit("certified_nonwinner"))
+                .alias("winner_status"),
+            )
+        )
+        self._validate_medsl_results(candidates, parser_version)
+        return candidates.select(
+            "race_id",
+            "option_id",
+            "cycle",
+            "state",
+            "district",
+            "election_date",
+            "candidate",
+            "party",
+            "writein",
+            "vote_count",
+            "turnout",
+            "vote_share",
+            "winner",
+            "winner_status",
+            "result_version",
+            pl.lit(True).alias("official"),
+            pl.lit("Office of the Clerk, U.S. House").alias("result_authority"),
+        ).sort(["race_id", "option_id"])
+
+    @staticmethod
+    def _validate_medsl_results(frame: pl.DataFrame, parser_version: str) -> None:
+        summary = frame.group_by("race_id").agg(
+            pl.col("vote_share").sum().alias("vote_share_sum"),
+            pl.col("winner").sum().alias("winner_count"),
+            pl.col("_top_count").max().alias("top_count"),
+        )
+        invalid = summary.filter(
+            ((pl.col("vote_share_sum") - 1.0).abs() > 1e-6)
+            | ((pl.col("top_count") == 1) & (pl.col("winner_count") != 1))
+            | ((pl.col("top_count") > 1) & (pl.col("winner_count") != 0))
+        )
+        if not invalid.is_empty():
+            examples = invalid.select("race_id").head(5)["race_id"].to_list()
+            raise ValueError(
+                f"{parser_version} failed vote-share/winner reconciliation for races: {examples}"
+            )
+
+    def _medsl_house_base(
+        self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
+    ) -> pl.DataFrame:
+        required = {
+            "year",
+            "state_po",
+            "office",
+            "district",
+            "stage",
+            "candidate",
+            "party",
+            "writein",
+            "mode",
+            "candidatevotes",
+            "totalvotes",
+            "unofficial",
+            "version",
+        }
+        self._require_columns(frame, required, parser_version)
+        cycles = self._panel_cycles(parser_args, parser_version)
+        election_dates = {
+            cycle: self._federal_general_election_date(cycle).isoformat()
+            for cycle in frame["year"].cast(pl.Int64, strict=False).drop_nulls().unique().to_list()
+        }
+        base = frame.with_columns(
+            pl.col("year").cast(pl.Int64, strict=False).alias("cycle"),
+            pl.col("state_po").cast(pl.Utf8).str.strip_chars().str.to_uppercase().alias("state"),
+            pl.col("district").cast(pl.Int64, strict=False).alias("_district_number"),
+            pl.col("office").cast(pl.Utf8).str.strip_chars().str.to_lowercase().alias("_office"),
+            pl.col("stage").cast(pl.Utf8).str.strip_chars().str.to_lowercase().alias("_stage"),
+            pl.col("mode").cast(pl.Utf8).str.strip_chars().str.to_lowercase().alias("_mode"),
+            pl.when(
+                pl.col("candidate")
+                .cast(pl.Utf8)
+                .str.strip_chars()
+                .str.to_uppercase()
+                .is_in(["", "NA", "N/A", "NULL"])
+            )
+            .then(pl.lit(None, dtype=pl.Utf8))
+            .otherwise(pl.col("candidate").cast(pl.Utf8).str.strip_chars())
+            .alias("candidate"),
+            pl.when(
+                pl.col("party")
+                .cast(pl.Utf8)
+                .str.strip_chars()
+                .str.to_uppercase()
+                .is_in(["", "NA", "N/A", "NULL"])
+            )
+            .then(pl.lit(None, dtype=pl.Utf8))
+            .otherwise(pl.col("party").cast(pl.Utf8).str.strip_chars())
+            .alias("party"),
+            pl.col("unofficial").cast(pl.Boolean, strict=False).fill_null(False),
+            pl.col("writein").cast(pl.Boolean, strict=False).fill_null(False),
+            pl.col("candidatevotes").cast(pl.Float64, strict=False),
+            pl.col("totalvotes").cast(pl.Float64, strict=False),
+        ).filter(
+            (pl.col("_office") == "us house")
+            & pl.col("_stage").is_in(["gen", "general"])
+            & (pl.col("_mode") == "total")
+            & ~pl.col("unofficial")
+            & (pl.col("totalvotes") > 0)
+            & (pl.col("candidatevotes") >= 0)
+            & pl.col("state").is_in(list(US_STATE_ABBREVIATIONS.values()))
+            & pl.col("cycle").is_not_null()
+            & pl.col("_district_number").is_not_null()
+        )
+        if cycles:
+            base = base.filter(pl.col("cycle").is_in(cycles))
+        if base.is_empty():
+            raise ValueError(f"{parser_version} produced no eligible official House rows")
+        return base.with_columns(
+            pl.when(pl.col("_district_number") == 0)
+            .then(pl.lit("AL"))
+            .otherwise(pl.col("_district_number").cast(pl.Utf8).str.zfill(2))
+            .alias("district"),
+            pl.col("cycle")
+            .replace_strict(election_dates, return_dtype=pl.Utf8)
+            .str.strptime(pl.Date, strict=True)
+            .alias("election_date"),
+        ).with_columns(
+            pl.concat_str(
+                [
+                    pl.lit("US-HOUSE-"),
+                    pl.col("state"),
+                    pl.lit("-"),
+                    pl.col("district"),
+                    pl.lit("-"),
+                    pl.col("cycle").cast(pl.Utf8),
+                ]
+            ).alias("race_id")
+        )
+
+    @staticmethod
+    def _federal_general_election_date(cycle: int) -> date:
+        november_first = date(int(cycle), 11, 1)
+        first_monday = november_first + timedelta(days=(7 - november_first.weekday()) % 7)
+        return first_monday + timedelta(days=1)
 
     def _normalize_president_state_panel(
         self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
@@ -1307,6 +1756,17 @@ class CuratedDataBuilder:
                         pl.col("candidate_party"),
                     ]
                 ).alias("poll_id"),
+                pl.concat_str([pl.lit("538-survey-"), pl.col("poll_id").cast(pl.Utf8)]).alias(
+                    "survey_id"
+                ),
+                pl.concat_str(
+                    [
+                        pl.lit("538-question-"),
+                        pl.col("poll_id").cast(pl.Utf8),
+                        pl.lit("-"),
+                        pl.col("question_id").cast(pl.Utf8),
+                    ]
+                ).alias("question_id"),
                 pl.lit(race_id).alias("race_id"),
                 pl.col("pollster").fill_null("unknown").alias("pollster"),
                 "start_date",
@@ -1447,6 +1907,17 @@ class CuratedDataBuilder:
                         pl.col("candidate_party"),
                     ]
                 ).alias("poll_id"),
+                pl.concat_str([pl.lit("538-survey-"), pl.col("poll_id").cast(pl.Utf8)]).alias(
+                    "survey_id"
+                ),
+                pl.concat_str(
+                    [
+                        pl.lit("538-question-"),
+                        pl.col("poll_id").cast(pl.Utf8),
+                        pl.lit("-"),
+                        pl.col("question_id").cast(pl.Utf8).fill_null("q"),
+                    ]
+                ).alias("question_id"),
                 pl.lit(cycle).alias("cycle"),
                 pl.lit(office).alias("office_type"),
                 race_id.alias("race_id"),

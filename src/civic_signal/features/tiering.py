@@ -75,12 +75,24 @@ class TierAssessor:
         public_signals: pl.DataFrame,
     ) -> pl.DataFrame:
         frames = [races.select("race_id").unique()]
-        frames.append(
-            polls.group_by("race_id").agg(
-                pl.len().alias("poll_count"),
-                pl.col("pollster").n_unique().alias("pollster_count"),
-            )
+        poll_identity = next(
+            (
+                column
+                for column in ("question_id", "poll_id", "survey_id")
+                if column in polls.columns
+            ),
+            None,
         )
+        if poll_identity is None:
+            poll_rows = polls.with_row_index("_poll_identity")
+            poll_identity = "_poll_identity"
+        else:
+            poll_rows = polls
+        poll_counts = poll_rows.group_by("race_id").agg(
+            pl.col(poll_identity).n_unique().alias("poll_count"),
+            pl.col("pollster").n_unique().alias("pollster_count"),
+        )
+        frames.append(poll_counts)
         frames.append(markets.group_by("race_id").agg(pl.len().alias("market_count")))
         frames.append(fundamentals.group_by("race_id").agg(pl.len().alias("fundamental_count")))
         frames.append(public_signals.group_by("race_id").agg(pl.len().alias("public_signal_count")))
