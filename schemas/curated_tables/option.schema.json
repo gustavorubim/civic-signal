@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Canonical race option",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["race_id", "option_id", "name"],
+  "properties": {
+    "race_id": {"type": "string", "minLength": 1},
+    "option_id": {"type": "string", "minLength": 1},
+    "name": {"type": "string", "minLength": 1},
+    "party": {"type": ["string", "null"]}
+  }
+}

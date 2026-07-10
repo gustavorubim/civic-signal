@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Canonical poll question revision",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["revision_id", "question_id", "survey_id", "available_at", "source_id", "source_hash"],
+  "properties": {
+    "revision_id": {"type": "string", "minLength": 1},
+    "question_id": {"type": "string", "minLength": 1},
+    "survey_id": {"type": "string", "minLength": 1},
+    "published_at": {"type": ["string", "null"]},
+    "available_at": {"type": "string", "minLength": 1},
+    "source_id": {"type": "string", "minLength": 1},
+    "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

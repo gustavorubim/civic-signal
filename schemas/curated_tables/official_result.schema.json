@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Canonical official election result",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["race_id", "option_id", "vote_share", "winner", "source_id", "source_hash"],
+  "properties": {
+    "race_id": {"type": "string", "minLength": 1},
+    "option_id": {"type": "string", "minLength": 1},
+    "vote_share": {"type": "number", "minimum": 0, "maximum": 1},
+    "winner": {"type": "boolean"},
+    "winner_status": {
+      "enum": ["certified_winner", "certified_nonwinner", "tie_unresolved"]
+    },
+    "source_id": {"type": "string", "minLength": 1},
+    "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

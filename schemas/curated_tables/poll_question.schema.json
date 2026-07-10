@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Canonical poll question",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["question_id", "survey_id", "race_id", "source_id", "source_hash"],
+  "properties": {
+    "question_id": {"type": "string", "minLength": 1},
+    "survey_id": {"type": "string", "minLength": 1},
+    "race_id": {"type": "string", "minLength": 1},
+    "source_id": {"type": "string", "minLength": 1},
+    "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

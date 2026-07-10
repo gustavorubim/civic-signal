@@ -1,4 +1,7 @@
-extends: sources.yaml
+# Production candidate registry: every source is public HTTPS, keyless, and
+# explicitly classified as free_public_web. This registry intentionally excludes
+# all local fixture and generated sources.
+extends: sources_official_results.yaml
 sources:
   - id: fivethirtyeight_president_polls
     table: polls
@@ -66,7 +69,7 @@ sources:
       stage: general
       parties: [DEM, REP]
       house_race_id_format: compact
-  - id: fred_unrate_2026_fundamentals
+  - id: fred_unrate_fundamentals
     table: fundamentals
     type: http_csv
     path: fred_unrate.csv
@@ -79,32 +82,10 @@ sources:
     url: https://fred.stlouisfed.org/graph/fredgraph.csv?id=UNRATE
     parser_args:
       series_id: UNRATE
-      as_of: "2026-05-08"
-      lookback_observations: 120
-      economic_index_scale: 0.1
-      races:
-        - race_id: US-SEN-GA-2026
-          partisan_lean: 0.4
-          incumbency_advantage: 0.5
-          demographic_turnout_index: 0.2
-          historical_turnout_rate: 0.642
-          registered_voters: 5200000
-        - race_id: US-GOV-GA-2026
-          partisan_lean: -0.4
-          incumbency_advantage: -0.7
-          demographic_turnout_index: 0.2
-          historical_turnout_rate: 0.575
-          registered_voters: 7600000
-        - race_id: US-HOUSE-CA45-2026
-          partisan_lean: -1.6
-          incumbency_advantage: -1.0
-          demographic_turnout_index: 0.1
-          historical_turnout_rate: 0.584
-          registered_voters: 510000
-  - id: wikipedia_senate_2026_race_presence
+  - id: wikipedia_senate_race_presence
     table: public_signals
     type: http_text
-    path: wikipedia_2026_senate.wikitext
+    path: wikipedia_senate.wikitext
     parser_version: wikipedia-race-presence-signals-v1
     license: Wikipedia article text under CC BY-SA/GFDL; used only as opt-in race-presence metadata.
     auth_mode: public
@@ -114,17 +95,10 @@ sources:
     url: https://en.wikipedia.org/wiki/2026_United_States_Senate_elections?action=raw
     parser_args:
       cycle: 2026
-      observed_at: "2026-05-10T00:00:00Z"
-      races:
-        - race_id: US-SEN-GA-2026
-          office_type: senate
-          patterns:
-            - "2026 United States Senate election in Georgia"
-            - "^==\\s*Georgia\\s*=="
-  - id: wikipedia_governor_2026_race_presence
+  - id: wikipedia_governor_race_presence
     table: public_signals
     type: http_text
-    path: wikipedia_2026_governor.wikitext
+    path: wikipedia_governor.wikitext
     parser_version: wikipedia-race-presence-signals-v1
     license: Wikipedia article text under CC BY-SA/GFDL; used only as opt-in race-presence metadata.
     auth_mode: public
@@ -134,17 +108,10 @@ sources:
     url: https://en.wikipedia.org/wiki/2026_United_States_gubernatorial_elections?action=raw
     parser_args:
       cycle: 2026
-      observed_at: "2026-05-10T00:00:00Z"
-      races:
-        - race_id: US-GOV-GA-2026
-          office_type: governor
-          patterns:
-            - "2026 Georgia gubernatorial election"
-            - "^==\\s*Georgia\\s*=="
-  - id: wikipedia_house_2026_race_presence
+  - id: wikipedia_house_race_presence
     table: public_signals
     type: http_text
-    path: wikipedia_2026_house.wikitext
+    path: wikipedia_house.wikitext
     parser_version: wikipedia-race-presence-signals-v1
     license: Wikipedia article text under CC BY-SA/GFDL; used only as opt-in race-presence metadata.
     auth_mode: public
@@ -154,10 +121,3 @@ sources:
     url: https://en.wikipedia.org/wiki/2026_United_States_House_of_Representatives_elections?action=raw
     parser_args:
       cycle: 2026
-      observed_at: "2026-05-10T00:00:00Z"
-      races:
-        - race_id: US-HOUSE-CA45-2026
-          office_type: house
-          patterns:
-            - "\\{\\{ushr\\|CA\\|45\\|X\\}\\}"
-            - "2024 California's 45th congressional district election"

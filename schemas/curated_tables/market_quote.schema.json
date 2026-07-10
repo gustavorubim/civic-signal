@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Canonical market quote",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["market_id", "race_id", "option_id", "observed_at", "available_at", "probability", "source_id", "source_hash"],
+  "properties": {
+    "market_id": {"type": "string", "minLength": 1},
+    "race_id": {"type": "string", "minLength": 1},
+    "option_id": {"type": "string", "minLength": 1},
+    "observed_at": {"type": "string", "minLength": 1},
+    "available_at": {"type": "string", "minLength": 1},
+    "probability": {"type": "number", "minimum": 0, "maximum": 1},
+    "source_id": {"type": "string", "minLength": 1},
+    "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

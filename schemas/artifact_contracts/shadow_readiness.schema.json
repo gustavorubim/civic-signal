@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "shadow_readiness.schema.json",
+  "title": "Shadow readiness report",
+  "type": "object",
+  "required": [
+    "profile",
+    "window_start",
+    "window_end",
+    "passed",
+    "consecutive_days",
+    "min_consecutive_days",
+    "scheduled_runs",
+    "missing_runs",
+    "violations"
+  ],
+  "properties": {
+    "profile": {"type": "string"},
+    "window_start": {"type": "string"},
+    "window_end": {"type": "string"},
+    "passed": {"type": "boolean"},
+    "consecutive_days": {"type": "integer"},
+    "min_consecutive_days": {"type": "integer"},
+    "scheduled_runs": {"type": "integer"},
+    "missing_runs": {"type": "array", "items": {"type": "string"}},
+    "violations": {"type": "array", "items": {"type": "string"}},
+    "preregistration_present": {"type": "boolean"},
+    "scorecard_present": {"type": "boolean"}
+  }
+}

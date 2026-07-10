@@ -10,8 +10,10 @@
     "promoted_at",
     "reward_card_hash",
     "semantic_verification_hash",
+    "rewards_config_hash",
     "content_hashes",
-    "verified"
+    "verified",
+    "blocking_rewards"
   ],
   "properties": {
     "attempt_id": {"type": "string"},
@@ -21,10 +23,15 @@
       "enum": ["research", "shadow", "production", "fixture"]
     },
     "promoted_at": {"type": "string"},
-    "reward_card_hash": {"type": "string"},
-    "semantic_verification_hash": {"type": "string"},
-    "content_hashes": {"type": "object"},
-    "verified": {"type": "boolean"},
+    "reward_card_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "semantic_verification_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "rewards_config_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "content_hashes": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    },
+    "verified": {"const": true},
     "blocking_rewards": {
       "type": "array",
       "items": {"type": "string"}

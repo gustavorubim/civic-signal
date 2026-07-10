@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Canonical election race",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["race_id", "cycle", "election_date", "office_type", "stage"],
+  "properties": {
+    "race_id": {"type": "string", "minLength": 1},
+    "cycle": {"type": "integer", "minimum": 1788},
+    "election_date": {"type": "string", "format": "date"},
+    "office_type": {"type": "string", "minLength": 1},
+    "stage": {"type": "string", "minLength": 1}
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Canonical fundamental snapshot",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["race_id", "as_of", "available_at", "source_id", "source_hash"],
+  "properties": {
+    "race_id": {"type": "string", "minLength": 1},
+    "as_of": {"type": "string", "format": "date"},
+    "observed_at": {"type": "string", "minLength": 1},
+    "published_at": {"type": "string", "minLength": 1},
+    "available_at": {"type": "string", "minLength": 1},
+    "revision_id": {"type": "string", "minLength": 1},
+    "feature_id": {"type": ["string", "null"]},
+    "series_id": {"type": ["string", "null"]},
+    "rating_id": {"type": ["string", "null"]},
+    "finance_id": {"type": ["string", "null"]},
+    "feature_type": {"enum": ["macro", "finance", "fundraising", "rating", "ratings", null]},
+    "option_id": {"type": ["string", "null"]},
+    "source_id": {"type": "string", "minLength": 1},
+    "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

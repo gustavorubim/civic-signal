@@ -1,0 +1,37 @@
+# Standalone production registry for the implemented official historical House path.
+# No fixture/generated source is inherited or permitted here.
+sources:
+  - id: medsl_clerk_house_races_1976_2018
+    table: races
+    type: http_csv
+    path: medsl_clerk_house_1976_2018.csv
+    parser_version: medsl-house-constituency-races-v1
+    license: Underlying constituency returns are U.S. House Office of the Clerk federal public records. MEDSL requests dataset citation and provides no explicit data-license file; retain citation/provenance and do not redistribute raw snapshots from this project.
+    terms_url: https://github.com/MEDSL/constituency-returns#readme
+    citation: MIT Election Data and Science Lab, Constituency-Level Election Returns, 1976-2018; source Office of the Clerk, U.S. House of Representatives.
+    auth_mode: public
+    source_class: official_public
+    access_policy: free_public_web
+    terms_status: reviewed_for_use
+    priority: 400
+    url: https://raw.githubusercontent.com/MEDSL/constituency-returns/fe67c056502fc09ddb1ace2ff8f87c53233a744e/1976-2018-house.csv
+    parser_args:
+      cycles: [1976, 1978, 1980, 1982, 1984, 1986, 1988, 1990, 1992, 1994, 1996, 1998, 2000, 2002, 2004, 2006, 2008, 2010, 2012, 2014, 2016, 2018]
+      required_columns: [year, state_po, office, district, stage, candidate, party, writein, mode, candidatevotes, totalvotes, unofficial, version]
+  - id: medsl_clerk_house_results_1976_2018
+    table: results
+    type: http_csv
+    path: medsl_clerk_house_1976_2018.csv
+    parser_version: medsl-house-constituency-results-v1
+    license: Underlying constituency returns are U.S. House Office of the Clerk federal public records. MEDSL requests dataset citation and provides no explicit data-license file; retain citation/provenance and do not redistribute raw snapshots from this project.
+    terms_url: https://github.com/MEDSL/constituency-returns#readme
+    citation: MIT Election Data and Science Lab, Constituency-Level Election Returns, 1976-2018; source Office of the Clerk, U.S. House of Representatives.
+    auth_mode: public
+    source_class: official_public
+    access_policy: free_public_web
+    terms_status: reviewed_for_use
+    priority: 400
+    url: https://raw.githubusercontent.com/MEDSL/constituency-returns/fe67c056502fc09ddb1ace2ff8f87c53233a744e/1976-2018-house.csv
+    parser_args:
+      cycles: [1976, 1978, 1980, 1982, 1984, 1986, 1988, 1990, 1992, 1994, 1996, 1998, 2000, 2002, 2004, 2006, 2008, 2010, 2012, 2014, 2016, 2018]
+      required_columns: [year, state_po, office, district, stage, candidate, party, writein, mode, candidatevotes, totalvotes, unofficial, version]

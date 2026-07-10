@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Canonical poll survey",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["survey_id", "pollster", "start_date", "end_date", "source_id", "source_hash"],
+  "properties": {
+    "survey_id": {"type": "string", "minLength": 1},
+    "pollster": {"type": "string", "minLength": 1},
+    "start_date": {"type": "string", "format": "date"},
+    "end_date": {"type": "string", "format": "date"},
+    "population": {"type": ["string", "null"]},
+    "sample_size": {"type": ["number", "null"], "minimum": 0},
+    "source_id": {"type": "string", "minLength": 1},
+    "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

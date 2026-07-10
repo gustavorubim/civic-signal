@@ -1,12 +1,19 @@
 {
   "type": "object",
-  "required": ["source_id", "url", "retrieved_at", "content_hash", "status"],
+  "required": ["source_id", "url", "retrieved_at", "content_hash", "source_class", "source_priority", "status"],
   "properties": {
     "source_id": {"type": "string"},
     "url": {"type": "string"},
     "retrieved_at": {"type": "string"},
     "content_hash": {"type": "string"},
-    "status": {"type": "string"}
+    "source_class": {"type": "string"},
+    "source_priority": {"type": "integer"},
+    "status": {
+      "type": "string",
+      "enum": ["fetched", "unchanged", "stale_reused", "empty", "rate_limited", "schema_change", "failed"]
+    },
+    "refresh_status": {"type": "string"},
+    "terms_url": {"type": "string"},
+    "citation": {"type": "string"}
   }
 }
-

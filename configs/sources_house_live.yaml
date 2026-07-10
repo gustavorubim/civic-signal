@@ -13,6 +13,9 @@ sources:
     parser_version: fivethirtyeight-general-polls-v1
     license: Public FiveThirtyEight/Datasette polling table; record terms before redistribution.
     auth_mode: public
+    source_class: production_web
+    access_policy: free_public_web
+    terms_status: reviewed_for_use
     url: https://fivethirtyeight.datasettes.com/polls/house_polls.csv?cycle=2026&_stream=on
     parser_args:
       cycle: 2026
@@ -27,6 +30,9 @@ sources:
     parser_version: wikipedia-race-presence-signals-v1
     license: Wikipedia article text under CC BY-SA/GFDL; used only as opt-in race-presence metadata.
     auth_mode: public
+    source_class: production_web
+    access_policy: free_public_web
+    terms_status: reviewed_for_use
     url: https://en.wikipedia.org/wiki/2026_United_States_House_of_Representatives_elections?action=raw
     parser_args:
       cycle: 2026

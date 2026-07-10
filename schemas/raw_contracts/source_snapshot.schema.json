@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Canonical source snapshot",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "source_id", "table", "url", "raw_path", "retrieved_at", "original_snapshot_at",
+    "checked_at", "content_hash", "parser_version", "license", "auth_mode",
+    "access_policy", "terms_status", "source_class", "source_priority", "status"
+  ],
+  "properties": {
+    "source_id": {"type": "string", "minLength": 1},
+    "table": {"type": "string", "minLength": 1},
+    "url": {"type": "string", "minLength": 1},
+    "raw_path": {"type": "string", "minLength": 1},
+    "retrieved_at": {"type": "string", "format": "date-time"},
+    "original_snapshot_at": {"type": "string", "format": "date-time"},
+    "checked_at": {"type": "string", "format": "date-time"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "parser_version": {"type": "string", "minLength": 1},
+    "license": {"type": "string", "minLength": 1},
+    "terms_url": {"type": "string"},
+    "citation": {"type": "string"},
+    "auth_mode": {"type": "string", "minLength": 1},
+    "access_policy": {"type": "string", "minLength": 1},
+    "terms_status": {"type": "string", "minLength": 1},
+    "source_class": {"enum": ["official_public", "production_web", "production", "fixture", "synthetic", "unknown"]},
+    "source_priority": {"type": "integer"},
+    "status": {"enum": ["fetched", "unchanged", "stale_reused", "empty", "rate_limited", "schema_change", "failed"]},
+    "refresh_status": {"type": "string"}
+  }
+}
