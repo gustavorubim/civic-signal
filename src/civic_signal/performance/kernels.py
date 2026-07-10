@@ -22,7 +22,7 @@ except Exception:  # pragma: no cover - fallback for unsupported platforms
 
 
 @njit(cache=True, parallel=True)
-def binary_draw_kernel(
+def binary_draw_kernel(  # pragma: no cover - executed inside compiled Numba code
     first_shares: np.ndarray,
     turnout_bases: np.ndarray,
     national_errors: np.ndarray,

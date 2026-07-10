@@ -23,10 +23,11 @@ class EnsembleModel:
         }
 
     def run(self, bundle: FeatureBundle, component_estimates: list[pl.DataFrame]) -> pl.DataFrame:
-        estimates = pl.concat(
-            [df for df in component_estimates if not df.is_empty()], how="diagonal"
-        )
+        nonempty = [df for df in component_estimates if not df.is_empty()]
         rows: list[dict[str, object]] = []
+        if not nonempty:
+            return normalize_rows(rows)
+        estimates = pl.concat(nonempty, how="diagonal")
         if estimates.is_empty():
             return normalize_rows(rows)
         catalog = {row["race_id"]: row for row in bundle.race_catalog.iter_rows(named=True)}

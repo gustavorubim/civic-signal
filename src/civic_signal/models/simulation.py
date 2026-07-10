@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -81,6 +82,17 @@ class SimulationEngine:
         self.requested_engine = requested_engine
         self._posterior_draws_used = False
         self._posterior_draw_uncertainty_mode = "not_used"
+        self._posterior_center_mode = "not_used"
+        self._max_mcse: float | None = None
+        self._mcse_target = float(performance.get("max_mcse", 0.0025))
+        self._adaptive_mcse = bool(performance.get("adaptive_mcse", True))
+        self._simulation_batch_size = max(int(performance.get("simulation_batch_size", 5000)), 1)
+        self._simulation_max_draws = max(
+            int(performance.get("simulation_max_draws", 100000)), self.draw_count
+        )
+        self._initial_draw_count = self.draw_count
+        self._adaptive_status = "not_run"
+        self._adaptive_attempts: list[int] = []
 
     def run(
         self,
@@ -88,10 +100,34 @@ class SimulationEngine:
         ensemble: pl.DataFrame,
         posterior_draws: pl.DataFrame | None = None,
     ) -> SimulationOutputs:
-        draws = self._draws(bundle, ensemble, posterior_draws=posterior_draws)
-        forecasts = self._race_forecasts(bundle, draws, ensemble)
-        control = self._control_forecasts(bundle, draws)
-        ecosystem = self._ecosystem_forecasts(bundle, draws)
+        while True:
+            self._adaptive_attempts.append(self.draw_count)
+            draws = self._draws(bundle, ensemble, posterior_draws=posterior_draws)
+            forecasts = self._race_forecasts(bundle, draws, ensemble)
+            control = self._control_forecasts(bundle, draws)
+            ecosystem = self._ecosystem_forecasts(bundle, draws)
+            self._max_mcse = self._maximum_probability_mcse(forecasts, control)
+            if self._max_mcse is None:
+                self._adaptive_status = "no_reported_probabilities"
+                break
+            if self._max_mcse <= self._mcse_target:
+                self._adaptive_status = (
+                    "target_met_initial" if len(self._adaptive_attempts) == 1 else "target_met"
+                )
+                break
+            if not self._adaptive_mcse:
+                self._adaptive_status = "disabled_target_not_met"
+                break
+            required = self._required_draw_count(forecasts, control)
+            next_count = max(
+                self.draw_count + self._simulation_batch_size,
+                self._round_up(required, self._simulation_batch_size),
+            )
+            next_count = min(next_count, self._simulation_max_draws)
+            if next_count <= self.draw_count:
+                self._adaptive_status = "cap_reached_target_not_met"
+                break
+            self.draw_count = next_count
         return SimulationOutputs(draws, forecasts, control, ecosystem, self.performance_metadata())
 
     def performance_metadata(self) -> dict[str, object]:
@@ -102,14 +138,73 @@ class SimulationEngine:
             "numba_available": NUMBA_AVAILABLE,
             "numba_threads": self.numba_threads,
             "simulation_count": self.draw_count,
+            "max_mcse": self._max_mcse,
+            "mcse_target": self._mcse_target,
+            "mcse_target_met": self._max_mcse is not None and self._max_mcse <= self._mcse_target,
+            "adaptive_mcse": self._adaptive_mcse,
+            "adaptive_status": self._adaptive_status,
+            "initial_simulation_count": self._initial_draw_count,
+            "simulation_batch_size": self._simulation_batch_size,
+            "simulation_max_draws": self._simulation_max_draws,
+            "adaptive_attempts": self._adaptive_attempts,
             "systematic_error_mode": self._systematic_error_mode(),
             "posterior_draws_used": self._posterior_draws_used,
             "posterior_draw_uncertainty_mode": self._posterior_draw_uncertainty_mode,
+            "posterior_center_mode": self._posterior_center_mode,
             "probability_calibration_status": str(
                 self.probability_calibration.get("status", "not_configured")
             ),
             "close_margin_ecosystem_included": self.include_close_margin_ecosystem,
         }
+
+    def _maximum_probability_mcse(
+        self,
+        forecasts: pl.DataFrame,
+        control: pl.DataFrame,
+    ) -> float | None:
+        probabilities: list[float] = []
+        for frame, columns in (
+            (forecasts, ("raw_winner_probability",)),
+            (control, ("majority_probability", "control_probability")),
+        ):
+            for column in columns:
+                if column not in frame.columns:
+                    continue
+                probabilities.extend(
+                    float(value)
+                    for value in frame[column].drop_nulls().to_list()
+                    if np.isfinite(value) and 0.0 <= float(value) <= 1.0
+                )
+        if not probabilities or self.draw_count <= 0:
+            return None
+        return float(
+            max(
+                np.sqrt(probability * (1.0 - probability) / self.draw_count)
+                for probability in probabilities
+            )
+        )
+
+    def _required_draw_count(self, forecasts: pl.DataFrame, control: pl.DataFrame) -> int:
+        probabilities: list[float] = []
+        for frame, columns in (
+            (forecasts, ("raw_winner_probability",)),
+            (control, ("majority_probability", "control_probability")),
+        ):
+            for column in columns:
+                if column in frame.columns:
+                    probabilities.extend(
+                        float(value)
+                        for value in frame[column].drop_nulls().to_list()
+                        if np.isfinite(value) and 0.0 <= float(value) <= 1.0
+                    )
+        if not probabilities or self._mcse_target <= 0.0:
+            return self._simulation_max_draws
+        max_variance = max(probability * (1.0 - probability) for probability in probabilities)
+        return max(int(np.ceil(max_variance / self._mcse_target**2)), self.draw_count)
+
+    @staticmethod
+    def _round_up(value: int, batch_size: int) -> int:
+        return ((value + batch_size - 1) // batch_size) * batch_size
 
     def _draws(
         self,
@@ -205,9 +300,11 @@ class SimulationEngine:
             frames.append(posterior_frame)
             self._posterior_draws_used = True
             self._posterior_draw_uncertainty_mode = "posterior_plus_simulation_error"
+            self._posterior_center_mode = "ensemble_centered_log_ratio_shift"
         else:
             self._posterior_draws_used = False
             self._posterior_draw_uncertainty_mode = "not_used"
+            self._posterior_center_mode = "not_used"
         binary_frame = self._binary_draw_frame(binary_specs, national_error, turnout_multipliers)
         if not binary_frame.is_empty():
             frames.append(binary_frame)
@@ -241,11 +338,14 @@ class SimulationEngine:
         available_draw_ids = sorted(
             int(value) for value in posterior_draws["draw_id"].unique().to_list()
         )
-        if len(available_draw_ids) < self.draw_count:
+        if not available_draw_ids:
             return pl.DataFrame()
+        selected_draw_ids = [
+            available_draw_ids[index % len(available_draw_ids)] for index in range(self.draw_count)
+        ]
         draw_id_map = pl.DataFrame(
             {
-                "draw_id": available_draw_ids[: self.draw_count],
+                "draw_id": selected_draw_ids,
                 "simulation_draw_id": list(range(self.draw_count)),
             }
         )
@@ -267,12 +367,6 @@ class SimulationEngine:
             return pl.DataFrame()
         frame = frame.with_columns(
             pl.max_horizontal(pl.col("latent_share"), pl.lit(1e-6)).alias("latent_share")
-        )
-        frame = frame.with_columns(
-            (
-                pl.col("latent_share")
-                / pl.col("latent_share").sum().over(["simulation_draw_id", "race_id"])
-            ).alias("latent_share")
         )
         rows: list[dict[str, object]] = []
         zeros = np.zeros(self.draw_count)
@@ -305,6 +399,11 @@ class SimulationEngine:
             )
             row_sums = np.clip(base_shares.sum(axis=1), 1e-9, None)
             base_shares = base_shares / row_sums[:, None]
+            base_shares = self._align_posterior_to_ensemble(
+                base_shares,
+                race_options,
+                estimate_rows,
+            )
             first = estimate_rows.row(0, named=True)
             sigma = self._race_sigma(catalog[race_id], first)
             local_noise = (
@@ -349,6 +448,45 @@ class SimulationEngine:
                         }
                     )
         return pl.DataFrame(rows) if rows else pl.DataFrame()
+
+    @staticmethod
+    def _align_posterior_to_ensemble(
+        posterior_shares: np.ndarray,
+        race_options: list[dict[str, object]],
+        estimate_rows: pl.DataFrame,
+    ) -> np.ndarray:
+        """Preserve posterior variation while making the admitted ensemble the center."""
+        if posterior_shares.ndim != 2 or posterior_shares.shape[1] <= 1:
+            return posterior_shares
+        targets = {
+            str(row["option_id"]): float(row["vote_share"])
+            for row in estimate_rows.iter_rows(named=True)
+            if row.get("option_id") is not None and row.get("vote_share") is not None
+        }
+        target = np.array(
+            [targets.get(str(option["option_id"]), np.nan) for option in race_options],
+            dtype=np.float64,
+        )
+        if not np.isfinite(target).all() or float(target.sum()) <= 0.0:
+            return posterior_shares
+        epsilon = 1e-6
+        target = np.clip(target, epsilon, None)
+        target /= target.sum()
+        shares = np.clip(posterior_shares.astype(np.float64, copy=True), epsilon, None)
+        shares /= shares.sum(axis=1, keepdims=True)
+        # Use the final option as the logistic-normal reference. Center each
+        # posterior log-ratio deviation on the admitted ensemble log-ratio.
+        posterior_log_ratios = np.log(shares[:, :-1] / shares[:, [-1]])
+        target_log_ratios = np.log(target[:-1] / target[-1])
+        shifted = (
+            posterior_log_ratios
+            - posterior_log_ratios.mean(axis=0, keepdims=True)
+            + target_log_ratios[None, :]
+        )
+        logits = np.column_stack([shifted, np.zeros(shifted.shape[0])])
+        logits -= logits.max(axis=1, keepdims=True)
+        probabilities = np.exp(logits)
+        return probabilities / probabilities.sum(axis=1, keepdims=True)
 
     def _race_sigma(self, race: dict[str, object], estimate: dict[str, object]) -> float:
         tier_floor = self.tier_sigma.get(str(race["tier"]), 0.08)
@@ -523,24 +661,38 @@ class SimulationEngine:
         groups = sorted({self._covariance_group_for_race(row) for row in active.values()})
         regions = sorted({self._region_for_race(row) for row in active.values()})
         offices = sorted({str(row.get("office_type")) for row in active.values()})
-        covariance_lookup = {
-            (str(row["row_group"]), str(row["column_group"])): float(row["covariance"])
-            for row in self.residual_covariance.iter_rows(named=True)
-        }
         fallback_variance = max(self.region_sigma**2, 0.0004)
-        matrix = np.zeros((len(groups), len(groups)), dtype=np.float64)
-        for row_index, row_group in enumerate(groups):
-            for column_index, column_group in enumerate(groups):
-                matrix[row_index, column_index] = covariance_lookup.get(
-                    (row_group, column_group),
-                    fallback_variance if row_index == column_index else 0.0,
-                )
-        matrix = (matrix + matrix.T) / 2.0
-        matrix += np.eye(len(groups)) * 1e-8
-        group_draws = rng.multivariate_normal(
-            mean=np.zeros(len(groups)), cov=matrix, size=self.draw_count
-        ).T
-        group_errors = {group: group_draws[index] for index, group in enumerate(groups)}
+        representation_columns = {
+            "factor_loadings_json",
+            "factor_variances_json",
+            "idiosyncratic_variance",
+            "representation",
+        }
+        if (
+            representation_columns.issubset(self.residual_covariance.columns)
+            and (self.residual_covariance["representation"] == "B_diag_v_Bt_plus_diag_d").any()
+        ):
+            group_errors = self._low_rank_covariance_errors(
+                groups, rng, fallback_variance=fallback_variance
+            )
+        else:
+            covariance_lookup = {
+                (str(row["row_group"]), str(row["column_group"])): float(row["covariance"])
+                for row in self.residual_covariance.iter_rows(named=True)
+            }
+            matrix = np.zeros((len(groups), len(groups)), dtype=np.float64)
+            for row_index, row_group in enumerate(groups):
+                for column_index, column_group in enumerate(groups):
+                    matrix[row_index, column_index] = covariance_lookup.get(
+                        (row_group, column_group),
+                        fallback_variance if row_index == column_index else 0.0,
+                    )
+            matrix = (matrix + matrix.T) / 2.0
+            matrix += np.eye(len(groups)) * 1e-8
+            group_draws = rng.multivariate_normal(
+                mean=np.zeros(len(groups)), cov=matrix, size=self.draw_count
+            ).T
+            group_errors = {group: group_draws[index] for index, group in enumerate(groups)}
         if self.residual_covariance_mode == "residual_covariance_only":
             return {
                 race_id: group_errors[self._covariance_group_for_race(row)]
@@ -558,6 +710,44 @@ class SimulationEngine:
             + office_errors[str(row.get("office_type"))]
             for race_id, row in active.items()
         }
+
+    def _low_rank_covariance_errors(
+        self,
+        groups: list[str],
+        rng: np.random.Generator,
+        *,
+        fallback_variance: float,
+    ) -> dict[str, np.ndarray]:
+        """Draw exactly from the persisted B diag(v) B' + diagonal representation."""
+        rows = list(self.residual_covariance.iter_rows(named=True))
+        factor_variances = {
+            str(key): max(float(value), 0.0)
+            for key, value in json.loads(str(rows[0]["factor_variances_json"])).items()
+        }
+        factor_draws = {
+            factor: rng.normal(0.0, math.sqrt(variance), self.draw_count)
+            for factor, variance in sorted(factor_variances.items())
+        }
+        group_metadata: dict[str, tuple[dict[str, float], float]] = {}
+        for row in rows:
+            group = str(row["row_group"])
+            if group in group_metadata:
+                continue
+            loadings = {
+                str(key): float(value)
+                for key, value in json.loads(str(row["factor_loadings_json"])).items()
+            }
+            diagonal = max(float(row["idiosyncratic_variance"]), 0.0)
+            group_metadata[group] = (loadings, diagonal)
+        errors: dict[str, np.ndarray] = {}
+        for group in groups:
+            loadings, diagonal = group_metadata.get(group, ({}, fallback_variance))
+            value = rng.normal(0.0, math.sqrt(diagonal), self.draw_count)
+            for factor, loading in sorted(loadings.items()):
+                if factor in factor_draws:
+                    value = value + loading * factor_draws[factor]
+            errors[group] = value
+        return errors
 
     def _region_for_race(self, race: dict[str, object]) -> str:
         geography = str(race.get("geography") or "")
@@ -668,17 +858,42 @@ class SimulationEngine:
             drivers = drivers.rename(
                 {"explanation": "top_drivers", "uncertainty": "model_uncertainty"}
             )
+        catalog_columns = ["race_id", "tier", "tier_reason"]
+        catalog_columns.extend(
+            column
+            for column in (
+                "original_tier",
+                "estimand_support_status",
+                "estimand_support_blocked",
+            )
+            if column in catalog.columns
+        )
         if draws.is_empty():
-            base = options.join(
-                catalog.select(["race_id", "tier", "tier_reason"]), on="race_id", how="left"
-            )
-            empty = base.select(
-                "race_id",
-                "option_id",
-                "tier",
-                "tier_reason",
-                pl.lit(None, dtype=pl.Float64).alias("winner_probability"),
-            )
+            base = options.join(catalog.select(catalog_columns), on="race_id", how="left")
+            empty = base.with_columns(pl.lit(None, dtype=pl.Float64).alias("winner_probability"))
+            if "estimand_support_blocked" in empty.columns:
+                empty = empty.with_columns(
+                    pl.when(pl.col("estimand_support_blocked").fill_null(False))
+                    .then(
+                        pl.concat_str(
+                            [
+                                pl.lit("estimand_withheld:"),
+                                pl.col("estimand_support_status"),
+                            ]
+                        )
+                    )
+                    .when(pl.col("tier") == "C")
+                    .then(pl.lit("probability_withheld"))
+                    .otherwise(pl.lit("trusted_probability"))
+                    .alias("data_quality_flags")
+                )
+            else:
+                empty = empty.with_columns(
+                    pl.when(pl.col("tier") == "C")
+                    .then(pl.lit("probability_withheld"))
+                    .otherwise(pl.lit("trusted_probability"))
+                    .alias("data_quality_flags")
+                )
             return self._apply_probability_calibration(
                 self._attach_forecast_explainability(empty, drivers)
             )
@@ -695,19 +910,35 @@ class SimulationEngine:
             pl.col("vote_share").quantile(0.025).alias("vote_share_p025"),
             pl.col("vote_share").quantile(0.975).alias("vote_share_p975"),
         )
-        base = options.join(
-            catalog.select(["race_id", "tier", "tier_reason"]), on="race_id", how="left"
-        )
+        base = options.join(catalog.select(catalog_columns), on="race_id", how="left")
         joined = base.join(intervals, on=["race_id", "option_id"], how="left")
+        if "estimand_support_blocked" in joined.columns:
+            quality_flag = (
+                pl.when(pl.col("estimand_support_blocked").fill_null(False))
+                .then(
+                    pl.concat_str(
+                        [
+                            pl.lit("estimand_withheld:"),
+                            pl.col("estimand_support_status"),
+                        ]
+                    )
+                )
+                .when(pl.col("tier") == "C")
+                .then(pl.lit("probability_withheld"))
+                .otherwise(pl.lit("trusted_probability"))
+            )
+        else:
+            quality_flag = (
+                pl.when(pl.col("tier") == "C")
+                .then(pl.lit("probability_withheld"))
+                .otherwise(pl.lit("trusted_probability"))
+            )
         forecast = joined.with_columns(
             pl.when(pl.col("tier") == "C")
             .then(None)
             .otherwise(pl.col("winner_probability"))
             .alias("winner_probability"),
-            pl.when(pl.col("tier") == "C")
-            .then(pl.lit("probability_withheld"))
-            .otherwise(pl.lit("trusted_probability"))
-            .alias("data_quality_flags"),
+            quality_flag.alias("data_quality_flags"),
         )
         return self._apply_probability_calibration(
             self._attach_forecast_explainability(forecast, drivers)

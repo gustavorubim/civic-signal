@@ -4,6 +4,10 @@ simulation_count: 1000
 performance:
   engine: numba
   parallel: true
+  max_mcse: 0.0025
+  adaptive_mcse: true
+  simulation_batch_size: 5000
+  simulation_max_draws: 100000
   numba_threads: 0
   benchmark_draws: 10000
   benchmark_repeats: 3
@@ -51,9 +55,7 @@ bayesian:
     wall_clock_timeout_seconds: 2820
     failover:
       fallback_order:
-        - previous_posterior_reuse
-        - bayes_svi_fallback
-        - kalman_legacy_fallback
+        - analytic_logit_normal_fallback
       block_publication_on_fallback: true
   state_space:
     parameterization: noncentered
@@ -63,9 +65,34 @@ bayesian:
     poll_half_life_days: 7
     geography_effect_sd: 0.06
     race_effect_sd: 0.08
+    unpolled_pooling_prior_races: 3.0
   observation:
     nonsampling_logit_floor: 0.02
     pollster_effect_sd: 0.04
+    undecided_other_treatment: proportional_two_party_renormalization
+    undecided_nonsampling_multiplier: 0.20
+    mode_bias_share:
+      live_phone: 0.0
+      mixed: 0.0
+      online: 0.0
+      ivr: 0.0
+      text: 0.0
+    sponsor_bias_share:
+      nonpartisan: 0.0
+      partisan: 0.0
+      internal: 0.0
+    mode_nonsampling_sd:
+      live_phone: 0.010
+      mixed: 0.012
+      online: 0.015
+      ivr: 0.018
+      text: 0.018
+    sponsor_nonsampling_sd:
+      nonpartisan: 0.0
+      partisan: 0.015
+      internal: 0.020
+    shared_question_overlap: one_contrast_or_precision_split
+    multi_option_likelihood: withheld_no_coherent_k_category_likelihood
   fundamentals_prior:
     prior_strength: 0.5
     structural_sd: 0.05
@@ -84,6 +111,11 @@ bayesian:
     office_offset_prior_sd: 0.02
 daily_update:
   strategy: reweighting
+  resampling_method: systematic
+  minimum_ess_ratio: 0.50
+  poll_nonsampling_sd: 0.03
+  binary_likelihood: one_reference_contrast_per_question
+  multi_option_likelihood: k_minus_one_diagonal_share_approximation
   full_refit_days_since_anchor: 7
   posterior_drift_threshold: 0.05
   block_publication_on_quality_failure: true
@@ -155,6 +187,8 @@ correlation:
   national_error_floor_sd: 0.02
   region_sigma: 0.010
   office_sigma: 0.008
+  # Rank of the explicit national + regional factor block in B diag(v) B' + D.
+  residual_factor_rank: 5
   residual_covariance_shrinkage: 0.60
   residual_min_variance: 0.0004
   residual_same_region_correlation: 0.35

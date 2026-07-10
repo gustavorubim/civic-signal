@@ -184,12 +184,19 @@ def build_state_space_data(
         share_sd = math.sqrt(max(share * (1.0 - share) / effective_sample_size, 1e-6))
         obs_sd_logit = share_sd / max(share * (1.0 - share), 1e-6)
         process_sd_logit = max(float(process_drift_sd_per_sqrt_day), 0.0) * math.sqrt(age_days)
+        nonsampling_share_sd = float(row.get("_likelihood_nonsampling_sd") or 0.02)
+        nonsampling_logit_sd = nonsampling_share_sd / max(share * (1.0 - share), 1e-6)
         poll_t.append(int((poll_date - min_date).days))
         poll_s.append(key_index[key])
         poll_j.append(pollster_index[pollster])
         poll_o.append(0)
         y.append(logit(share))
-        kappa.append(max(math.sqrt(obs_sd_logit**2 + process_sd_logit**2), 0.02))
+        kappa.append(
+            max(
+                math.sqrt(obs_sd_logit**2 + process_sd_logit**2 + nonsampling_logit_sd**2),
+                0.02,
+            )
+        )
         observation_weights.append(observation_weight)
         house_effect_values.append(float(house_effect))
         poll_rows.append(
@@ -203,11 +210,9 @@ def build_state_space_data(
                 "quality_weight": quality_weight,
                 "pair_key": (
                     str(row["race_id"]),
-                    pollster,
-                    str(row.get("start_date") or ""),
-                    str(row.get("end_date") or ""),
-                    float(row.get("sample_size") or 0.0),
+                    str(row.get("_likelihood_question_id") or row.get("poll_id") or ""),
                 ),
+                "nonsampling_share_sd": nonsampling_share_sd,
             }
         )
 
@@ -433,7 +438,16 @@ def _build_margin_structures(
         margin_poll_week.append(week)
         margin_poll_j.append(pollster_index.get(ref_row["pollster"], 0))
         margin_poll_y.append(logit(two_party))
-        margin_poll_kappa.append(math.sqrt(obs_sd_logit**2 + nonsampling_logit_floor**2))
+        unallocated_floor = max(
+            float(ref_row.get("nonsampling_share_sd") or 0.0),
+            float(other_row.get("nonsampling_share_sd") or 0.0),
+        ) / max(two_party * (1.0 - two_party), 1e-6)
+        # `_likelihood_nonsampling_sd` already contains the configured base,
+        # mode, sponsor, and undecided/other terms.  Keep the legacy logit
+        # floor as a lower bound instead of adding that base uncertainty a
+        # second time.
+        explicit_floor = max(nonsampling_logit_floor, unallocated_floor)
+        margin_poll_kappa.append(math.sqrt(obs_sd_logit**2 + explicit_floor**2))
         consumed_rows.add(ref_row["row_index"])
         consumed_rows.add(other_row["row_index"])
 

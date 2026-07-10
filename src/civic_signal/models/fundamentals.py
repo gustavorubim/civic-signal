@@ -21,6 +21,7 @@ class FundamentalsModel:
         "demographic_turnout_index": 1.0 / 80.0,
         "incumbent": 0.01,
         "fundraising_usd": 1.0 / 1_000_000_000,
+        "rating_score": 1.0 / 100.0,
         # Mean-reversion on the previous result: the effective coefficient on
         # (previous - 0.5) is 1 + this value, so 0.0 falls back to persistence
         # and a fitted negative value shrinks landslides toward the mean.
@@ -52,7 +53,7 @@ class FundamentalsModel:
         if self.fit_status == "handpicked_default" and self.training_rows == 0:
             self._fit(bundle)
         rows: list[dict[str, object]] = []
-        fundamentals = {row["race_id"]: row for row in bundle.fundamentals.iter_rows(named=True)}
+        fundamentals = self._fundamentals_by_race(bundle.fundamentals)
         for race_id, group in bundle.options.group_by("race_id", maintain_order=True):
             race_key = race_id[0] if isinstance(race_id, tuple) else race_id
             fundamental = fundamentals.get(str(race_key))
@@ -99,7 +100,7 @@ class FundamentalsModel:
         if self.fit_status == "handpicked_default" and self.training_rows == 0:
             self._fit(bundle)
         rows: list[dict[str, object]] = []
-        fundamentals = {row["race_id"]: row for row in bundle.fundamentals.iter_rows(named=True)}
+        fundamentals = self._fundamentals_by_race(bundle.fundamentals)
         fitted = (
             self.cv_predictive_variance is not None and "standardized_ridge_fit" in self.fit_status
         )
@@ -153,30 +154,106 @@ class FundamentalsModel:
         self, options: pl.DataFrame, fundamental: dict[str, object]
     ) -> dict[str, float]:
         lean = float(fundamental.get("partisan_lean") or 0.0)
-        economy = float(fundamental.get("economic_index") or 0.0)
+        economic_index = float(fundamental.get("economic_index") or 0.0)
         swing = float(fundamental.get("national_swing") or 0.0)
         demographic = float(fundamental.get("demographic_turnout_index") or 0.0)
         coef = self.coefficients
         shares: dict[str, float] = {}
-        for row in options.iter_rows(named=True):
+        option_rows = list(options.iter_rows(named=True))
+        explicit_relative = fundamental.get("economic_index_incumbent_relative")
+        if explicit_relative is not None:
+            economy_relative = float(explicit_relative)
+        else:
+            incumbent_sign = sum(
+                self._party_sign(row.get("party"))
+                for row in option_rows
+                if bool(row.get("incumbent"))
+            )
+            economy_relative = economic_index * max(-1.0, min(1.0, incumbent_sign))
+        for row in option_rows:
             base = float(row.get("previous_vote_share") or 0.5)
             party = str(row.get("party") or "")
-            sign = 1.0 if party in {"DEM", "YES"} else -1.0
+            sign = self._party_sign(party)
             incumbent = 1.0 if bool(row.get("incumbent")) else 0.0
-            finance = float(row.get("fundraising_usd") or 0.0)
+            finance = (
+                float(row.get("fundraising_usd") or 0.0)
+                if bool(row.get("fundraising_vintage_applied"))
+                else 0.0
+            )
+            rating = (
+                float(row.get("rating_score") or 0.0)
+                if bool(row.get("rating_vintage_applied"))
+                else 0.0
+            )
             prediction = (
                 base
                 + self.intercept
                 + coef["partisan_lean"] * lean * sign
-                + coef["economic_index"] * economy * sign
+                + coef["economic_index"] * economy_relative * sign
                 + coef["national_swing"] * swing * sign
                 + coef["demographic_turnout_index"] * demographic * sign
                 + coef["incumbent"] * incumbent
                 + coef["fundraising_usd"] * finance
+                + coef["rating_score"] * rating
                 + coef.get("previous_share_centered", 0.0) * (base - 0.5)
             )
             shares[str(row["option_id"])] = clamp(prediction, 0.05, 0.95)
         return shares
+
+    @staticmethod
+    def _party_sign(party: object) -> float:
+        value = str(party or "").upper()
+        if value in {"DEM", "YES"}:
+            return 1.0
+        if value in {"REP", "NO"}:
+            return -1.0
+        return 0.0
+
+    @staticmethod
+    def _fundamentals_by_race(frame: pl.DataFrame) -> dict[str, dict[str, object]]:
+        if frame.is_empty() or "race_id" not in frame.columns:
+            return {}
+        feature_columns = (
+            "partisan_lean",
+            "economic_index",
+            "economic_index_incumbent_relative",
+            "national_swing",
+            "demographic_turnout_index",
+            "incumbency_advantage",
+            "historical_turnout_rate",
+            "registered_voters",
+            "incumbent_party_sign",
+            "incumbent_relative_sign_applied",
+        )
+        selected: dict[str, dict[str, object]] = {}
+        for race_key, group in frame.group_by("race_id", maintain_order=True):
+            race_id = str(race_key[0] if isinstance(race_key, tuple) else race_key)
+            rows = list(group.iter_rows(named=True))
+            ordered = sorted(rows, key=FundamentalsModel._fundamental_lineage_key)
+            combined = dict(ordered[-1])
+            combined["race_id"] = race_id
+            for column in feature_columns:
+                candidates = [row for row in ordered if row.get(column) is not None]
+                if candidates:
+                    combined[column] = candidates[-1][column]
+            selected[race_id] = combined
+        return selected
+
+    @staticmethod
+    def _fundamental_lineage_key(row: dict[str, object]) -> tuple[str, ...]:
+        return (
+            str(row.get("observed_at") or row.get("as_of") or ""),
+            str(row.get("published_at") or ""),
+            str(row.get("available_at") or ""),
+            str(row.get("revision_id") or ""),
+            str(row.get("snapshot_identity") or ""),
+            str(row.get("source_hash") or ""),
+        )
+
+    @classmethod
+    def _model_fundamentals_frame(cls, frame: pl.DataFrame) -> pl.DataFrame:
+        rows = list(cls._fundamentals_by_race(frame).values())
+        return pl.DataFrame(rows) if rows else frame.head(0)
 
     def _fit(self, bundle: FeatureBundle) -> None:
         training = self._training_frame(bundle)
@@ -190,6 +267,11 @@ class FundamentalsModel:
             self.cv_predictive_variance = None
             return
         feature_names = list(self.DEFAULT_COEFFICIENTS.keys())
+        missing = [name for name in feature_names if name not in training.columns]
+        if missing:
+            training = training.with_columns(
+                [pl.lit(0.0, dtype=pl.Float64).alias(name) for name in missing]
+            )
         x = training.select(feature_names).to_numpy().astype(np.float64)
         y = training["target"].to_numpy().astype(np.float64)
         means = x.mean(axis=0)
@@ -259,21 +341,47 @@ class FundamentalsModel:
         if "cycle" in bundle.results.columns:
             result_columns.append("cycle")
         results = bundle.results.select(result_columns)
+        option_columns = [
+            "race_id",
+            "option_id",
+            "party",
+            "incumbent",
+            "previous_vote_share",
+            "fundraising_usd",
+            "fundraising_vintage_applied",
+            "rating_score",
+            "rating_vintage_applied",
+        ]
         options = bundle.options.select(
-            ["race_id", "option_id", "party", "incumbent", "previous_vote_share", "fundraising_usd"]
+            [column for column in option_columns if column in bundle.options.columns]
         )
+        for column, dtype, default in (
+            ("fundraising_usd", pl.Float64, 0.0),
+            ("fundraising_vintage_applied", pl.Boolean, False),
+            ("rating_score", pl.Float64, 0.0),
+            ("rating_vintage_applied", pl.Boolean, False),
+        ):
+            if column not in options.columns:
+                options = options.with_columns(pl.lit(default, dtype=dtype).alias(column))
+        model_fundamentals = FundamentalsModel._model_fundamentals_frame(bundle.fundamentals)
         fundamentals_columns = [
             "race_id",
             "partisan_lean",
             "economic_index",
             "demographic_turnout_index",
         ]
-        if "national_swing" in bundle.fundamentals.columns:
+        if "economic_index_incumbent_relative" in model_fundamentals.columns:
+            fundamentals_columns.append("economic_index_incumbent_relative")
+        if "national_swing" in model_fundamentals.columns:
             fundamentals_columns.insert(3, "national_swing")
-        fundamentals = bundle.fundamentals.select(fundamentals_columns)
+        fundamentals = model_fundamentals.select(fundamentals_columns)
         if "national_swing" not in fundamentals.columns:
             fundamentals = fundamentals.with_columns(
                 pl.lit(0.0, dtype=pl.Float64).alias("national_swing")
+            )
+        if "economic_index_incumbent_relative" not in fundamentals.columns:
+            fundamentals = fundamentals.with_columns(
+                pl.lit(None, dtype=pl.Float64).alias("economic_index_incumbent_relative")
             )
         joined = results.join(options, on=["race_id", "option_id"], how="inner").join(
             fundamentals, on="race_id", how="inner"
@@ -282,29 +390,56 @@ class FundamentalsModel:
             return joined
         if "cycle" not in joined.columns:
             joined = joined.with_columns(pl.lit(None, dtype=pl.Int64).alias("cycle"))
-        joined = joined.with_columns(
-            pl.when(pl.col("party").is_in(["DEM", "YES"]))
-            .then(1.0)
-            .otherwise(-1.0)
-            .alias("party_sign"),
-            pl.col("incumbent").cast(pl.Float64).fill_null(0.0).alias("incumbent_value"),
-            pl.col("fundraising_usd").fill_null(0.0).alias("fundraising_value"),
-            pl.col("previous_vote_share").fill_null(0.5).alias("previous_share"),
-        ).with_columns(
-            (pl.col("partisan_lean").fill_null(0.0) * pl.col("party_sign")).alias("partisan_lean"),
-            (pl.col("economic_index").fill_null(0.0) * pl.col("party_sign")).alias(
-                "economic_index"
-            ),
-            (pl.col("national_swing").fill_null(0.0) * pl.col("party_sign")).alias(
-                "national_swing"
-            ),
-            (pl.col("demographic_turnout_index").fill_null(0.0) * pl.col("party_sign")).alias(
-                "demographic_turnout_index"
-            ),
-            pl.col("incumbent_value").alias("incumbent"),
-            pl.col("fundraising_value").alias("fundraising_usd"),
-            (pl.col("previous_share") - 0.5).alias("previous_share_centered"),
-            (pl.col("actual_vote_share") - pl.col("previous_share")).alias("target"),
+        joined = (
+            joined.with_columns(
+                pl.when(pl.col("party").is_in(["DEM", "YES"]))
+                .then(1.0)
+                .otherwise(-1.0)
+                .alias("party_sign"),
+                pl.col("incumbent").cast(pl.Float64).fill_null(0.0).alias("incumbent_value"),
+                pl.when(pl.col("fundraising_vintage_applied").fill_null(False))
+                .then(pl.col("fundraising_usd").fill_null(0.0))
+                .otherwise(0.0)
+                .alias("fundraising_value"),
+                pl.when(pl.col("rating_vintage_applied").fill_null(False))
+                .then(pl.col("rating_score").fill_null(0.0))
+                .otherwise(0.0)
+                .alias("rating_value"),
+                pl.col("previous_vote_share").fill_null(0.5).alias("previous_share"),
+            )
+            .with_columns(
+                (pl.col("party_sign") * pl.col("incumbent_value"))
+                .sum()
+                .over("race_id")
+                .clip(-1.0, 1.0)
+                .alias("incumbent_party_sign"),
+            )
+            .with_columns(
+                (pl.col("partisan_lean").fill_null(0.0) * pl.col("party_sign")).alias(
+                    "partisan_lean"
+                ),
+                (
+                    pl.coalesce(
+                        [
+                            pl.col("economic_index_incumbent_relative"),
+                            pl.col("economic_index").fill_null(0.0)
+                            * pl.col("incumbent_party_sign"),
+                        ]
+                    )
+                    * pl.col("party_sign")
+                ).alias("economic_index"),
+                (pl.col("national_swing").fill_null(0.0) * pl.col("party_sign")).alias(
+                    "national_swing"
+                ),
+                (pl.col("demographic_turnout_index").fill_null(0.0) * pl.col("party_sign")).alias(
+                    "demographic_turnout_index"
+                ),
+                pl.col("incumbent_value").alias("incumbent"),
+                pl.col("fundraising_value").alias("fundraising_usd"),
+                pl.col("rating_value").alias("rating_score"),
+                (pl.col("previous_share") - 0.5).alias("previous_share_centered"),
+                (pl.col("actual_vote_share") - pl.col("previous_share")).alias("target"),
+            )
         )
         output = joined.select(
             [
@@ -315,6 +450,7 @@ class FundamentalsModel:
                 "demographic_turnout_index",
                 "incumbent",
                 "fundraising_usd",
+                "rating_score",
                 "previous_share_centered",
                 "target",
             ]
@@ -327,6 +463,7 @@ class FundamentalsModel:
                 "demographic_turnout_index",
                 "incumbent",
                 "fundraising_usd",
+                "rating_score",
                 "previous_share_centered",
                 "target",
             ]

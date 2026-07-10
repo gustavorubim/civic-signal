@@ -44,6 +44,12 @@ class PerformanceBenchmark:
         repeat_count = int(repeats or performance_config.get("benchmark_repeats", 3))
         benchmark_config = dict(model_config)
         benchmark_config["simulation_count"] = draw_count
+        benchmark_config["performance"] = {
+            **performance_config,
+            # Throughput benchmarks must honor the explicitly requested draw count;
+            # adaptive convergence is exercised by forecast/simulation tests instead.
+            "adaptive_mcse": False,
+        }
 
         ensemble = self._ensemble(bundle, benchmark_config)
         engine = SimulationEngine(benchmark_config)
