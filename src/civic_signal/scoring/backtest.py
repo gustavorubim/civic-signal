@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 
@@ -19,15 +20,12 @@ from civic_signal.features import (
 )
 from civic_signal.inference.hyperpriors import search_hyperpriors
 from civic_signal.inference.recalibration import recalibration_map_from_calibration
-from civic_signal.models import (
-    EnsembleModel,
-    FundamentalsModel,
-    MarketModel,
-    PollingModel,
-    PublicSignalModel,
-)
 from civic_signal.models.common import clamp, normal_cdf
-from civic_signal.models.polling import resolve_inference_engine
+from civic_signal.models.ensemble import EnsembleModel
+from civic_signal.models.fundamentals import FundamentalsModel
+from civic_signal.models.markets import MarketModel
+from civic_signal.models.polling import PollingModel, resolve_inference_engine
+from civic_signal.models.public_signals import PublicSignalModel
 from civic_signal.scoring.learning import (
     apply_platt_calibration,
     fit_platt_calibration,
@@ -333,32 +331,17 @@ class BacktestRunner:
         inference_engine: str,
     ) -> pl.DataFrame:
         train_bundle = filter_results_before_cycle(train_bundle, target_cycle)
-        fundamentals_model = FundamentalsModel(model_config).fit(train_bundle)
-        cycle_model_config = json.loads(json.dumps(model_config))
-        if inference_engine == "bayes":
-            from civic_signal.inference.fundamentals_prior import build_fundamentals_prior
-
-            fundamentals_prior = build_fundamentals_prior(
-                fundamentals_model, test_bundle, cycle_model_config
-            )
-            cycle_model_config["_fundamentals_prior_rows"] = fundamentals_prior.frame.to_dicts()
-        component_estimates = [
-            PollingModel(
-                cycle_model_config,
+        component_estimates, ensemble, _cycle_model_config, _posterior_draws = (
+            self._publication_components(
+                train_bundle=train_bundle,
+                test_bundle=test_bundle,
                 as_of=as_of,
+                model_config=model_config,
                 inference_engine=inference_engine,
-            ).run(test_bundle),
-            fundamentals_model.run(test_bundle),
-            MarketModel(cycle_model_config).run(test_bundle),
-            PublicSignalModel(
-                trusted=bool(
-                    cycle_model_config.get("trusted_components", {}).get("public_signals", False)
-                )
-            ).run(test_bundle),
-        ]
+            )
+        )
         if all(frame.is_empty() for frame in component_estimates):
             return self._empty_predictions()
-        ensemble = EnsembleModel(cycle_model_config).run(test_bundle, component_estimates)
         rows: list[dict[str, Any]] = []
         actuals = {
             (row["race_id"], row["option_id"]): row
@@ -406,6 +389,46 @@ class BacktestRunner:
                 row[column] = values.get(key, row["baseline_probability"])
             rows.append(row)
         return pl.DataFrame(rows) if rows else self._empty_predictions()
+
+    @staticmethod
+    def _publication_components(
+        *,
+        train_bundle: FeatureBundle,
+        test_bundle: FeatureBundle,
+        as_of: str,
+        model_config: dict[str, Any],
+        inference_engine: str,
+    ) -> tuple[list[pl.DataFrame], pl.DataFrame, dict[str, Any], pl.DataFrame]:
+        """Fit the same components and ensemble used by the publication pipeline."""
+        fundamentals_model = FundamentalsModel(model_config).fit(train_bundle)
+        cycle_model_config = json.loads(json.dumps(model_config))
+        model_bundle = replace(test_bundle, results=test_bundle.results.head(0))
+        if inference_engine == "bayes":
+            from civic_signal.inference.fundamentals_prior import build_fundamentals_prior
+
+            fundamentals_prior = build_fundamentals_prior(
+                fundamentals_model, model_bundle, cycle_model_config
+            )
+            cycle_model_config["_fundamentals_prior_rows"] = fundamentals_prior.frame.to_dicts()
+        polling_model = PollingModel(
+            cycle_model_config,
+            as_of=as_of,
+            inference_engine=inference_engine,
+        )
+        polling_estimates = polling_model.run(model_bundle)
+        posterior_draws = polling_model.posterior_draws(model_bundle)
+        component_estimates = [
+            polling_estimates,
+            fundamentals_model.run(model_bundle),
+            MarketModel(cycle_model_config).run(model_bundle),
+            PublicSignalModel(
+                trusted=bool(
+                    cycle_model_config.get("trusted_components", {}).get("public_signals", False)
+                )
+            ).run(model_bundle),
+        ]
+        ensemble = EnsembleModel(cycle_model_config).run(model_bundle, component_estimates)
+        return component_estimates, ensemble, cycle_model_config, posterior_draws
 
     @staticmethod
     def _component_probability(frame: pl.DataFrame) -> dict[tuple[str, str], float]:
@@ -718,7 +741,16 @@ class BacktestRunner:
             "sample_size": pl.Int64,
             "shrinkage": pl.Float64,
             "matrix_rank": pl.Int64,
+            "factor_rank": pl.Int64,
             "covariance_method": pl.Utf8,
+            "residual_definition": pl.Utf8,
+            "representation": pl.Utf8,
+            "factor_loadings_json": pl.Utf8,
+            "factor_variances_json": pl.Utf8,
+            "idiosyncratic_variance": pl.Float64,
+            "configured_factor_rank": pl.Int64,
+            "psd_constructed": pl.Boolean,
+            "minimum_eigenvalue": pl.Float64,
         }
         if frame.is_empty():
             return pl.DataFrame(schema=schema)
@@ -728,25 +760,62 @@ class BacktestRunner:
             for key, value in dict(correlation_config.get("geographic_groups", {})).items()
         }
         min_variance = float(correlation_config.get("residual_min_variance", 0.0004))
+        shrinkage = min(
+            max(float(correlation_config.get("residual_covariance_shrinkage", 0.0)), 0.0),
+            1.0,
+        )
+        configured_factor_rank = max(int(correlation_config.get("residual_factor_rank", 64)), 1)
         # Cycles are the unit of independent evidence: as-of cuts within a cycle
         # share one election outcome, so they are averaged, never counted as
         # separate samples. With so few cycles a free covariance over ~50 groups
         # is unidentified; instead estimate a three-level factor structure
         # (national + region + state idiosyncratic) with pooled variances.
-        residuals = (
-            frame.with_columns(
-                (pl.col("predicted_vote_share") - pl.col("actual_vote_share")).alias("residual"),
-                # Aggregate district geographies (e.g. "AK-01") to their state so
-                # the covariance groups match SimulationEngine's state-level
-                # covariance lookup keys.
-                pl.col("geography")
-                .cast(pl.Utf8)
-                .str.split("-")
-                .list.first()
-                .alias("_covariance_group"),
+        residual_rows = frame.with_columns(
+            (pl.col("predicted_vote_share") - pl.col("actual_vote_share")).alias("residual"),
+            # Aggregate district geographies (e.g. "AK-01") to their state so
+            # the covariance groups match SimulationEngine's state-level
+            # covariance lookup keys.
+            pl.col("geography")
+            .cast(pl.Utf8)
+            .str.split("-")
+            .list.first()
+            .alias("_covariance_group"),
+        )
+        residual_definition = "legacy_group_mean_without_race_identity"
+        if {"race_id", "option_id"}.issubset(residual_rows.columns):
+            # Candidate complements are not independent errors and averaging D/R
+            # residuals drives a two-party race toward zero by construction. Use
+            # one consistently signed reference option per race and average only
+            # repeated forecast horizons for that reference option.
+            party_rank = (
+                pl.when(pl.col("party").cast(pl.Utf8).str.to_uppercase().is_in(["DEM", "D"]))
+                .then(0)
+                .otherwise(1)
+                if "party" in residual_rows.columns
+                else pl.when(
+                    pl.col("option_id").cast(pl.Utf8).str.to_uppercase().str.contains(r"-(D|DEM)$")
+                )
+                .then(0)
+                .otherwise(1)
             )
-            .group_by(["cycle", "_covariance_group"])
-            .agg(pl.col("residual").mean().alias("residual"))
+            horizon_keys = ["cycle", "race_id"]
+            for horizon in ("as_of_offset_days", "as_of"):
+                if horizon in residual_rows.columns:
+                    horizon_keys.append(horizon)
+            residual_rows = (
+                residual_rows.with_columns(party_rank.alias("_reference_rank"))
+                .sort([*horizon_keys, "_reference_rank", "option_id"])
+                .group_by(horizon_keys, maintain_order=True)
+                .agg(
+                    pl.col("residual").first(),
+                    pl.col("_covariance_group").first(),
+                )
+                .group_by(["cycle", "race_id", "_covariance_group"])
+                .agg(pl.col("residual").mean())
+            )
+            residual_definition = "one_reference_option_per_race_cycle"
+        residuals = residual_rows.group_by(["cycle", "_covariance_group"]).agg(
+            pl.col("residual").mean().alias("residual")
         )
         pivot = residuals.pivot(
             index=["cycle"],
@@ -773,7 +842,11 @@ class BacktestRunner:
         # factor at a historically grounded sd (~2pp national House poll misses
         # in 2016/2020) so seat distributions never claim it away.
         national_floor_sd = float(correlation_config.get("national_error_floor_sd", 0.02))
-        national_variance = max(float(np.var(national, ddof=1)), national_floor_sd**2)
+        empirical_national_variance = max(float(np.var(national, ddof=1)), 0.0)
+        national_variance = max(
+            (1.0 - shrinkage) * empirical_national_variance + shrinkage * national_floor_sd**2,
+            national_floor_sd**2,
+        )
         region_deviations: list[float] = []
         state_deviations: list[float] = []
         region_means = np.zeros((cycle_count, len(regions)), dtype=np.float64)
@@ -783,28 +856,77 @@ class BacktestRunner:
             region_deviations.extend((region_means[:, region_index] - national).tolist())
             for column in columns:
                 state_deviations.extend((data[:, column] - region_means[:, region_index]).tolist())
-        region_variance = max(
+        empirical_region_variance = max(
             float(np.var(np.array(region_deviations), ddof=1))
             if len(region_deviations) > 1
             else 0.0,
             0.0,
         )
-        state_variance = max(
-            float(np.var(np.array(state_deviations), ddof=1)) if len(state_deviations) > 1 else 0.0,
-            min_variance * 0.25,
+        region_target_variance = max(float(correlation_config.get("region_sigma", 0.01)) ** 2, 0.0)
+        region_variance = max(
+            (1.0 - shrinkage) * empirical_region_variance + shrinkage * region_target_variance,
+            0.0,
         )
+        empirical_state_variance = max(
+            float(np.var(np.array(state_deviations), ddof=1)) if len(state_deviations) > 1 else 0.0,
+            0.0,
+        )
+        state_target_variance = min_variance * 0.25
+        state_variance = max(
+            (1.0 - shrinkage) * empirical_state_variance + shrinkage * state_target_variance,
+            state_target_variance,
+        )
+
+        # Explicit PSD representation: Sigma = B diag(v) B' + diag(d).
+        # The national factor is always retained. Regional factors are ordered
+        # deterministically and truncated to the configured rank; omitted
+        # regional variance is folded into the diagonal so marginal variance
+        # remains conservative.
+        retained_regions = sorted(regions)[: max(configured_factor_rank - 1, 0)]
+        factor_variances = {"national": float(national_variance)}
+        factor_variances.update(
+            {f"region:{region}": float(region_variance) for region in retained_regions}
+        )
+        loadings_by_group: dict[str, dict[str, float]] = {}
+        idiosyncratic_by_group: dict[str, float] = {}
+        for group in groups:
+            region = region_of[group]
+            loadings = {"national": 1.0}
+            if region in retained_regions:
+                loadings[f"region:{region}"] = 1.0
+            loadings_by_group[group] = loadings
+            idiosyncratic_by_group[group] = float(
+                state_variance + (region_variance if region not in retained_regions else 0.0)
+            )
+
+        covariance_matrix = np.zeros((len(groups), len(groups)), dtype=np.float64)
+        for row_index, row_group in enumerate(groups):
+            for column_index, column_group in enumerate(groups):
+                shared = set(loadings_by_group[row_group]) & set(loadings_by_group[column_group])
+                covariance_matrix[row_index, column_index] = sum(
+                    loadings_by_group[row_group][factor]
+                    * loadings_by_group[column_group][factor]
+                    * factor_variances[factor]
+                    for factor in shared
+                )
+                if row_index == column_index:
+                    covariance_matrix[row_index, column_index] += idiosyncratic_by_group[row_group]
+        covariance_matrix = (covariance_matrix + covariance_matrix.T) / 2.0
+        minimum_eigenvalue = float(np.linalg.eigvalsh(covariance_matrix).min())
+        matrix_rank = int(np.linalg.matrix_rank(covariance_matrix))
+        factor_rank = len(factor_variances)
+        factor_variances_json = json.dumps(factor_variances, sort_keys=True)
         matrix_rows = []
-        total_variance = max(national_variance + region_variance + state_variance, min_variance)
-        matrix_rank = min(1 + len(regions) + len(groups), len(groups))
         for row_group in groups:
             for column_group in groups:
-                covariance = national_variance
-                if region_of[row_group] == region_of[column_group]:
-                    covariance += region_variance
-                if row_group == column_group:
-                    covariance += state_variance
-                    covariance = max(covariance, min_variance)
-                correlation = covariance / total_variance
+                row_index = groups.index(row_group)
+                column_index = groups.index(column_group)
+                covariance = float(covariance_matrix[row_index, column_index])
+                denominator = math.sqrt(
+                    float(covariance_matrix[row_index, row_index])
+                    * float(covariance_matrix[column_index, column_index])
+                )
+                correlation = covariance / max(denominator, 1e-12)
                 matrix_rows.append(
                     {
                         "row_group": row_group,
@@ -812,9 +934,20 @@ class BacktestRunner:
                         "covariance": float(covariance),
                         "correlation": float(min(correlation, 1.0)),
                         "sample_size": cycle_count,
-                        "shrinkage": 0.0,
+                        "shrinkage": shrinkage,
                         "matrix_rank": matrix_rank,
-                        "covariance_method": "structured_factor_cycle_level",
+                        "factor_rank": factor_rank,
+                        "covariance_method": "low_rank_factor_plus_diagonal_cycle_level",
+                        "residual_definition": residual_definition,
+                        "representation": "B_diag_v_Bt_plus_diag_d",
+                        "factor_loadings_json": json.dumps(
+                            loadings_by_group[row_group], sort_keys=True
+                        ),
+                        "factor_variances_json": factor_variances_json,
+                        "idiosyncratic_variance": idiosyncratic_by_group[row_group],
+                        "configured_factor_rank": configured_factor_rank,
+                        "psd_constructed": True,
+                        "minimum_eigenvalue": minimum_eigenvalue,
                     }
                 )
         return pl.DataFrame(matrix_rows)
@@ -1012,6 +1145,700 @@ class BacktestRunner:
             "residual_covariance": f"residual_covariance_{key}.parquet",
         }
         write_json(index, index_path)
+
+
+class NestedBacktestRunner:
+    """Cycle-nested evaluation with inner-only tuning and publication-path outer scoring."""
+
+    BASELINE_COLUMNS: ClassVar[dict[str, str]] = {
+        "prior_only": "prior_only_probability",
+        "previous_cycle_swing": "previous_cycle_swing_probability",
+        "fundamentals_only": "fundamentals_only_probability",
+        "poll_average": "poll_average_probability",
+        "markets_if_present": "market_implied_probability",
+    }
+    BASELINE_DEFINITIONS: ClassVar[dict[str, str]] = {
+        "prior_only": "Uniform probability across the options in each held-out race.",
+        "previous_cycle_swing": (
+            "Previous option vote share mapped through the training-only baseline share scale."
+        ),
+        "fundamentals_only": "Training-fitted fundamentals component with no polling/market blend.",
+        "poll_average": (
+            "Arithmetic mean of eligible held-out poll shares, normalized within race."
+        ),
+        "markets_if_present": (
+            "Eligible public-market component probability; absent rows are not imputed."
+        ),
+    }
+
+    def __init__(self, context: ProjectContext) -> None:
+        self.context = context
+        self.base = BacktestRunner(context)
+
+    def run(
+        self,
+        run_id: str,
+        *,
+        scenario: str | None = None,
+        start_cycle: int | None = None,
+        holdout_cycle: int | None = None,
+        inference_engine: str | None = None,
+        bayesian_backend: str | None = None,
+    ) -> dict[str, Any]:
+        bundle = FeatureBuilder(self.context).run()
+        model_config = self.context.read_yaml("model.yaml")
+        engine = resolve_inference_engine(model_config, inference_engine)
+        if engine == "bayes":
+            model_config = json.loads(json.dumps(model_config))
+            model_config["_inference_engine"] = engine
+            if bayesian_backend:
+                model_config["_bayesian_backend"] = bayesian_backend.lower().strip()
+        backtest_config = self.context.read_yaml("backtests.yaml")
+        scenario_obj = ScenarioRegistry.from_context(self.context).get(scenario)
+        catalog = (
+            scenario_obj.filter_catalog(bundle.race_catalog, include_cycle=False)
+            if scenario_obj
+            else bundle.race_catalog
+        )
+        cycles = sorted(int(value) for value in catalog["cycle"].unique().to_list())
+        outer_cycles = [
+            cycle
+            for cycle in cycles
+            if (start_cycle is None or cycle >= start_cycle)
+            and (holdout_cycle is None or cycle == holdout_cycle)
+            and len([prior for prior in cycles if prior < cycle]) >= 2
+        ]
+        fold_rows: list[dict[str, Any]] = []
+        outer_frames: list[pl.DataFrame] = []
+        for outer_cycle in outer_cycles:
+            inner_cycles = [
+                cycle
+                for cycle in cycles
+                if cycle < outer_cycle and any(prior < cycle for prior in cycles)
+            ]
+            inner_frames = [
+                self.base._rolling_origin_predictions(
+                    bundle=bundle,
+                    model_config=model_config,
+                    backtest_config=backtest_config,
+                    scenario=scenario_obj,
+                    start_cycle=None,
+                    holdout_cycle=inner_cycle,
+                    inference_engine=engine,
+                )
+                for inner_cycle in inner_cycles
+            ]
+            nonempty_inner = [frame for frame in inner_frames if not frame.is_empty()]
+            if nonempty_inner:
+                inner_predictions = pl.concat(nonempty_inner, how="diagonal_relaxed")
+            else:
+                inner_predictions = self.base._empty_predictions()
+            learning = self._fit_inner(inner_predictions, model_config, backtest_config)
+            outer_config = json.loads(json.dumps(model_config))
+            outer_config["component_weights"] = dict(
+                learning["ensemble_learning"]["weight_learning"]["component_weights"]
+            )
+            outer_config["probability_calibration"] = dict(
+                learning["ensemble_learning"]["probability_calibration"]
+            )
+            outer_config = self._apply_inner_hyperparameters(
+                outer_config, learning["hyperparameters"]
+            )
+            test_catalog = catalog.filter(pl.col("cycle") == outer_cycle)
+            train_catalog = BacktestRunner._restrict_to_era(
+                catalog.filter(pl.col("cycle") < outer_cycle), test_catalog
+            )
+            fold_predictions = []
+            path_checks: list[dict[str, bool]] = []
+            for offset_days, as_of in self.base._cycle_as_of_dates(
+                test_catalog, self.base._as_of_offsets(backtest_config)
+            ):
+                frame, path_status = self._publication_outer_fold(
+                    bundle=bundle,
+                    train_catalog=train_catalog,
+                    test_catalog=test_catalog,
+                    target_cycle=outer_cycle,
+                    as_of=as_of,
+                    as_of_offset_days=offset_days,
+                    model_config=outer_config,
+                    inference_engine=engine,
+                    residual_covariance=learning["residual_covariance"],
+                    holdovers=(scenario_obj.holdover_caucus_seats if scenario_obj else None),
+                )
+                path_checks.append(path_status)
+                if not frame.is_empty():
+                    fold_predictions.append(frame)
+            outer = (
+                pl.concat(fold_predictions, how="diagonal_relaxed")
+                if fold_predictions
+                else self.base._empty_predictions()
+            )
+            if not outer.is_empty():
+                outer_frames.append(outer)
+            train_cycles = sorted(int(value) for value in train_catalog["cycle"].unique().to_list())
+            canary = self._held_out_permutation_canary(bundle, catalog, outer_cycle)
+            simulation_engine_used = bool(path_checks) and all(
+                check.get("simulation_engine_used") is True for check in path_checks
+            )
+            posterior_draw_path_complete = bool(path_checks) and all(
+                check.get("posterior_draw_path_complete") is True for check in path_checks
+            )
+            fold_rows.append(
+                {
+                    "outer_cycle": outer_cycle,
+                    "train_cycles": json.dumps(train_cycles),
+                    "inner_validation_cycles": json.dumps(inner_cycles),
+                    "fit_cycle_max": max(inner_cycles) if inner_cycles else None,
+                    "outer_cycle_excluded": outer_cycle not in train_cycles
+                    and outer_cycle not in inner_cycles,
+                    "inner_row_count": inner_predictions.height,
+                    "outer_row_count": outer.height,
+                    "weights_status": learning["ensemble_learning"]["weight_learning"].get(
+                        "status"
+                    ),
+                    "calibration_status": learning["ensemble_learning"][
+                        "probability_calibration"
+                    ].get("status"),
+                    "hyperparameter_status": learning["hyperparameters"].get("status"),
+                    "selected_hyperparameters": json.dumps(
+                        learning["hyperparameters"].get("selected", {}), sort_keys=True
+                    ),
+                    "publication_path": "components+ensemble+SimulationEngine",
+                    "simulation_engine_used": simulation_engine_used,
+                    "posterior_draw_path_complete": posterior_draw_path_complete,
+                    "training_lineage_sha256": self._training_lineage_hash(bundle, train_catalog),
+                    "held_out_permutation_affects_training": not canary,
+                    "held_out_permutation_canary_passed": canary,
+                }
+            )
+        predictions = (
+            pl.concat(outer_frames, how="diagonal_relaxed")
+            if outer_frames
+            else self.base._empty_predictions()
+        )
+        manifest = pl.DataFrame(fold_rows) if fold_rows else self._empty_manifest()
+        all_excluded = bool(fold_rows) and all(row["outer_cycle_excluded"] for row in fold_rows)
+        all_canaries = bool(fold_rows) and all(
+            row["held_out_permutation_canary_passed"] for row in fold_rows
+        )
+        weights_fitted = bool(fold_rows) and all(
+            row["weights_status"] == "fitted" for row in fold_rows
+        )
+        calibration_fitted = bool(fold_rows) and all(
+            row["calibration_status"] == "fitted" for row in fold_rows
+        )
+        hyperparameters_fitted = bool(fold_rows) and all(
+            row["hyperparameter_status"] == "fitted" for row in fold_rows
+        )
+        exact_pipeline = bool(fold_rows) and all(
+            row["simulation_engine_used"] is True and row["posterior_draw_path_complete"] is True
+            for row in fold_rows
+        )
+        metrics = self.base._score_columns(predictions, self.base.COMPONENT_COLUMNS)
+        baseline_metrics = self._baseline_metrics(predictions)
+        clustered_uncertainty = self._paired_cycle_clustered_uncertainty(
+            predictions,
+            config=dict(backtest_config.get("nested_evaluation") or {}),
+        )
+        fold_lineage = [
+            {
+                "outer_cycle": row["outer_cycle"],
+                "train_cycles": json.loads(row["train_cycles"]),
+                "inner_validation_cycles": json.loads(row["inner_validation_cycles"]),
+                "fit_cycle_max": row["fit_cycle_max"],
+                "outer_cycle_excluded": row["outer_cycle_excluded"],
+                "training_lineage_sha256": row["training_lineage_sha256"],
+                "simulation_engine_used": row["simulation_engine_used"],
+                "posterior_draw_path_complete": row["posterior_draw_path_complete"],
+                "held_out_permutation_canary_passed": row["held_out_permutation_canary_passed"],
+                "held_out_permutation_affects_training": row[
+                    "held_out_permutation_affects_training"
+                ],
+            }
+            for row in fold_rows
+        ]
+        training_lineage_sha256 = {
+            str(row["outer_cycle"]): row["training_lineage_sha256"] for row in fold_rows
+        }
+        held_out_permutation_canary = {
+            "passed": all_canaries if fold_rows else False,
+            "affects_prior_folds": (not all_canaries) if fold_rows else None,
+            "by_outer_cycle": {
+                str(row["outer_cycle"]): {
+                    "passed": row["held_out_permutation_canary_passed"],
+                    "training_lineage_sha256": row["training_lineage_sha256"],
+                }
+                for row in fold_rows
+            },
+        }
+        payload: dict[str, Any] = {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "method": "outer_cycle_nested_exact_publication_path",
+            "scenario": scenario,
+            "inference_engine": engine,
+            "bayesian_backend": model_config.get("_bayesian_backend")
+            if engine == "bayes"
+            else None,
+            "outer_fold": True,
+            "fold_count": len(fold_rows),
+            "independent_cycle_count": len(fold_rows),
+            "outer_cycle_excluded": all_excluded,
+            "held_out_permutation_affects_prior_folds": ((not all_canaries) if fold_rows else None),
+            "held_out_permutation_canary": held_out_permutation_canary,
+            "inner_folds_fit_hyperparameters": hyperparameters_fitted,
+            "inner_folds_fit_weights": weights_fitted,
+            "calibration_map_outer_fold": calibration_fitted,
+            "inner_tuning_complete": weights_fitted
+            and calibration_fitted
+            and hyperparameters_fitted,
+            # Only true when every outer as-of cut actually ran SimulationEngine
+            # (and Bayes posterior draws when required). Never claim pass otherwise.
+            "exact_pipeline": exact_pipeline,
+            "exact_pipeline_scope": (
+                "components+ensemble+SimulationEngine" if exact_pipeline else None
+            ),
+            "training_lineage_sha256": training_lineage_sha256,
+            "fold_lineage": fold_lineage,
+            "row_count": predictions.height,
+            "metrics": metrics,
+            "baseline_definitions": self.BASELINE_DEFINITIONS,
+            "baseline_metrics": baseline_metrics,
+            "paired_cycle_clustered_uncertainty": clustered_uncertainty,
+            "promoted_training_bundle_compatibility": {
+                "status": "insufficient_evidence",
+                "reason": "no promoted real-data training-bundle registry is available",
+            },
+            "result_derived_feature_canary": {
+                "status": "insufficient_evidence",
+                "outcome_lineage_permutation_passed": all_canaries,
+                "feature_injection_test_executed": False,
+            },
+            "fold_manifest": "fold_manifest.parquet",
+            "predictions": "nested_predictions.parquet",
+            "baseline_scorecard": "baseline_scorecard.json",
+            "clustered_uncertainty": "paired_cycle_clustered_uncertainty.json",
+        }
+        out_dir = self.context.artifacts_dir / "backtests" / run_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        write_parquet(manifest, out_dir / "fold_manifest.parquet")
+        write_parquet(predictions, out_dir / "nested_predictions.parquet")
+        write_json(
+            {
+                "definitions": self.BASELINE_DEFINITIONS,
+                "metrics": baseline_metrics,
+            },
+            out_dir / "baseline_scorecard.json",
+        )
+        write_json(clustered_uncertainty, out_dir / "paired_cycle_clustered_uncertainty.json")
+        write_json(payload, out_dir / "nested_evaluation.json")
+        return payload
+
+    def _fit_inner(
+        self,
+        predictions: pl.DataFrame,
+        model_config: dict[str, Any],
+        backtest_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        minimum = int(backtest_config.get("minimum_rows_for_trust", 30))
+        metrics = self.base._score_columns(predictions, self.base.BASE_COMPONENT_COLUMNS)
+        ablations = self.base._ablations(metrics)
+        trustworthy = not predictions.is_empty() and predictions.height >= minimum
+        trusted = self.base._trusted_components(ablations, model_config, trustworthy=trustworthy)
+        learning = self.base._fit_ensemble_learning(
+            predictions,
+            model_config,
+            trusted,
+            trustworthy=trustworthy,
+            minimum_rows=minimum,
+        )
+        return {
+            "ensemble_learning": learning,
+            "hyperparameters": search_hyperpriors(predictions, model_config),
+            "residual_covariance": self.base._residual_covariance(predictions, model_config),
+        }
+
+    @staticmethod
+    def _apply_inner_hyperparameters(
+        model_config: dict[str, Any], hyperparameters: dict[str, Any]
+    ) -> dict[str, Any]:
+        selected = dict(hyperparameters.get("selected") or {})
+        updated = json.loads(json.dumps(model_config))
+        if selected.get("national_sigma") is not None:
+            updated.setdefault("correlation", {})["national_sigma"] = float(
+                selected["national_sigma"]
+            )
+        bayesian = updated.setdefault("bayesian", {})
+        if selected.get("election_day_extra_sd") is not None:
+            bayesian.setdefault("state_space", {})["election_day_extra_sd"] = float(
+                selected["election_day_extra_sd"]
+            )
+        if selected.get("fundamentals_prior_strength") is not None:
+            bayesian.setdefault("fundamentals_prior", {})["prior_strength"] = float(
+                selected["fundamentals_prior_strength"]
+            )
+        return updated
+
+    @classmethod
+    def _baseline_metrics(cls, predictions: pl.DataFrame) -> dict[str, dict[str, Any]]:
+        metrics: dict[str, dict[str, Any]] = {}
+        for name, column in cls.BASELINE_COLUMNS.items():
+            if predictions.is_empty() or column not in predictions.columns:
+                metrics[name] = {
+                    "status": "not_available",
+                    "row_count": 0,
+                    "reason": f"{column} is absent from nested predictions",
+                }
+                continue
+            eligible = predictions.filter(pl.col(column).is_not_null())
+            if eligible.is_empty():
+                metrics[name] = {
+                    "status": "not_available",
+                    "row_count": 0,
+                    "reason": "no eligible outer-fold rows for this comparator",
+                }
+                continue
+            score = score_predictions(eligible, column)
+            metrics[name] = {
+                "status": "estimated",
+                "row_count": eligible.height,
+                "cycle_count": int(eligible["cycle"].n_unique()),
+                **score,
+            }
+        return metrics
+
+    @classmethod
+    def _paired_cycle_clustered_uncertainty(
+        cls,
+        predictions: pl.DataFrame,
+        *,
+        config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        settings = config or {}
+        minimum_cycles = max(int(settings.get("minimum_cycles_for_uncertainty", 3)), 2)
+        replicates = max(int(settings.get("cycle_bootstrap_replicates", 2000)), 100)
+        seed = int(settings.get("cycle_bootstrap_seed", 20260508))
+        comparisons: dict[str, dict[str, Any]] = {}
+        for index, (name, column) in enumerate(cls.BASELINE_COLUMNS.items()):
+            cycle_scores = cls._paired_cycle_scores(predictions, column)
+            if cycle_scores.is_empty():
+                comparisons[name] = {
+                    "status": "not_available",
+                    "reason": f"no paired ensemble/{name} rows",
+                    "independent_cycle_count": 0,
+                }
+                continue
+            cycle_count = cycle_scores.height
+            if cycle_count < minimum_cycles:
+                comparisons[name] = {
+                    "status": "insufficient_evidence",
+                    "reason": (
+                        f"{cycle_count} independent cycles < required {minimum_cycles}; "
+                        "race rows are not treated as independent replicates"
+                    ),
+                    "independent_cycle_count": cycle_count,
+                    "minimum_cycles": minimum_cycles,
+                    "cycle_estimates": cycle_scores.to_dicts(),
+                }
+                continue
+            comparison_seed = seed + index * 1009
+            comparisons[name] = {
+                "status": "estimated",
+                "independent_cycle_count": cycle_count,
+                "minimum_cycles": minimum_cycles,
+                "cycle_estimates": cycle_scores.to_dicts(),
+                "brier_difference": cls._cluster_bootstrap_interval(
+                    cycle_scores["brier_difference"].to_numpy(),
+                    replicates=replicates,
+                    seed=comparison_seed,
+                ),
+                "log_score_difference": cls._cluster_bootstrap_interval(
+                    cycle_scores["log_score_difference"].to_numpy(),
+                    replicates=replicates,
+                    seed=comparison_seed + 1,
+                ),
+            }
+        estimated = [row for row in comparisons.values() if row["status"] == "estimated"]
+        return {
+            "status": "estimated" if estimated else "insufficient_evidence",
+            "method": "paired_nonparametric_cycle_cluster_bootstrap",
+            "cluster_unit": "cycle",
+            "row_level_resampling": False,
+            "equal_cycle_weighting": True,
+            "minimum_cycles": minimum_cycles,
+            "bootstrap_replicates": replicates,
+            "seed": seed,
+            "comparisons": comparisons,
+        }
+
+    @staticmethod
+    def _paired_cycle_scores(predictions: pl.DataFrame, baseline_column: str) -> pl.DataFrame:
+        required = {"cycle", "actual_winner", "ensemble_probability", baseline_column}
+        if predictions.is_empty() or not required.issubset(predictions.columns):
+            return pl.DataFrame()
+        eligible = predictions.filter(
+            pl.col("actual_winner").is_not_null()
+            & pl.col("ensemble_probability").is_not_null()
+            & pl.col(baseline_column).is_not_null()
+        )
+        if eligible.is_empty():
+            return pl.DataFrame()
+        clipped = eligible.with_columns(
+            pl.col("actual_winner").cast(pl.Float64).alias("_actual"),
+            pl.col("ensemble_probability").cast(pl.Float64).clip(1e-6, 1 - 1e-6).alias("_ensemble"),
+            pl.col(baseline_column).cast(pl.Float64).clip(1e-6, 1 - 1e-6).alias("_baseline"),
+        ).with_columns(
+            ((pl.col("_ensemble") - pl.col("_actual")) ** 2).alias("_ensemble_brier"),
+            ((pl.col("_baseline") - pl.col("_actual")) ** 2).alias("_baseline_brier"),
+            (
+                -(
+                    pl.col("_actual") * pl.col("_ensemble").log()
+                    + (1 - pl.col("_actual")) * (1 - pl.col("_ensemble")).log()
+                )
+            ).alias("_ensemble_log"),
+            (
+                -(
+                    pl.col("_actual") * pl.col("_baseline").log()
+                    + (1 - pl.col("_actual")) * (1 - pl.col("_baseline")).log()
+                )
+            ).alias("_baseline_log"),
+        )
+        return (
+            clipped.group_by("cycle")
+            .agg(
+                (pl.col("_ensemble_brier") - pl.col("_baseline_brier"))
+                .mean()
+                .alias("brier_difference"),
+                (pl.col("_ensemble_log") - pl.col("_baseline_log"))
+                .mean()
+                .alias("log_score_difference"),
+                pl.len().alias("paired_row_count"),
+            )
+            .sort("cycle")
+        )
+
+    @staticmethod
+    def _cluster_bootstrap_interval(
+        cycle_differences: np.ndarray,
+        *,
+        replicates: int,
+        seed: int,
+    ) -> dict[str, float]:
+        values = np.asarray(cycle_differences, dtype=np.float64)
+        rng = np.random.default_rng(seed)
+        indices = rng.integers(0, len(values), size=(replicates, len(values)))
+        bootstrap_means = values[indices].mean(axis=1)
+        return {
+            "estimate": float(values.mean()),
+            "lower_95": float(np.quantile(bootstrap_means, 0.025)),
+            "upper_95": float(np.quantile(bootstrap_means, 0.975)),
+            "cluster_standard_error": float(values.std(ddof=1) / math.sqrt(len(values))),
+            "probability_ensemble_better": float(np.mean(bootstrap_means < 0.0)),
+        }
+
+    def _publication_outer_fold(
+        self,
+        *,
+        bundle: FeatureBundle,
+        train_catalog: pl.DataFrame,
+        test_catalog: pl.DataFrame,
+        target_cycle: int,
+        as_of: str,
+        as_of_offset_days: int,
+        model_config: dict[str, Any],
+        inference_engine: str,
+        residual_covariance: pl.DataFrame,
+        holdovers: dict[str, int] | None,
+    ) -> tuple[pl.DataFrame, dict[str, bool]]:
+        # Lazy import avoids the simulation -> scoring.learning -> scoring package
+        # initialization cycle during test collection.
+        from civic_signal.models.simulation import SimulationEngine
+
+        incomplete_path = {
+            "simulation_engine_used": False,
+            "posterior_draw_path_complete": False,
+        }
+        train_bundle = filter_results_before_cycle(
+            filter_bundle_by_date(subset_bundle(bundle, train_catalog), as_of), target_cycle
+        )
+        test_bundle = filter_bundle_by_date(subset_bundle(bundle, test_catalog), as_of)
+        components, ensemble, cycle_config, posterior_draws = self.base._publication_components(
+            train_bundle=train_bundle,
+            test_bundle=test_bundle,
+            as_of=as_of,
+            model_config=model_config,
+            inference_engine=inference_engine,
+        )
+        if ensemble.is_empty():
+            # No SimulationEngine invocation — never claim exact publication path.
+            return self.base._empty_predictions(), incomplete_path
+        posterior_path_complete = inference_engine != "bayes" or not posterior_draws.is_empty()
+        outputs = SimulationEngine(
+            cycle_config,
+            residual_covariance=residual_covariance,
+            holdovers=holdovers,
+        ).run(
+            replace(test_bundle, results=test_bundle.results.head(0)),
+            ensemble,
+            posterior_draws=posterior_draws if not posterior_draws.is_empty() else None,
+        )
+        forecast_map = {
+            (str(row["race_id"]), str(row["option_id"])): row
+            for row in outputs.race_forecasts.iter_rows(named=True)
+        }
+        actuals = {
+            (str(row["race_id"]), str(row["option_id"])): row
+            for row in test_bundle.results.iter_rows(named=True)
+        }
+        component_maps = {
+            "polls_probability": self.base._component_probability(components[0]),
+            "fundamentals_probability": self.base._component_probability(components[1]),
+            "markets_probability": self.base._component_probability(components[2]),
+            "public_signals_probability": self.base._component_probability(components[3]),
+        }
+        baseline_sigma = self.base._baseline_sigma(train_bundle, model_config)
+        option_counts = {
+            str(row["race_id"]): int(row["option_count"])
+            for row in test_bundle.options.group_by("race_id")
+            .agg(pl.len().alias("option_count"))
+            .iter_rows(named=True)
+        }
+        poll_average = self._poll_average_probabilities(test_bundle.polls)
+        rows = []
+        for option in test_bundle.options.iter_rows(named=True):
+            key = (str(option["race_id"]), str(option["option_id"]))
+            actual = actuals.get(key)
+            forecast = forecast_map.get(key)
+            if actual is None or forecast is None or forecast.get("winner_probability") is None:
+                continue
+            previous_share = float(option.get("previous_vote_share") or 0.5)
+            previous_cycle_swing = normal_cdf((previous_share - 0.5) / baseline_sigma)
+            row = {
+                "race_id": key[0],
+                "option_id": key[1],
+                "cycle": target_cycle,
+                "as_of": as_of,
+                "as_of_offset_days": as_of_offset_days,
+                "polling_inference_engine": inference_engine,
+                "party": option.get("party"),
+                "actual_winner": bool(actual["winner"]),
+                "actual_vote_share": float(actual["vote_share"]),
+                "baseline_probability": previous_cycle_swing,
+                "baseline_sigma": baseline_sigma,
+                "prior_only_probability": 1.0 / max(option_counts.get(key[0], 1), 1),
+                "previous_cycle_swing_probability": previous_cycle_swing,
+                "fundamentals_only_probability": component_maps["fundamentals_probability"].get(
+                    key
+                ),
+                "poll_average_probability": poll_average.get(key),
+                "market_implied_probability": component_maps["markets_probability"].get(key),
+                "ensemble_probability": float(forecast["winner_probability"]),
+                "learned_ensemble_probability": float(forecast["winner_probability"]),
+                "configured_ensemble_probability": None,
+                "predicted_vote_share": forecast.get("vote_share_mean"),
+                "lower_90": forecast.get("vote_share_p05"),
+                "upper_90": forecast.get("vote_share_p95"),
+            }
+            for column, values in component_maps.items():
+                row[column] = values.get(key, row["baseline_probability"])
+            rows.append(row)
+        frame = pl.DataFrame(rows) if rows else self.base._empty_predictions()
+        return frame, {
+            "simulation_engine_used": True,
+            "posterior_draw_path_complete": posterior_path_complete,
+        }
+
+    @staticmethod
+    def _poll_average_probabilities(
+        polls: pl.DataFrame,
+    ) -> dict[tuple[str, str], float]:
+        required = {"race_id", "option_id", "pct"}
+        if polls.is_empty() or not required.issubset(polls.columns):
+            return {}
+        averages = (
+            polls.filter(pl.col("pct").is_not_null())
+            .group_by(["race_id", "option_id"])
+            .agg(pl.col("pct").cast(pl.Float64).mean().alias("average_pct"))
+            .with_columns(
+                pl.len().over("race_id").alias("polled_option_count"),
+                pl.col("average_pct").sum().over("race_id").alias("race_pct_sum"),
+            )
+            .filter((pl.col("polled_option_count") > 1) & (pl.col("race_pct_sum") > 0))
+            .with_columns((pl.col("average_pct") / pl.col("race_pct_sum")).alias("probability"))
+        )
+        return {
+            (str(row["race_id"]), str(row["option_id"])): float(row["probability"])
+            for row in averages.iter_rows(named=True)
+        }
+
+    @staticmethod
+    def _training_lineage_hash(bundle: FeatureBundle, catalog: pl.DataFrame) -> str:
+        race_ids = sorted(str(value) for value in catalog["race_id"].to_list())
+        tables: dict[str, list[dict[str, Any]]] = {}
+        for name, frame in (
+            ("races", bundle.races),
+            ("options", bundle.options),
+            ("polls", bundle.polls),
+            ("markets", bundle.markets),
+            ("public_signals", bundle.public_signals),
+            ("fundamentals", bundle.fundamentals),
+            ("results", bundle.results),
+        ):
+            if "race_id" not in frame.columns:
+                tables[name] = []
+                continue
+            selected = frame.filter(pl.col("race_id").is_in(race_ids))
+            if selected.columns:
+                selected = selected.select(sorted(selected.columns)).sort(selected.columns)
+            tables[name] = selected.to_dicts()
+        return hashlib.sha256(
+            json.dumps(
+                {"race_ids": race_ids, "tables": tables},
+                sort_keys=True,
+                default=str,
+            ).encode()
+        ).hexdigest()
+
+    @classmethod
+    def _held_out_permutation_canary(
+        cls, bundle: FeatureBundle, catalog: pl.DataFrame, outer_cycle: int
+    ) -> bool:
+        training = catalog.filter(pl.col("cycle") < outer_cycle)
+        before = cls._training_lineage_hash(bundle, training)
+        outer_ids = catalog.filter(pl.col("cycle") == outer_cycle)["race_id"].to_list()
+        if "winner" not in bundle.results.columns:
+            return before == cls._training_lineage_hash(bundle, training)
+        permuted_results = bundle.results.with_columns(
+            pl.when(pl.col("race_id").is_in(outer_ids))
+            .then(~pl.col("winner"))
+            .otherwise(pl.col("winner"))
+            .alias("winner")
+        )
+        permuted = FeatureBundle(**{**bundle.__dict__, "results": permuted_results})
+        return before == cls._training_lineage_hash(permuted, training)
+
+    @staticmethod
+    def _empty_manifest() -> pl.DataFrame:
+        return pl.DataFrame(
+            schema={
+                "outer_cycle": pl.Int64,
+                "train_cycles": pl.Utf8,
+                "inner_validation_cycles": pl.Utf8,
+                "fit_cycle_max": pl.Int64,
+                "outer_cycle_excluded": pl.Boolean,
+                "inner_row_count": pl.Int64,
+                "outer_row_count": pl.Int64,
+                "weights_status": pl.Utf8,
+                "calibration_status": pl.Utf8,
+                "hyperparameter_status": pl.Utf8,
+                "selected_hyperparameters": pl.Utf8,
+                "publication_path": pl.Utf8,
+                "simulation_engine_used": pl.Boolean,
+                "posterior_draw_path_complete": pl.Boolean,
+                "training_lineage_sha256": pl.Utf8,
+                "held_out_permutation_affects_training": pl.Boolean,
+                "held_out_permutation_canary_passed": pl.Boolean,
+            }
+        )
 
 
 # --- Fold worker (module level so it is picklable by the spawn context) ---
