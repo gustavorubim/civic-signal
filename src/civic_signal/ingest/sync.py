@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import shutil
 import time
 import urllib.error
@@ -9,6 +11,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import ClassVar
 
 import polars as pl
 
@@ -41,6 +44,18 @@ class SyncResult:
     failed_sources: int
 
 
+class SourceSyncError(RuntimeError):
+    """A source failure with a stable machine-readable manifest status."""
+
+    VALID_STATUSES: ClassVar[set[str]] = {"empty", "rate_limited", "schema_change", "failed"}
+
+    def __init__(self, status: str, message: str) -> None:
+        if status not in self.VALID_STATUSES:
+            raise ValueError(f"Unsupported source sync status: {status}")
+        self.status = status
+        super().__init__(message)
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -61,6 +76,15 @@ class SyncRunner:
         self.context.state_dir.mkdir(parents=True, exist_ok=True)
         state_path = self.context.state_dir / "sync_state.json"
         previous = read_json(state_path) if state_path.exists() else {}
+        previous_manifest_path = self.context.raw_dir / "source_manifest.parquet"
+        previous_rows: dict[str, dict[str, object]] = {}
+        if previous_manifest_path.exists():
+            previous_manifest = pl.read_parquet(previous_manifest_path)
+            previous_rows = {
+                str(row["source_id"]): row
+                for row in previous_manifest.iter_rows(named=True)
+                if row.get("source_id") is not None
+            }
 
         rows: list[dict[str, object]] = []
         active_source_ids = {source.id for source in self.registry.sources}
@@ -75,6 +99,19 @@ class SyncRunner:
         for source in self.registry.sources:
             try:
                 row, did_fetch = self._sync_one(source, previous, retrieved_at)
+                if not did_fetch:
+                    previous_row = previous_rows.get(source.id, {})
+                    if str(previous_row.get("content_hash") or "") == str(
+                        row.get("content_hash") or ""
+                    ):
+                        original = str(
+                            previous_row.get("original_snapshot_at")
+                            or previous_row.get("retrieved_at")
+                            or retrieved_at
+                        )
+                        row["retrieved_at"] = original
+                        row["original_snapshot_at"] = original
+                row["checked_at"] = retrieved_at
                 fetched += int(did_fetch)
                 skipped += int(not did_fetch)
                 state[source.id] = str(row["content_hash"])
@@ -85,8 +122,27 @@ class SyncRunner:
 
         manifest = pl.DataFrame(rows)
         write_parquet(manifest, self.context.raw_dir / "source_manifest.parquet")
+        self._update_snapshot_index(manifest)
         write_json(state, state_path)
         return SyncResult(manifest, fetched, skipped, failed)
+
+    def _update_snapshot_index(self, manifest: pl.DataFrame) -> None:
+        """Retain one immutable index row for every observed source-content pair."""
+        index_path = self.context.raw_dir / "snapshot_index.parquet"
+        snapshots = manifest.filter(pl.col("content_hash").cast(pl.Utf8) != "")
+        if index_path.exists():
+            snapshots = pl.concat(
+                [pl.read_parquet(index_path), snapshots],
+                how="diagonal_relaxed",
+            )
+        snapshots = snapshots.unique(
+            subset=["source_id", "content_hash"],
+            keep="first",
+            maintain_order=True,
+        )
+        if {"source_id", "original_snapshot_at"}.issubset(snapshots.columns):
+            snapshots = snapshots.sort(["source_id", "original_snapshot_at"])
+        write_parquet(snapshots, index_path)
 
     def _sync_one(
         self,
@@ -113,12 +169,21 @@ class SyncRunner:
                 "url": source.url,
                 "raw_path": str(raw_path),
                 "retrieved_at": retrieved_at,
+                "original_snapshot_at": retrieved_at,
+                "checked_at": retrieved_at,
                 "content_hash": content_hash,
                 "license": source.license,
+                "terms_url": source.terms_url,
+                "citation": source.citation,
                 "parser_version": source.parser_version,
                 "parser_args": source.parser_args_json(),
                 "auth_mode": source.auth_mode,
+                "source_class": source.source_class,
+                "access_policy": source.access_policy,
+                "terms_status": source.terms_status,
+                "source_priority": source.priority,
                 "status": "fetched" if did_fetch else "unchanged",
+                "refresh_status": "",
                 "error": "",
                 "downstream_usage": "",
             },
@@ -138,6 +203,7 @@ class SyncRunner:
             if cached is not None:
                 return cached, False
             raise
+        self._validate_http_payload(source, payload)
         content_hash = hashlib.sha256(payload).hexdigest()
         suffix = self._http_suffix(source)
         raw_path = self.context.raw_dir / source.id / f"{content_hash}{suffix}"
@@ -152,12 +218,21 @@ class SyncRunner:
                 "url": source.url,
                 "raw_path": str(raw_path),
                 "retrieved_at": retrieved_at,
+                "original_snapshot_at": retrieved_at,
+                "checked_at": retrieved_at,
                 "content_hash": content_hash,
                 "license": source.license,
+                "terms_url": source.terms_url,
+                "citation": source.citation,
                 "parser_version": source.parser_version,
                 "parser_args": source.parser_args_json(),
                 "auth_mode": source.auth_mode,
+                "source_class": source.source_class,
+                "access_policy": source.access_policy,
+                "terms_status": source.terms_status,
+                "source_priority": source.priority,
                 "status": "fetched" if did_fetch else "unchanged",
+                "refresh_status": "",
                 "error": "",
                 "downstream_usage": "",
             },
@@ -195,12 +270,21 @@ class SyncRunner:
             "url": source.url,
             "raw_path": str(raw_path),
             "retrieved_at": retrieved_at,
+            "original_snapshot_at": retrieved_at,
+            "checked_at": retrieved_at,
             "content_hash": previous_hash,
             "license": source.license,
+            "terms_url": source.terms_url,
+            "citation": source.citation,
             "parser_version": source.parser_version,
             "parser_args": source.parser_args_json(),
             "auth_mode": source.auth_mode,
+            "source_class": source.source_class,
+            "access_policy": source.access_policy,
+            "terms_status": source.terms_status,
+            "source_priority": source.priority,
             "status": "stale_reused",
+            "refresh_status": self._error_status(exc),
             "error": f"refresh failed; reused previous raw snapshot: {exc}",
             "downstream_usage": "",
         }
@@ -229,13 +313,55 @@ class SyncRunner:
                             f"Payload exceeds max {HTTP_MAX_BYTES} bytes while reading: {url}"
                         )
                     return payload
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429:
+                    last_exc = SourceSyncError(
+                        "rate_limited", f"HTTP 429 rate limit response from {url}"
+                    )
+                elif 400 <= exc.code < 500:
+                    raise SourceSyncError(
+                        "failed", f"HTTP {exc.code} client error from {url}"
+                    ) from exc
+                else:
+                    last_exc = exc
+                if attempt < HTTP_RETRY_ATTEMPTS - 1:
+                    time.sleep(HTTP_BACKOFF_SECONDS[attempt])
             except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
                 last_exc = exc
                 if attempt < HTTP_RETRY_ATTEMPTS - 1:
                     time.sleep(HTTP_BACKOFF_SECONDS[attempt])
+        if isinstance(last_exc, SourceSyncError):
+            raise last_exc
         raise RuntimeError(
             f"HTTP fetch failed after {HTTP_RETRY_ATTEMPTS} attempts: {url}"
         ) from last_exc
+
+    @staticmethod
+    def _validate_http_payload(source: SourceDefinition, payload: bytes) -> None:
+        if not payload.strip():
+            raise SourceSyncError("empty", f"Source {source.id} returned an empty payload")
+        if source.type != "http_csv":
+            return
+        required = source.parser_args.get("required_columns")
+        if required is None:
+            return
+        if not isinstance(required, list) or not required:
+            raise SourceSyncError(
+                "schema_change",
+                f"Source {source.id} required_columns contract must be a non-empty list",
+            )
+        try:
+            header = next(csv.reader(io.StringIO(payload.decode("utf-8-sig"))))
+        except (UnicodeDecodeError, StopIteration, csv.Error) as exc:
+            raise SourceSyncError(
+                "schema_change", f"Source {source.id} CSV header could not be parsed"
+            ) from exc
+        missing = sorted(str(column) for column in required if str(column) not in header)
+        if missing:
+            raise SourceSyncError(
+                "schema_change",
+                f"Source {source.id} missing required CSV columns: {missing}",
+            )
 
     @staticmethod
     def _http_suffix(source: SourceDefinition) -> str:
@@ -257,12 +383,26 @@ class SyncRunner:
             "url": source.url,
             "raw_path": "",
             "retrieved_at": retrieved_at,
+            "original_snapshot_at": retrieved_at,
+            "checked_at": retrieved_at,
             "content_hash": "",
             "license": source.license,
+            "terms_url": source.terms_url,
+            "citation": source.citation,
             "parser_version": source.parser_version,
             "parser_args": source.parser_args_json(),
             "auth_mode": source.auth_mode,
-            "status": "failed",
+            "source_class": source.source_class,
+            "access_policy": source.access_policy,
+            "terms_status": source.terms_status,
+            "source_priority": source.priority,
+            "status": SyncRunner._error_status(exc),
+            "refresh_status": SyncRunner._error_status(exc),
             "error": str(exc),
             "downstream_usage": "",
         }
+
+    @staticmethod
+    def _error_status(exc: Exception) -> str:
+        status = getattr(exc, "status", "failed")
+        return str(status) if str(status) in SourceSyncError.VALID_STATUSES else "failed"

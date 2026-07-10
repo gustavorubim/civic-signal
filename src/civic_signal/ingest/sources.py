@@ -19,6 +19,12 @@ class SourceDefinition:
     url: str
     auth_mode: str = "none"
     parser_args: dict[str, Any] = field(default_factory=dict)
+    source_class: str = "unknown"
+    access_policy: str = "unknown"
+    terms_status: str = "unknown"
+    terms_url: str = ""
+    citation: str = ""
+    priority: int = 0
 
     def parser_args_json(self) -> str:
         return json.dumps(self.parser_args, sort_keys=True)
@@ -51,9 +57,46 @@ class SourceRegistry:
                     url=str(item["url"]),
                     auth_mode=str(item.get("auth_mode", "none")),
                     parser_args=dict(parser_args),
+                    source_class=str(
+                        item.get("source_class")
+                        or ("fixture" if str(item["type"]) == "fixture" else "production")
+                    ),
+                    access_policy=str(
+                        item.get("access_policy")
+                        or ("fixture_local" if str(item["type"]) == "fixture" else "unknown")
+                    ),
+                    terms_status=str(item.get("terms_status", "unknown")),
+                    terms_url=str(item.get("terms_url", "")),
+                    citation=str(item.get("citation", "")),
+                    priority=int(
+                        item.get(
+                            "priority",
+                            cls._default_priority(
+                                str(
+                                    item.get("source_class")
+                                    or (
+                                        "fixture"
+                                        if str(item["type"]) == "fixture"
+                                        else "production"
+                                    )
+                                )
+                            ),
+                        )
+                    ),
                 )
             )
         return cls(sources)
+
+    @staticmethod
+    def _default_priority(source_class: str) -> int:
+        """Return a stable within-class priority; class rank remains the hard boundary."""
+        return {
+            "official_public": 400,
+            "production_web": 300,
+            "production": 250,
+            "fixture": 50,
+            "synthetic": 0,
+        }.get(source_class.lower(), 100)
 
     @classmethod
     def _read_source_payload(

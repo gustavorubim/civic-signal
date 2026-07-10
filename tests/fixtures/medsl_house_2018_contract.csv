@@ -1,0 +1,8 @@
+year,state,state_po,state_fips,state_cen,state_ic,office,district,stage,runoff,special,candidate,party,writein,mode,candidatevotes,totalvotes,unofficial,version
+2018,Wisconsin,WI,55,35,25,US House,1,gen,FALSE,FALSE,Dan Candidate,democrat,FALSE,total,145000,300000,FALSE,20210113
+2018,Wisconsin,WI,55,35,25,US House,1,gen,FALSE,FALSE,Rae Candidate,republican,FALSE,total,154000,300000,FALSE,20210113
+2018,Wisconsin,WI,55,35,25,US House,1,gen,FALSE,FALSE,NA,NA,TRUE,total,1000,300000,FALSE,20210113
+2018,Wisconsin,WI,55,35,25,US House,1,gen,FALSE,FALSE,Rae Candidate,republican,FALSE,absentee,50000,300000,FALSE,20210113
+2018,Wisconsin,WI,55,35,25,US House,2,gen,FALSE,FALSE,Dee Candidate,democrat,FALSE,total,160000,310000,FALSE,20210113
+2018,Wisconsin,WI,55,35,25,US House,2,gen,FALSE,FALSE,Ron Candidate,republican,FALSE,total,150000,310000,FALSE,20210113
+2018,Wisconsin,WI,55,35,25,US House,3,gen,FALSE,FALSE,Unofficial Candidate,democrat,FALSE,total,1,1,TRUE,20210113
