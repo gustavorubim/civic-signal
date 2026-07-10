@@ -1,0 +1,39 @@
+{
+  "name": "chamber_control",
+  "description": "Small chamber of two races with a control summary row.",
+  "expected_control_rows": 1,
+  "race_forecasts": [
+    {
+      "race_id": "sen-aa-2026",
+      "option_id": "DEM",
+      "winner_probability": 0.55,
+      "control_body": "senate"
+    },
+    {
+      "race_id": "sen-aa-2026",
+      "option_id": "REP",
+      "winner_probability": 0.45,
+      "control_body": "senate"
+    },
+    {
+      "race_id": "sen-bb-2026",
+      "option_id": "DEM",
+      "winner_probability": 0.61,
+      "control_body": "senate"
+    },
+    {
+      "race_id": "sen-bb-2026",
+      "option_id": "REP",
+      "winner_probability": 0.39,
+      "control_body": "senate"
+    }
+  ],
+  "control_forecasts": [
+    {
+      "control_body": "senate",
+      "party": "DEM",
+      "majority_probability": 0.57,
+      "control_probability": 0.57
+    }
+  ]
+}

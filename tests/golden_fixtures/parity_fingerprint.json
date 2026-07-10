@@ -1,0 +1,8 @@
+{
+  "seed": 20260508,
+  "race_count": 4,
+  "draw_count": 64,
+  "atol": 1e-12,
+  "python_fingerprint": "d6c7be79b6261f9219ad01a2a2f13443875d189c7d7f2b8803f35fca80e730eb",
+  "numba_fingerprint": "d6c7be79b6261f9219ad01a2a2f13443875d189c7d7f2b8803f35fca80e730eb"
+}

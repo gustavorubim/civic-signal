@@ -1,0 +1,22 @@
+{
+  "name": "multi_option_race",
+  "description": "Three-way race probabilities on the simplex.",
+  "expected_options": 3,
+  "race_forecasts": [
+    {
+      "race_id": "gov-xx-2026",
+      "option_id": "DEM",
+      "winner_probability": 0.41
+    },
+    {
+      "race_id": "gov-xx-2026",
+      "option_id": "REP",
+      "winner_probability": 0.37
+    },
+    {
+      "race_id": "gov-xx-2026",
+      "option_id": "IND",
+      "winner_probability": 0.22
+    }
+  ]
+}

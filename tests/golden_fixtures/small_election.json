@@ -1,0 +1,23 @@
+{
+  "name": "small_election",
+  "description": "One binary race with ordered share intervals.",
+  "expected_race_count": 1,
+  "race_forecasts": [
+    {
+      "race_id": "sen-aa-2026",
+      "option_id": "DEM",
+      "winner_probability": 0.58,
+      "share_p10": 0.48,
+      "share_p50": 0.53,
+      "share_p90": 0.58
+    },
+    {
+      "race_id": "sen-aa-2026",
+      "option_id": "REP",
+      "winner_probability": 0.42,
+      "share_p10": 0.42,
+      "share_p50": 0.47,
+      "share_p90": 0.52
+    }
+  ]
+}

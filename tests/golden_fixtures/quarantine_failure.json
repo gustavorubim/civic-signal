@@ -1,0 +1,17 @@
+{
+  "name": "quarantine_failure",
+  "description": "Adversarial fixture: probabilities do not form a simplex (must fail).",
+  "expect_property_failure": true,
+  "race_forecasts": [
+    {
+      "race_id": "sen-bad-2026",
+      "option_id": "DEM",
+      "winner_probability": 0.80
+    },
+    {
+      "race_id": "sen-bad-2026",
+      "option_id": "REP",
+      "winner_probability": 0.80
+    }
+  ]
+}
