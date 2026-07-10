@@ -61,11 +61,37 @@ def _base_manifest(*, synthetic: bool = False) -> pl.DataFrame:
     return pl.DataFrame(
         {
             "source_id": ["polls_real" if not synthetic else "fixture_polls"],
+            "url": [
+                "https://example.test/polls.csv" if not synthetic else "file://fixtures/polls.csv"
+            ],
             "status": ["fetched"],
             "content_hash": ["hash1"],
             "auth_mode": ["public"],
             "source_class": ["production" if not synthetic else "fixture"],
             "is_synthetic": [synthetic],
+            "access_policy": ["free_public_web" if not synthetic else "fixture_local"],
+            "terms_status": ["reviewed_for_use" if not synthetic else "fixture_only"],
+        }
+    )
+
+
+def _base_selected_lineage() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "table": ["polls"],
+            "row_key": ["poll-1|r0|dem"],
+            "selection_key": ["r0|poll-1|dem"],
+            "snapshot_id": ["polls|r0|poll-1|dem|1|2026-01-01|hash1"],
+            "revision_id": ["1"],
+            "observed_at": ["2025-12-31"],
+            "published_at": ["2026-01-01"],
+            "selection_predicate": ["available_at<=as_of; latest eligible revision"],
+            "source_id": ["polls_real"],
+            "source_hash": ["hash1"],
+            "available_at": ["2026-01-01T00:00:00+00:00"],
+            "availability_basis": ["retrieved_at"],
+            "availability_is_explicit": [True],
+            "selected_as_of": ["2026-05-08"],
         }
     )
 
@@ -82,6 +108,11 @@ def _seed_run(run_dir: Path, **overrides: object) -> Path:
     forecasts.write_parquet(run_dir / "race_forecasts.parquet")
     catalog.write_parquet(run_dir / "race_catalog.parquet")
     manifest.write_parquet(run_dir / "source_manifest.parquet")
+    selected_lineage = overrides.get("selected_feature_lineage.parquet", _base_selected_lineage())
+    assert isinstance(selected_lineage, pl.DataFrame)
+    selected_lineage.write_parquet(run_dir / "selected_feature_lineage.parquet")
+    from civic_signal.verification.as_of import AsOfVerificationRunner
+
     # Semantic reconciliation requires draws + control artifacts.
     race_ids = forecasts["race_id"].unique().to_list()
     pl.DataFrame(
@@ -149,11 +180,24 @@ def _seed_run(run_dir: Path, **overrides: object) -> Path:
             "quality_passed": True,
             "needs_full_refit": False,
             "strategy": "reweighting",
+            "requested_strategy": "reweighting",
+            "executed_strategy": "likelihood_reweighting_systematic_resampling",
+            "resampling_method": "systematic",
+            "anchor_age_days": 1,
+            "anchor_age_exceeds_refit_threshold": False,
             "probability_mae_vs_full_refit": 0.001,
             "probability_max_diff_vs_full_refit": 0.01,
-            "full_refit_executed": False,
+            "full_refit_executed": True,
+            "r15_evidence_complete": True,
             "weights_degenerate": False,
             "noop": False,
+        },
+        "latest_update_vs_full_refit_audit.json": {
+            "status": "passed",
+            "comparison_executed": True,
+            "probability_mae_vs_full_refit": 0.001,
+            "probability_max_diff_vs_full_refit": 0.01,
+            "full_refit_run_id": "fixture-full-refit",
         },
         "source_registry_audit.json": {
             "synthetic_rows": 0,
@@ -163,6 +207,25 @@ def _seed_run(run_dir: Path, **overrides: object) -> Path:
             "future_eligible_rows": 0,
             "time_travel_canaries_passed": True,
             "status": "ok",
+            "recomputed": True,
+            "missing_availability_rows": 0,
+            "implicit_availability_rows": 0,
+            "duplicate_snapshot_keys": 0,
+            "selection_contract_complete": True,
+            "full_path_canary_provided": True,
+            "full_path_canary": {
+                "passed": True,
+                "scope": "exact_publication_pipeline",
+                "selected_features_unchanged": True,
+                "tiers_unchanged": True,
+                "posterior_unchanged": True,
+                "component_center_unchanged": True,
+                "race_probabilities_unchanged": True,
+                "controls_unchanged": True,
+                "every_time_varying_table_injected": True,
+                "forecast_fingerprint_unchanged": True,
+            },
+            "lineage_sha256": AsOfVerificationRunner._lineage_hash(selected_lineage),
         },
         "nested_evaluation.json": {
             "exact_pipeline": True,
@@ -225,6 +288,7 @@ def _seed_run(run_dir: Path, **overrides: object) -> Path:
         },
         "feature_lineage.json": {
             "max_snapshots_per_feature_key": 1,
+            "selection_contract_complete": True,
             "incumbent_relative_sign": True,
             "end_of_cycle_finance_in_early_fold": False,
             "revised_macro_in_early_fold": False,
@@ -664,7 +728,7 @@ def test_r14_calibrated_publication_pass_and_out_of_range_fail(
     assert _eval_one(bad, "R14_calibrated_publication", rewards_config)["state"] == "fail"
 
 
-def test_r15_daily_update_pass_and_noop_fail(tmp_path: Path, rewards_config: dict) -> None:
+def test_r15_daily_update_pass_and_noop_insufficient(tmp_path: Path, rewards_config: dict) -> None:
     good = _seed_run(tmp_path / "r15-good")
     assert _eval_one(good, "R15_daily_update_quality", rewards_config)["state"] == "pass"
     bad = _seed_run(
@@ -680,18 +744,43 @@ def test_r15_daily_update_pass_and_noop_fail(tmp_path: Path, rewards_config: dic
             }
         },
     )
-    assert _eval_one(bad, "R15_daily_update_quality", rewards_config)["state"] == "fail"
+    assert (
+        _eval_one(bad, "R15_daily_update_quality", rewards_config)["state"]
+        == "insufficient_evidence"
+    )
 
 
 def test_r16_real_data_pass_and_fixture_fail(tmp_path: Path, rewards_config: dict) -> None:
     good = _seed_run(tmp_path / "r16-good")
     assert _eval_one(good, "R16_real_data_exclusivity", rewards_config)["state"] == "pass"
+    free_key_manifest = _base_manifest().with_columns(pl.lit("free_api_key").alias("auth_mode"))
+    free_key = _seed_run(tmp_path / "r16-free-key", source_manifest=free_key_manifest)
+    free_key_result = RewardV2Evaluator(rewards_config=rewards_config).evaluate_run_dir(
+        free_key, profile="production", publication_mode="production"
+    )
+    assert free_key_result["rewards"]["R16_real_data_exclusivity"]["state"] == "pass"
     bad = _seed_run(
         tmp_path / "r16-bad",
         source_manifest=_base_manifest(synthetic=True),
         **{"source_registry_audit.json": {"synthetic_rows": 1, "fixture_source_count": 1}},
     )
     assert _eval_one(bad, "R16_real_data_exclusivity", rewards_config)["state"] == "fail"
+
+
+def test_r16_production_rejects_nonfree_or_unreviewed_sources(
+    tmp_path: Path, rewards_config: dict
+) -> None:
+    manifest = _base_manifest().with_columns(
+        pl.lit("paid_api").alias("access_policy"),
+        pl.lit("https://example.test/data.csv").alias("url"),
+    )
+    run = _seed_run(tmp_path / "r16-paid", source_manifest=manifest)
+    result = RewardV2Evaluator(rewards_config=rewards_config).evaluate_run_dir(
+        run, profile="production", publication_mode="production"
+    )
+    reward = result["rewards"]["R16_real_data_exclusivity"]
+    assert reward["state"] in {"fail", "insufficient_evidence"}
+    assert "R16_real_data_exclusivity" in result["blocking_rewards"]
 
 
 def test_r17_as_of_pass_and_future_row_fail(tmp_path: Path, rewards_config: dict) -> None:
@@ -707,6 +796,25 @@ def test_r17_as_of_pass_and_future_row_fail(tmp_path: Path, rewards_config: dict
         },
     )
     assert _eval_one(bad, "R17_as_of_integrity", rewards_config)["state"] == "fail"
+
+
+def test_r17_production_rejects_narrower_time_travel_canary_scope(
+    tmp_path: Path, rewards_config: dict
+) -> None:
+    run_dir = _seed_run(tmp_path / "r17-narrow")
+    audit = json.loads((run_dir / "as_of_audit.json").read_text(encoding="utf-8"))
+    audit["full_path_canary"]["scope"] = "deterministic_component_center"
+    (run_dir / "as_of_audit.json").write_text(json.dumps(audit), encoding="utf-8")
+
+    result = _eval_one(
+        run_dir,
+        "R17_as_of_integrity",
+        rewards_config,
+        profile="production",
+        publication_mode="production",
+    )
+    assert result["state"] == "fail"
+    assert any("exact publication pipeline" in reason for reason in result["failure_reasons"])
 
 
 def test_r18_nested_pass_and_leakage_fail(tmp_path: Path, rewards_config: dict) -> None:
@@ -1131,18 +1239,50 @@ def test_as_of_runner_insufficient_and_pass_paths(tmp_path: Path) -> None:
     assert missing["passed"] is False
     assert missing["exit_nonzero"] is True
 
-    forecast = artifacts / "forecasts" / "with-audit"
+    forecast = artifacts / "runs" / "with-audit"
     forecast.mkdir(parents=True)
-    _write_json(
-        forecast / "as_of_audit.json",
-        {
-            "future_eligible_rows": 0,
-            "time_travel_canaries_passed": True,
-            "status": "ok",
-        },
-    )
+    _write_json(forecast / "run_manifest.json", {"as_of": "2026-05-08"})
+    _base_selected_lineage().write_parquet(forecast / "selected_feature_lineage.parquet")
     ok = AsOfVerificationRunner(context).verify(run_id="with-audit")
     assert ok["passed"] is True
+    assert ok["audit"]["recomputed"] is True
+    assert ok["audit"]["lineage_row_count"] == 1
+
+
+def test_as_of_runner_rejects_future_missing_and_duplicate_rows(tmp_path: Path) -> None:
+    root = tmp_path / "proj"
+    config_dir = root / "configs"
+    config_dir.mkdir(parents=True)
+    shutil.copy(REWARDS_YAML, config_dir / "rewards.yaml")
+    artifacts = root / "artifacts"
+    context = ProjectContext.create(root=root, artifacts_dir=artifacts)
+    from civic_signal.verification.as_of import AsOfVerificationRunner
+
+    run_dir = artifacts / "runs" / "bad-lineage"
+    run_dir.mkdir(parents=True)
+    _write_json(run_dir / "run_manifest.json", {"as_of": "2026-05-08"})
+    lineage = pl.concat(
+        [
+            _base_selected_lineage(),
+            _base_selected_lineage().with_columns(
+                pl.lit("2026-05-09T00:00:00+00:00").alias("available_at")
+            ),
+            _base_selected_lineage().with_columns(
+                pl.lit(None, dtype=pl.String).alias("available_at"),
+                pl.lit("missing|row").alias("row_key"),
+            ),
+        ]
+    )
+    lineage.write_parquet(run_dir / "selected_feature_lineage.parquet")
+
+    result = AsOfVerificationRunner(context).verify(run_id="bad-lineage")
+
+    assert result["passed"] is False
+    assert result["audit"]["status"] == "failed"
+    assert result["audit"]["future_eligible_rows"] == 1
+    assert result["audit"]["missing_availability_rows"] == 1
+    assert result["audit"]["duplicate_snapshot_keys"] == 1
+    assert result["audit"]["time_travel_canaries_passed"] is True
 
 
 def test_publication_promote_success_and_semantic_hash(tmp_path: Path) -> None:
@@ -1572,9 +1712,15 @@ def test_zero_mae_and_max_diff_pass_r15(tmp_path: Path, rewards_config: dict) ->
                 "quality_passed": True,
                 "needs_full_refit": False,
                 "strategy": "reweighting",
+                "requested_strategy": "reweighting",
+                "executed_strategy": "likelihood_reweighting_systematic_resampling",
+                "resampling_method": "systematic",
+                "anchor_age_days": 1,
+                "anchor_age_exceeds_refit_threshold": False,
                 "probability_mae_vs_full_refit": 0.0,
                 "probability_max_diff_vs_full_refit": 0.0,
-                "full_refit_executed": False,
+                "full_refit_executed": True,
+                "r15_evidence_complete": True,
                 "weights_degenerate": False,
                 "noop": False,
             }
@@ -1584,6 +1730,49 @@ def test_zero_mae_and_max_diff_pass_r15(tmp_path: Path, rewards_config: dict) ->
     assert result["state"] == "pass", result
     assert result["metric"]["mae_vs_refit"] == 0.0
     assert result["metric"]["max_diff_vs_refit"] == 0.0
+
+
+def test_r15_rejects_mislabeled_executed_algorithm(tmp_path: Path, rewards_config: dict) -> None:
+    bad = _seed_run(
+        tmp_path / "r15-mislabeled",
+        **{
+            "latest_daily_update.json": {
+                "quality_passed": True,
+                "needs_full_refit": False,
+                "strategy": "reweighting",
+                "requested_strategy": "reweighting",
+                "executed_strategy": "svi_warm_start",
+                "resampling_method": "systematic",
+                "probability_mae_vs_full_refit": 0.0,
+                "probability_max_diff_vs_full_refit": 0.0,
+                "full_refit_executed": True,
+                "weights_degenerate": False,
+                "noop": False,
+            }
+        },
+    )
+
+    result = _eval_one(bad, "R15_daily_update_quality", rewards_config)
+    assert result["state"] == "fail"
+
+
+def test_r15_exact_refit_audit_unavailable_remains_insufficient(
+    tmp_path: Path, rewards_config: dict
+) -> None:
+    bad = _seed_run(
+        tmp_path / "r15-refit-unavailable",
+        **{
+            "latest_update_vs_full_refit_audit.json": {
+                "status": "unavailable",
+                "comparison_executed": False,
+                "probability_mae_vs_full_refit": None,
+                "probability_max_diff_vs_full_refit": None,
+            }
+        },
+    )
+
+    result = _eval_one(bad, "R15_daily_update_quality", rewards_config)
+    assert result["state"] == "insufficient_evidence"
 
 
 def test_finite_from_helper_preserves_zero() -> None:
@@ -1780,6 +1969,50 @@ def test_verify_rewards_finds_runs_layout(tmp_path: Path) -> None:
     payload = RewardVerificationRunner(context).verify(run_id="layout-run", profile="production")
     assert (run / "reward_card_v2.json").exists()
     assert payload["profile"] == "production"
+
+
+def test_runtime_artifact_schema_validation_accepts_valid_and_rejects_invalid(
+    tmp_path: Path, rewards_config: dict
+) -> None:
+    from civic_signal.verification.schema import (
+        artifact_schema_errors,
+        require_artifact_schema,
+    )
+
+    run_dir = _seed_run(tmp_path / "schema-run")
+    card = RewardV2Evaluator(rewards_config=rewards_config).evaluate_run_dir(
+        run_dir,
+        run_id="schema-run",
+        profile="research",
+        publication_mode="research",
+    )
+    assert artifact_schema_errors(REPO_ROOT, card, "reward_card_v2.schema.json") == []
+
+    malformed = {**card, "publication_mode": "not-a-mode"}
+    errors = artifact_schema_errors(REPO_ROOT, malformed, "reward_card_v2.schema.json")
+    assert errors
+    assert any("not-a-mode" in error for error in errors)
+    with pytest.raises(ValueError, match=r"reward_card_v2\.schema\.json validation failed"):
+        require_artifact_schema(REPO_ROOT, malformed, "reward_card_v2.schema.json")
+    assert artifact_schema_errors(REPO_ROOT, card, "missing.schema.json")[0].startswith(
+        "schema file is missing"
+    )
+    digest = "a" * 64
+    promotion = {
+        "attempt_id": "schema-run",
+        "profile": "production",
+        "publication_mode": "production",
+        "promoted_at": "2026-07-09T00:00:00+00:00",
+        "reward_card_hash": digest,
+        "semantic_verification_hash": digest,
+        "rewards_config_hash": digest,
+        "content_hashes": {"race_forecasts.parquet": digest},
+        "verified": True,
+        "blocking_rewards": [],
+    }
+    assert artifact_schema_errors(REPO_ROOT, promotion, "promotion_manifest.schema.json") == []
+    promotion["verified"] = False
+    assert artifact_schema_errors(REPO_ROOT, promotion, "promotion_manifest.schema.json")
 
 
 def test_production_semantic_detects_content_hash_tamper(tmp_path: Path) -> None:

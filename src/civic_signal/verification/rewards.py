@@ -12,6 +12,7 @@ from civic_signal.config import ProjectContext
 from civic_signal.scoring.reward_registry import load_rewards_config, publication_mode_default
 from civic_signal.scoring.reward_v2 import RewardV2Evaluator
 from civic_signal.storage.io import write_json, write_text
+from civic_signal.verification.schema import artifact_schema_errors
 
 
 class RewardVerificationRunner:
@@ -47,6 +48,19 @@ class RewardVerificationRunner:
             profile=profile,
             publication_mode=publication_mode,
         )
+        schema_errors = artifact_schema_errors(
+            self.context.root,
+            card,
+            "reward_card_v2.schema.json",
+        )
+        if schema_errors:
+            card["schema_validation"] = {"passed": False, "errors": schema_errors}
+            card["blocking_rewards"] = sorted(
+                set(card.get("blocking_rewards") or []) | {"reward_card_schema"}
+            )
+            card["blocks_publication"] = True
+        else:
+            card["schema_validation"] = {"passed": True, "errors": []}
 
         # Never trust a previously written boolean: always recompute.
         write_json(card, run_dir / "reward_card_v2.json")

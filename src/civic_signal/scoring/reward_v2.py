@@ -33,12 +33,14 @@ _PRIMARY_ARTIFACTS = {
     "fingerprint": "reproducibility_fingerprint.json",
     "posterior_diagnostics": "posterior_diagnostics.json",
     "daily_update": "latest_daily_update.json",
+    "update_refit_audit": "latest_update_vs_full_refit_audit.json",
     "backtest": "backtest_summary.json",
     "run_manifest": "run_manifest.json",
     "publication_decision": "publication_decision.json",
     "promotion_manifest": "promotion_manifest.json",
     "semantic_verification": "semantic_verification.json",
     "as_of_audit": "as_of_audit.json",
+    "selected_feature_lineage": "selected_feature_lineage.parquet",
     "nested_eval": "nested_evaluation.json",
     "covariance_recovery": "covariance_recovery.json",
     "hierarchy_recovery": "hierarchy_recovery.json",
@@ -1170,15 +1172,60 @@ class RewardV2Evaluator:
                 threshold=thr,
             )
         evidence = ["latest_daily_update.json"]
-        reasons: list[str] = []
+        if artifacts.get("update_refit_audit"):
+            evidence.append("latest_update_vs_full_refit_audit.json")
+        metric = {
+            "quality_passed": update.get("quality_passed"),
+            "needs_full_refit": update.get("needs_full_refit"),
+            "mae_vs_refit": _finite_from(update, "probability_mae_vs_full_refit", "mae_vs_refit"),
+            "max_diff_vs_refit": _finite_from(
+                update, "probability_max_diff_vs_full_refit", "max_diff_vs_refit"
+            ),
+            "strategy": update.get("strategy"),
+            "update_status": update.get("status"),
+            "r15_evidence_complete": update.get("r15_evidence_complete"),
+        }
         if update.get("noop") is True or update.get("strategy") == "noop":
-            reasons.append("Update is a no-op without likelihood reweighting")
+            return _missing_metric_state(
+                "R15_daily_update_quality",
+                reasons=["No new eligible likelihood data was applied; update is a no-op"],
+                threshold=thr,
+                evidence=evidence,
+                metric=metric,
+            )
+        reasons: list[str] = []
+        missing_operational: list[str] = []
+        requested_strategy = update.get("requested_strategy", update.get("strategy"))
+        executed_strategy = update.get("executed_strategy")
+        resampling_method = update.get("resampling_method")
+        metric.update(
+            {
+                "requested_strategy": requested_strategy,
+                "executed_strategy": executed_strategy,
+                "resampling_method": resampling_method,
+                "anchor_age_days": update.get("anchor_age_days"),
+            }
+        )
+        if requested_strategy != "reweighting":
+            reasons.append(f"Unsupported or mislabeled requested strategy: {requested_strategy}")
+        if executed_strategy is None:
+            missing_operational.append("executed_strategy")
+        elif executed_strategy != "likelihood_reweighting_systematic_resampling":
+            reasons.append(f"Executed strategy is missing or mismatched: {executed_strategy}")
+        if resampling_method is None:
+            missing_operational.append("resampling_method")
+        elif resampling_method != "systematic":
+            reasons.append(f"Resampling method is missing or mismatched: {resampling_method}")
+        if update.get("anchor_age_exceeds_refit_threshold") is True and not update.get(
+            "full_refit_executed"
+        ):
+            reasons.append("Anchor age exceeded the refit threshold without a full refit")
         if bool(update.get("needs_full_refit")) and not bool(update.get("full_refit_executed")):
             reasons.append("Full refit required but not executed")
         if update.get("quality_passed") is False:
             reasons.append("Update quality_passed is false")
-        mae = _finite_from(update, "probability_mae_vs_full_refit", "mae_vs_refit")
-        max_diff = _finite_from(update, "probability_max_diff_vs_full_refit", "max_diff_vs_refit")
+        mae = metric["mae_vs_refit"]
+        max_diff = metric["max_diff_vs_refit"]
         if mae is not None and mae > float(thr.get("max_probability_mae_vs_refit", 0.005)):
             reasons.append(f"MAE vs full refit {mae} exceeds threshold")
         if max_diff is not None and max_diff > float(
@@ -1187,13 +1234,6 @@ class RewardV2Evaluator:
             reasons.append(f"Max diff vs full refit {max_diff} exceeds threshold")
         if update.get("weights_degenerate") is True and not update.get("full_refit_executed"):
             reasons.append("Degenerate weights without full refit")
-        metric = {
-            "quality_passed": update.get("quality_passed"),
-            "needs_full_refit": update.get("needs_full_refit"),
-            "mae_vs_refit": mae,
-            "max_diff_vs_refit": max_diff,
-            "strategy": update.get("strategy"),
-        }
         if reasons:
             return _fail(
                 "R15_daily_update_quality",
@@ -1202,13 +1242,25 @@ class RewardV2Evaluator:
                 metric=metric,
                 evidence=evidence,
             )
+        refit_audit = artifacts.get("update_refit_audit") or update.get("update_vs_full_refit")
+        exact_refit_evidence = bool(
+            isinstance(refit_audit, dict)
+            and refit_audit.get("status") == "passed"
+            and refit_audit.get("comparison_executed") is True
+        )
         # Require both refit-comparison metrics; quality_passed alone is not enough.
-        if mae is None or max_diff is None or update.get("quality_passed") is not True:
+        if (
+            mae is None
+            or max_diff is None
+            or update.get("quality_passed") is not True
+            or missing_operational
+            or not exact_refit_evidence
+        ):
             return _missing_metric_state(
                 "R15_daily_update_quality",
                 reasons=[
-                    "Update present but quality_passed and/or MAE/max-diff vs full "
-                    "refit metrics incomplete"
+                    "Update lacks complete operational labels and/or an exact executed "
+                    "full-refit publication comparison with MAE/max-diff metrics"
                 ],
                 threshold=thr,
                 evidence=evidence,
@@ -1260,6 +1312,52 @@ class RewardV2Evaluator:
             reasons.append(f"Synthetic rows present: {synthetic}")
         if fixture_sources > int(thr.get("max_fixture_sources", 0)):
             reasons.append(f"Fixture/synthetic sources present: {fixture_sources}")
+        # Production is limited to free, publicly reachable web sources whose
+        # use terms were explicitly reviewed. A free registration/API key is
+        # allowed; authentication must not be confused with paid access.
+        # Local fixtures remain valid for fixture/research profiles only.
+        production_mode = getattr(self, "_evaluation_mode", None) == "production"
+        free_web_rows = 0
+        if production_mode and manifest is not None:
+            required_columns = {
+                "url",
+                "auth_mode",
+                "access_policy",
+                "terms_status",
+                "source_class",
+            }
+            missing_columns = sorted(required_columns - set(manifest.columns))
+            if missing_columns:
+                return _missing_metric_state(
+                    "R16_real_data_exclusivity",
+                    reasons=[
+                        "Production source manifest missing free-web provenance columns: "
+                        f"{missing_columns}"
+                    ],
+                    threshold=thr,
+                    evidence=evidence,
+                    metric={"synthetic_rows": synthetic, "fixture_sources": fixture_sources},
+                )
+            free_web_rows = int(
+                manifest.filter(
+                    pl.col("url").cast(pl.Utf8).str.starts_with("https://")
+                    & pl.col("auth_mode")
+                    .cast(pl.Utf8)
+                    .str.to_lowercase()
+                    .is_in(["public", "none", "api_key", "free_api_key"])
+                    & (pl.col("access_policy") == "free_public_web")
+                    & (pl.col("terms_status") == "reviewed_for_use")
+                    & pl.col("source_class")
+                    .cast(pl.Utf8)
+                    .str.to_lowercase()
+                    .is_in(["official_public", "production", "production_web"])
+                ).height
+            )
+            if free_web_rows != manifest.height:
+                reasons.append(
+                    "Every production input must be an https free_public_web source "
+                    "(public or free API-key access) with reviewed terms"
+                )
         # Without an explicit production audit, do not claim real-data exclusivity.
         if not audit and fixture_sources == 0 and synthetic == 0:
             # Ambiguous fixture pipeline: insufficient_evidence for production claims.
@@ -1270,7 +1368,11 @@ class RewardV2Evaluator:
                 evidence=evidence,
                 metric={"synthetic_rows": synthetic, "fixture_sources": fixture_sources},
             )
-        metric = {"synthetic_rows": synthetic, "fixture_sources": fixture_sources}
+        metric = {
+            "synthetic_rows": synthetic,
+            "fixture_sources": fixture_sources,
+            "free_public_web_rows": free_web_rows,
+        }
         if reasons:
             return _fail(
                 "R16_real_data_exclusivity",
@@ -1284,22 +1386,83 @@ class RewardV2Evaluator:
     def _eval_R17_as_of_integrity(self, run_dir: Path, artifacts: dict[str, Any]) -> dict[str, Any]:
         thr = threshold_for("R17_as_of_integrity", self.config)
         audit = artifacts.get("as_of_audit") or {}
+        lineage = artifacts.get("selected_feature_lineage")
         if not audit:
             return _missing_metric_state(
                 "R17_as_of_integrity",
                 reasons=["Missing as_of_audit.json"],
                 threshold=thr,
             )
-        future_rows = int(audit.get("future_eligible_rows") or audit.get("violations") or 0)
+        if not isinstance(lineage, pl.DataFrame):
+            return _missing_metric_state(
+                "R17_as_of_integrity",
+                reasons=["Missing selected_feature_lineage.parquet"],
+                threshold=thr,
+                evidence=["as_of_audit.json"],
+            )
+        from civic_signal.verification.as_of import AsOfVerificationRunner
+
+        future_value = audit.get("future_eligible_rows")
+        future_rows = int(future_value) if future_value is not None else None
+        missing_availability = audit.get("missing_availability_rows")
+        implicit_availability = audit.get("implicit_availability_rows")
+        duplicate_keys = audit.get("duplicate_snapshot_keys")
+        recorded_hash = audit.get("lineage_sha256")
+        computed_hash = AsOfVerificationRunner._lineage_hash(lineage)
         metric = {
             "future_eligible_rows": future_rows,
+            "missing_availability_rows": missing_availability,
+            "implicit_availability_rows": implicit_availability,
+            "duplicate_snapshot_keys": duplicate_keys,
             "time_travel_canaries_passed": audit.get("time_travel_canaries_passed"),
+            "recomputed": audit.get("recomputed"),
+            "lineage_hash_matches": recorded_hash == computed_hash,
+            "selection_contract_complete": audit.get("selection_contract_complete"),
+            "full_path_canary_provided": audit.get("full_path_canary_provided"),
+            "full_path_canary_scope": dict(audit.get("full_path_canary") or {}).get("scope"),
         }
-        evidence = ["as_of_audit.json"]
-        if future_rows > int(thr.get("max_future_eligible_rows", 0)):
+        evidence = ["as_of_audit.json", "selected_feature_lineage.parquet"]
+        reasons: list[str] = []
+        if audit.get("status") != "ok" or audit.get("recomputed") is not True:
+            reasons.append("As-of audit must be freshly recomputed with status=ok")
+        if future_rows is None:
+            reasons.append("Future-eligible row count is missing")
+        elif future_rows > int(thr.get("max_future_eligible_rows", 0)):
+            reasons.append(f"Future-eligible rows: {future_rows}")
+        if missing_availability != 0:
+            reasons.append(f"Rows missing availability timestamps: {missing_availability}")
+        if implicit_availability != 0:
+            reasons.append(f"Rows using implicit event-date availability: {implicit_availability}")
+        if duplicate_keys != 0:
+            reasons.append(f"Duplicate selected snapshot keys: {duplicate_keys}")
+        if recorded_hash != computed_hash:
+            reasons.append("Selected lineage hash does not match the recomputed audit")
+        if self._evaluation_profile == "production":
+            if audit.get("selection_contract_complete") is not True:
+                reasons.append("Selected lineage is missing snapshot/revision selection fields")
+            full_canary = dict(audit.get("full_path_canary") or {})
+            if audit.get("full_path_canary_provided") is not True:
+                reasons.append("Production requires an adversarial full-path time-travel canary")
+            elif full_canary.get("scope") != "exact_publication_pipeline":
+                reasons.append(
+                    "Production time-travel canary must exercise the exact publication pipeline"
+                )
+            elif (
+                full_canary.get("selected_features_unchanged") is not True
+                or full_canary.get("tiers_unchanged") is not True
+                or full_canary.get("posterior_unchanged") is not True
+                or full_canary.get("component_center_unchanged") is not True
+                or full_canary.get("race_probabilities_unchanged") is not True
+                or full_canary.get("controls_unchanged") is not True
+                or full_canary.get("every_time_varying_table_injected") is not True
+                or full_canary.get("forecast_fingerprint_unchanged") is not True
+                or full_canary.get("passed") is not True
+            ):
+                reasons.append("Adversarial exact publication-path canary failed")
+        if reasons:
             return _fail(
                 "R17_as_of_integrity",
-                reasons=[f"Future-eligible rows: {future_rows}"],
+                reasons=reasons,
                 threshold=thr,
                 metric=metric,
                 evidence=evidence,
@@ -1396,6 +1559,14 @@ class RewardV2Evaluator:
                 threshold=thr,
                 metric=metric,
                 evidence=evidence,
+            )
+        if report.get("production_sufficient") is False:
+            return _missing_metric_state(
+                "R19_covariance_recovery",
+                reasons=["Bounded covariance smoke is not production-sufficient evidence"],
+                threshold=thr,
+                evidence=evidence,
+                metric=metric,
             )
         if rel_err is None or corr_rmse is None or report.get("is_psd") is None:
             return _missing_metric_state(
@@ -1529,6 +1700,7 @@ class RewardV2Evaluator:
     ) -> dict[str, Any]:
         thr = threshold_for("R22_feature_validity", self.config)
         lineage = artifacts.get("feature_lineage") or {}
+        selected_lineage = artifacts.get("selected_feature_lineage")
         if not lineage:
             return _missing_metric_state(
                 "R22_feature_validity",
@@ -1544,6 +1716,32 @@ class RewardV2Evaluator:
             )
         max_snaps = int(lineage.get("max_snapshots_per_feature_key") or 0)
         reasons: list[str] = []
+        computed_max_snaps: int | None = None
+        selection_columns = {
+            "table",
+            "selection_key",
+            "snapshot_id",
+            "selection_predicate",
+        }
+        if isinstance(selected_lineage, pl.DataFrame) and selection_columns.issubset(
+            selected_lineage.columns
+        ):
+            counts = (
+                selected_lineage.group_by(["table", "selection_key"])
+                .len()
+                .get_column("len")
+                .to_list()
+            )
+            computed_max_snaps = max(counts, default=0)
+            if computed_max_snaps != max_snaps:
+                reasons.append("Declared snapshot maximum does not match selected feature lineage")
+        elif self._evaluation_profile == "production":
+            reasons.append("Selected feature lineage lacks deterministic snapshot identity")
+        if (
+            self._evaluation_profile == "production"
+            and lineage.get("selection_contract_complete") is not True
+        ):
+            reasons.append("Feature snapshot selection contract is not explicitly complete")
         if max_snaps > int(thr.get("max_snapshots_per_feature_key", 1)):
             reasons.append(f"Multiple snapshots per feature key: {max_snaps}")
         if thr.get("require_incumbent_relative_sign"):
@@ -1575,9 +1773,13 @@ class RewardV2Evaluator:
             reasons.append("Revised macro values entered early folds")
         metric = {
             "max_snapshots_per_feature_key": max_snaps,
+            "computed_max_snapshots_per_feature_key": computed_max_snaps,
+            "selection_contract_complete": lineage.get("selection_contract_complete"),
             "incumbent_relative_sign": lineage.get("incumbent_relative_sign"),
         }
         evidence = ["feature_lineage.json"]
+        if isinstance(selected_lineage, pl.DataFrame):
+            evidence.append("selected_feature_lineage.parquet")
         if reasons:
             return _fail(
                 "R22_feature_validity",
@@ -1656,11 +1858,9 @@ class RewardV2Evaluator:
         thr = threshold_for("R24_atomic_publication", self.config)
         decision = artifacts.get("publication_decision") or {}
         promotion = artifacts.get("promotion_manifest") or {}
-        evidence = [
-            p
-            for p in ("publication_decision.json", "promotion_manifest.json")
-            if (run_dir / p).exists()
-        ]
+        # Keep the evidence contract stable across candidate and verified
+        # evaluations; the branch below separately verifies the manifest.
+        evidence = ["publication_decision.json", "promotion_manifest.json"]
         # Gate mode is the evaluation context, not a softer on-disk research label.
         claimed_mode = getattr(self, "_evaluation_mode", None) or str(
             decision.get("publication_mode")
@@ -1673,15 +1873,20 @@ class RewardV2Evaluator:
                 threshold=thr,
                 metric={
                     "publication_mode": claimed_mode,
-                    "promotion_verified": bool(promotion.get("verified")),
                     "policy": "non-production modes need no promotion manifest",
                     "evaluation_mode": getattr(self, "_evaluation_mode", None),
                 },
                 evidence=evidence,
             )
         if claimed_mode == "production":
-            attempt_id = promotion.get("attempt_id") or decision.get("attempt_id") or run_dir.name
             promotion_candidate = bool(getattr(self, "_promotion_candidate", False))
+            # A candidate is identified by the run being evaluated; stale
+            # promotion metadata must not alter the candidate's identity.
+            attempt_id = (
+                run_dir.name
+                if promotion_candidate
+                else promotion.get("attempt_id") or decision.get("attempt_id") or run_dir.name
+            )
             if promotion_candidate:
                 # First-time promotion path: certify candidate immutability only.
                 if thr.get("require_immutable_attempt") and not attempt_id:
@@ -1697,10 +1902,7 @@ class RewardV2Evaluator:
                     threshold=thr,
                     metric={
                         "publication_mode": claimed_mode,
-                        "promotion_verified": False,
-                        "promotion_candidate": True,
                         "attempt_id": attempt_id,
-                        "policy": "candidate evaluated for atomic promotion",
                     },
                     evidence=evidence,
                 )
@@ -1735,14 +1937,36 @@ class RewardV2Evaluator:
                     threshold=thr,
                     evidence=evidence,
                 )
+            # Verify the manifest covers exactly the artifacts currently
+            # present; a single self-selected hash is not a publication proof.
+            from civic_signal.verification.publication import _content_hashes
+
+            current_content = _content_hashes(run_dir)
+            if sorted(content_hashes) != sorted(current_content):
+                return _missing_metric_state(
+                    "R24_atomic_publication",
+                    reasons=["Promotion content_hashes do not cover current artifacts"],
+                    threshold=thr,
+                    evidence=evidence,
+                    metric={"publication_mode": claimed_mode, "attempt_id": attempt_id},
+                )
+            mismatched = [
+                key for key, digest in content_hashes.items() if current_content.get(key) != digest
+            ]
+            if mismatched:
+                return _fail(
+                    "R24_atomic_publication",
+                    reasons=[f"Promotion content hash mismatch: {mismatched}"],
+                    threshold=thr,
+                    evidence=evidence,
+                    metric={"publication_mode": claimed_mode, "attempt_id": attempt_id},
+                )
             return _pass(
                 "R24_atomic_publication",
                 threshold=thr,
                 metric={
                     "publication_mode": claimed_mode,
-                    "promotion_verified": True,
                     "attempt_id": attempt_id,
-                    "content_hash_keys": sorted(content_hashes),
                 },
                 evidence=evidence,
             )

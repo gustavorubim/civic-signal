@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from typing import Any
 from civic_signal.config import ProjectContext
 from civic_signal.scoring.reward_v2 import RewardV2Evaluator
 from civic_signal.storage.io import read_json, write_json
+from civic_signal.verification.schema import artifact_schema_errors
 
 # Primary scientific artifacts that must be content-hashed on promotion.
 _PROMOTED_ARTIFACTS = (
@@ -25,6 +27,22 @@ _PROMOTED_ARTIFACTS = (
     "performance.json",
     "reproducibility_fingerprint.json",
     "semantic_verification.json",
+    "ci_manifest.json",
+    "coverage.json",
+    "backtest_summary.json",
+    "nested_evaluation.json",
+    "covariance_recovery.json",
+    "hierarchy_recovery.json",
+    "poll_observation_manifest.json",
+    "feature_lineage.json",
+    "live_source_canaries.json",
+    "benchmark_superiority.json",
+    "contract_parity.json",
+    "as_of_audit.json",
+    "selected_feature_lineage.parquet",
+    "latest_daily_update.json",
+    "posterior_diagnostics.json",
+    "plot_manifest.json",
 )
 
 
@@ -58,6 +76,7 @@ class PublicationVerifier:
         profile: str = "production",
         require_promotion_for_production: bool = True,
         force_publication_mode: str | None = None,
+        write_artifact: bool = False,
     ) -> dict[str, Any]:
         run_dir = self._resolve_run_dir(run_id)
         failures: list[str] = []
@@ -77,7 +96,11 @@ class PublicationVerifier:
         if mode == "production" and require_promotion_for_production:
             if not promotion:
                 failures.append("production label without promotion_manifest.json")
-            elif promotion.get("verified") is not True:
+            elif artifact_schema_errors(
+                self.context.root, promotion, "promotion_manifest.schema.json"
+            ):
+                failures.append("production promotion_manifest fails runtime JSON Schema")
+            elif not _promotion_manifest_is_complete(promotion):
                 failures.append("production label without verified promotion_manifest")
             else:
                 model_config = (
@@ -91,6 +114,11 @@ class PublicationVerifier:
                 ).evaluate_run_dir(
                     run_dir, run_id=run_id, profile=profile, publication_mode="production"
                 )
+                reward_schema_errors = artifact_schema_errors(
+                    self.context.root, card, "reward_card_v2.schema.json"
+                )
+                if reward_schema_errors:
+                    failures.append("recomputed reward_card_v2 fails runtime JSON Schema")
                 if card.get("blocking_rewards"):
                     failures.append(
                         "production promotion blocked by rewards: "
@@ -98,12 +126,24 @@ class PublicationVerifier:
                     )
                 stored_hash = promotion.get("reward_card_hash")
                 recomputed_hash = _reward_card_integrity_hash(card)
-                if stored_hash and stored_hash != recomputed_hash:
+                if stored_hash != recomputed_hash:
                     failures.append(
                         "promotion reward_card_hash does not match recomputed reward integrity"
                     )
+                semantic_artifact = self._read_optional(run_dir / "semantic_verification.json")
+                if semantic_artifact is None or promotion.get(
+                    "semantic_verification_hash"
+                ) != _semantic_integrity_hash(semantic_artifact):
+                    failures.append("promotion semantic_verification_hash does not match artifact")
+                current_config_hash = _file_hash(self.context.config_dir / "rewards.yaml")
+                if promotion.get("rewards_config_hash") != current_config_hash:
+                    failures.append("promotion rewards_config_hash does not match current config")
                 stored_content = dict(promotion.get("content_hashes") or {})
                 current_content = _content_hashes(run_dir)
+                if sorted(stored_content) != sorted(current_content):
+                    failures.append(
+                        "promotion content_hashes do not cover the complete artifact set"
+                    )
                 for key, digest in stored_content.items():
                     if current_content.get(key) != digest:
                         failures.append(f"promoted content hash mismatch for {key}")
@@ -125,7 +165,8 @@ class PublicationVerifier:
             "generated_at": datetime.now(UTC).isoformat(),
             "promoted_pointer_unchanged": True,
         }
-        write_json(payload, run_dir / "semantic_verification.json")
+        if write_artifact:
+            write_json(payload, run_dir / "semantic_verification.json")
         return payload
 
     def _reconcile_forecast(self, run_dir: Path) -> dict[str, Any]:
@@ -140,6 +181,10 @@ class PublicationVerifier:
             "draws_cover_races": None,
             "control_present": None,
             "source_manifest_present": None,
+            "catalog_forecast_coverage_ok": None,
+            "non_sparse_probabilities_present": None,
+            "estimand_support_withholding_ok": None,
+            "control_probability_range_ok": None,
         }
 
         required = {
@@ -164,10 +209,37 @@ class PublicationVerifier:
         checks["source_manifest_present"] = not manifest.is_empty()
         if manifest.is_empty():
             failures.append("source_manifest is empty")
+        else:
+            required_manifest = {"source_id", "status", "content_hash"}
+            missing_manifest = sorted(required_manifest - set(manifest.columns))
+            if missing_manifest:
+                failures.append(f"source_manifest missing columns: {missing_manifest}")
+            else:
+                for column in sorted(required_manifest):
+                    if manifest.filter(
+                        pl.col(column).is_null() | (pl.col(column).cast(pl.String) == "")
+                    ).height:
+                        failures.append(f"source_manifest contains blank {column}")
 
         if "race_id" not in forecasts.columns:
             failures.append("race_forecasts missing race_id")
             return {"failures": failures, "checks": checks}
+        if "race_id" not in catalog.columns:
+            failures.append("race_catalog missing race_id")
+            return {"failures": failures, "checks": checks}
+
+        catalog_ids = set(catalog["race_id"].drop_nulls().unique().to_list())
+        forecast_ids = set(forecasts["race_id"].drop_nulls().unique().to_list())
+        catalog_duplicate_count = catalog.height - catalog.select("race_id").n_unique()
+        if catalog_duplicate_count:
+            failures.append(f"race_catalog contains {catalog_duplicate_count} duplicate race IDs")
+        missing_forecasts = sorted(catalog_ids - forecast_ids)
+        extra_forecasts = sorted(forecast_ids - catalog_ids)
+        checks["catalog_forecast_coverage_ok"] = not missing_forecasts and not extra_forecasts
+        if missing_forecasts:
+            failures.append(f"Forecasts missing catalog races: {missing_forecasts[:10]}")
+        if extra_forecasts:
+            failures.append(f"Forecasts contain races absent from catalog: {extra_forecasts[:10]}")
 
         # Unique race/option identities: no duplicate option rows per race.
         if "option_id" in forecasts.columns:
@@ -196,11 +268,75 @@ class PublicationVerifier:
         if "winner_probability" in forecasts.columns:
             published = forecasts.filter(pl.col("winner_probability").is_not_null())
             bad = published.filter(
-                (pl.col("winner_probability") < 0.0) | (pl.col("winner_probability") > 1.0)
+                pl.col("winner_probability").is_nan()
+                | ~pl.col("winner_probability").is_finite()
+                | (pl.col("winner_probability") < 0.0)
+                | (pl.col("winner_probability") > 1.0)
             ).height
             checks["probability_range_ok"] = bad == 0
             if bad:
                 failures.append(f"{bad} probabilities outside [0, 1]")
+            tier_c = (
+                set(catalog.filter(pl.col("tier") == "C")["race_id"].to_list())
+                if "tier" in catalog.columns
+                else set()
+            )
+            non_sparse = catalog_ids - tier_c
+            non_sparse_with_probability = set(published["race_id"].unique().to_list())
+            missing_probability = sorted(non_sparse - non_sparse_with_probability)
+            checks["non_sparse_probabilities_present"] = not missing_probability
+            if missing_probability:
+                failures.append(
+                    "Non-sparse catalog races missing winner_probability: "
+                    f"{missing_probability[:10]}"
+                )
+            if tier_c:
+                sparse_values = forecasts.filter(
+                    pl.col("race_id").is_in(sorted(tier_c))
+                    & pl.col("winner_probability").is_not_null()
+                ).height
+                if sparse_values:
+                    failures.append("Tier C forecasts must withhold winner_probability")
+            if "estimand_support_blocked" in catalog.columns:
+                blocked_catalog = catalog.filter(
+                    pl.col("estimand_support_blocked").fill_null(False)
+                )
+                blocked_ids = set(blocked_catalog["race_id"].to_list())
+                blocked_published = forecasts.filter(
+                    pl.col("race_id").is_in(sorted(blocked_ids))
+                    & pl.col("winner_probability").is_not_null()
+                ).height
+                blocked_not_tier_c = (
+                    blocked_catalog.filter(pl.col("tier") != "C").height
+                    if "tier" in blocked_catalog.columns
+                    else blocked_catalog.height
+                )
+                blank_status = (
+                    blocked_catalog.filter(
+                        pl.col("estimand_support_status").is_null()
+                        | (pl.col("estimand_support_status") == "")
+                    ).height
+                    if "estimand_support_status" in blocked_catalog.columns
+                    else blocked_catalog.height
+                )
+                checks["estimand_support_withholding_ok"] = not (
+                    blocked_published or blocked_not_tier_c or blank_status
+                )
+                if blocked_published:
+                    failures.append(
+                        f"{blocked_published} unsupported-estimand forecast rows publish "
+                        "winner_probability"
+                    )
+                if blocked_not_tier_c:
+                    failures.append(
+                        f"{blocked_not_tier_c} unsupported-estimand races are not Tier C"
+                    )
+                if blank_status:
+                    failures.append(
+                        f"{blank_status} unsupported-estimand races lack a blocking status"
+                    )
+            else:
+                checks["estimand_support_withholding_ok"] = True
             multi = published.group_by("race_id").agg(pl.len().alias("n")).filter(pl.col("n") > 1)
             if multi.height:
                 sums = published.group_by("race_id").agg(
@@ -231,7 +367,7 @@ class PublicationVerifier:
                 failures.append(f"{bad_iv} rows violate interval ordering")
 
         # Draw completeness for non-Tier-C races (or all if no tier).
-        race_ids = set(forecasts["race_id"].unique().to_list())
+        race_ids = catalog_ids
         if "tier" in catalog.columns and "race_id" in catalog.columns:
             tier_c = set(catalog.filter(pl.col("tier") == "C")["race_id"].to_list())
             required_draws = race_ids - tier_c
@@ -243,6 +379,25 @@ class PublicationVerifier:
             checks["draws_cover_races"] = not missing_draws
             if missing_draws:
                 failures.append(f"Draws missing for races: {missing_draws[:10]}")
+            if "draw_id" not in draws.columns:
+                failures.append("forecast_draws missing draw_id")
+            elif "option_id" in draws.columns:
+                duplicate_options = (
+                    draws.group_by(["race_id", "draw_id", "option_id"])
+                    .agg(pl.len().alias("n"))
+                    .filter(pl.col("n") > 1)
+                )
+                if not duplicate_options.is_empty():
+                    failures.append(f"Duplicate draw race/option keys: {duplicate_options.height}")
+            if "winner" in draws.columns:
+                winner_counts = draws.group_by(["race_id", "draw_id"]).agg(
+                    pl.col("winner").cast(pl.Int8).sum().alias("winners")
+                )
+                bad_winner_counts = winner_counts.filter(pl.col("winners") != 1)
+                if not bad_winner_counts.is_empty():
+                    failures.append(
+                        f"Draws must have exactly one winner: {bad_winner_counts.height}"
+                    )
         else:
             failures.append("forecast_draws missing race_id")
             checks["draws_cover_races"] = False
@@ -252,12 +407,31 @@ class PublicationVerifier:
             failures.append("control_forecasts is empty")
         else:
             # Seat totals / majority probability sanity when columns exist.
-            if "majority_probability" in control.columns:
+            probability_columns = [
+                column
+                for column in ("control_probability", "majority_probability")
+                if column in control.columns
+            ]
+            if not probability_columns:
+                failures.append(
+                    "control_forecasts missing control_probability or majority_probability"
+                )
+                checks["control_probability_range_ok"] = False
+            else:
                 bad_ctrl = control.filter(
-                    (pl.col("majority_probability") < 0.0) | (pl.col("majority_probability") > 1.0)
+                    pl.any_horizontal(
+                        *[
+                            pl.col(column).is_null()
+                            | ~pl.col(column).is_finite()
+                            | (pl.col(column) < 0.0)
+                            | (pl.col(column) > 1.0)
+                            for column in probability_columns
+                        ]
+                    )
                 ).height
+                checks["control_probability_range_ok"] = bad_ctrl == 0
                 if bad_ctrl:
-                    failures.append(f"{bad_ctrl} control majority probabilities out of range")
+                    failures.append(f"{bad_ctrl} control probabilities out of range")
 
         # Lineage presence on forecasts.
         for col in ("model_config_hash", "source_manifest_hash"):
@@ -277,6 +451,30 @@ class PublicationVerifier:
     ) -> dict[str, Any]:
         """Atomically promote only when every required reward recomputes to pass."""
         attempt_dir = self._resolve_run_dir(attempt_id)
+        promoted_root = self.context.artifacts_dir / "promoted" / (profile_id or profile)
+        promoted_path = promoted_root / "promotion_manifest.json"
+        snapshot_dir = promoted_root / "attempts" / attempt_id
+        previous = promoted_path.read_bytes() if promoted_path.exists() else None
+
+        # Generate fresh semantic evidence before evaluating R23. This avoids
+        # allowing a stale or fixture-seeded semantic_verification.json to
+        # decide whether an attempt is promotable.
+        semantic = self.verify_semantic(
+            run_id=attempt_id,
+            profile=profile,
+            require_promotion_for_production=False,
+            force_publication_mode="production",
+            write_artifact=True,
+        )
+        if semantic.get("passed") is not True or semantic.get("reconciliation_ok") is not True:
+            return {
+                "promoted": False,
+                "attempt_id": attempt_id,
+                "blocking_rewards": ["semantic_verification"],
+                "promoted_pointer_unchanged": True,
+                "semantic": semantic,
+            }
+
         model_config = (
             self.context.read_yaml("model.yaml")
             if (self.context.config_dir / "model.yaml").exists()
@@ -294,6 +492,17 @@ class PublicationVerifier:
             profile=profile,
             publication_mode="production",
         )
+        reward_schema_errors = artifact_schema_errors(
+            self.context.root, card, "reward_card_v2.schema.json"
+        )
+        if reward_schema_errors:
+            return {
+                "promoted": False,
+                "attempt_id": attempt_id,
+                "blocking_rewards": ["reward_card_schema"],
+                "promoted_pointer_unchanged": True,
+                "schema_errors": reward_schema_errors,
+            }
         write_json(card, attempt_dir / "reward_card_v2.json")
 
         blocking = list(card.get("blocking_rewards") or [])
@@ -305,12 +514,6 @@ class PublicationVerifier:
             and not (isinstance(rec, dict) and rec.get("state") == "pass")
         ]
         blocking = sorted(set(blocking) | set(non_pass))
-
-        promoted_root = self.context.artifacts_dir / "promoted" / (profile_id or profile)
-        previous = None
-        promoted_path = promoted_root / "promotion_manifest.json"
-        if promoted_path.exists():
-            previous = promoted_path.read_bytes()
 
         if blocking:
             decision = {
@@ -334,37 +537,26 @@ class PublicationVerifier:
                 "decision": decision,
             }
 
-        # Semantic verification under production mode before writing promotion.
-        semantic = self.verify_semantic(
-            run_id=attempt_id,
-            profile=profile,
-            require_promotion_for_production=False,
-            force_publication_mode="production",
-        )
-        if semantic.get("passed") is not True or semantic.get("reconciliation_ok") is not True:
+        if snapshot_dir.exists():
             return {
                 "promoted": False,
                 "attempt_id": attempt_id,
-                "blocking_rewards": ["semantic_verification"],
+                "blocking_rewards": ["immutable_attempt_collision"],
                 "promoted_pointer_unchanged": True,
-                "semantic": semantic,
+                "reason": f"Immutable snapshot already exists: {snapshot_dir}",
             }
 
         content_hashes = _content_hashes(attempt_dir)
         reward_hash = _reward_card_integrity_hash(card)
-        semantic_hash = hashlib.sha256(
-            json.dumps(
-                {
-                    "passed": semantic.get("passed"),
-                    "reconciliation_ok": semantic.get("reconciliation_ok"),
-                    "failure_reasons": semantic.get("failure_reasons"),
-                    "checks": semantic.get("checks"),
-                },
-                sort_keys=True,
-                default=str,
-            ).encode()
-        ).hexdigest()
+        semantic_hash = _semantic_integrity_hash(semantic)
         config_hash = _file_hash(self.context.config_dir / "rewards.yaml")
+        if config_hash is None:
+            return {
+                "promoted": False,
+                "attempt_id": attempt_id,
+                "blocking_rewards": ["missing_rewards_config"],
+                "promoted_pointer_unchanged": True,
+            }
 
         manifest = {
             "attempt_id": attempt_id,
@@ -378,18 +570,51 @@ class PublicationVerifier:
             "verified": True,
             "blocking_rewards": [],
         }
-        # Atomic write of promotion pointer + immutable snapshot of attempt.
+        promotion_schema_errors = artifact_schema_errors(
+            self.context.root, manifest, "promotion_manifest.schema.json"
+        )
+        if promotion_schema_errors:
+            return {
+                "promoted": False,
+                "attempt_id": attempt_id,
+                "blocking_rewards": ["promotion_manifest_schema"],
+                "promoted_pointer_unchanged": True,
+                "schema_errors": promotion_schema_errors,
+            }
+        # Build the immutable snapshot in a temporary sibling directory, then
+        # rename it into place. Existing snapshots are never replaced.
         promoted_root.mkdir(parents=True, exist_ok=True)
-        snapshot_dir = promoted_root / "attempts" / attempt_id
-        if snapshot_dir.exists():
-            shutil.rmtree(snapshot_dir)
-        shutil.copytree(attempt_dir, snapshot_dir)
+        snapshot_dir.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_tmp = Path(
+            tempfile.mkdtemp(prefix=f".{attempt_id}.", dir=str(snapshot_dir.parent))
+        )
+        try:
+            shutil.rmtree(snapshot_tmp)
+            shutil.copytree(attempt_dir, snapshot_tmp)
+            write_json(manifest, snapshot_tmp / "promotion_manifest.json")
+            write_json(
+                {
+                    "attempt_id": attempt_id,
+                    "profile": profile,
+                    "publication_mode": "production",
+                    "allowed": True,
+                    "blocks_publication": False,
+                    "blocking_rewards": [],
+                    "reason": "All profile-required rewards pass",
+                    "generated_at": datetime.now(UTC).isoformat(),
+                },
+                snapshot_tmp / "publication_decision.json",
+            )
+            snapshot_tmp.replace(snapshot_dir)
+        except Exception:
+            if snapshot_tmp.exists():
+                shutil.rmtree(snapshot_tmp)
+            raise
 
         tmp = promoted_root / f".promotion_manifest.{attempt_id}.tmp"
         write_json(manifest, tmp)
         tmp.replace(promoted_path)
         write_json(manifest, attempt_dir / "promotion_manifest.json")
-        write_json(manifest, snapshot_dir / "promotion_manifest.json")
         write_json(
             {
                 "attempt_id": attempt_id,
@@ -454,18 +679,69 @@ def _content_hashes(run_dir: Path) -> dict[str, str]:
     return hashes
 
 
+def _promotion_manifest_is_complete(manifest: dict[str, Any]) -> bool:
+    """Validate the structural contract before trusting a production pointer."""
+    required = {
+        "attempt_id",
+        "profile",
+        "publication_mode",
+        "promoted_at",
+        "reward_card_hash",
+        "semantic_verification_hash",
+        "rewards_config_hash",
+        "content_hashes",
+        "verified",
+        "blocking_rewards",
+    }
+    if not required.issubset(manifest):
+        return False
+    if manifest.get("verified") is not True:
+        return False
+    if manifest.get("publication_mode") != "production":
+        return False
+    if not isinstance(manifest.get("attempt_id"), str) or not manifest["attempt_id"]:
+        return False
+    if not isinstance(manifest.get("content_hashes"), dict) or not manifest["content_hashes"]:
+        return False
+    if manifest.get("blocking_rewards") != []:
+        return False
+    for key in ("reward_card_hash", "semantic_verification_hash", "rewards_config_hash"):
+        value = manifest.get(key)
+        if not isinstance(value, str) or len(value) != 64:
+            return False
+    return all(
+        isinstance(key, str) and isinstance(value, str) and len(value) == 64
+        for key, value in manifest["content_hashes"].items()
+    )
+
+
+def _semantic_integrity_hash(payload: dict[str, Any]) -> str:
+    """Hash semantic results without the volatile generation timestamp."""
+    stable = {
+        "run_id": payload.get("run_id"),
+        "profile": payload.get("profile"),
+        "publication_mode": payload.get("publication_mode"),
+        "passed": payload.get("passed"),
+        "failure_reasons": payload.get("failure_reasons"),
+        "reconciliation_ok": payload.get("reconciliation_ok"),
+        "checks": payload.get("checks"),
+    }
+    return hashlib.sha256(json.dumps(stable, sort_keys=True, default=str).encode()).hexdigest()
+
+
 def _reward_card_integrity_hash(card: dict[str, Any]) -> str:
-    """Hash reward states, thresholds, and evidence paths (not volatile timestamps)."""
+    """Hash all stable reward content, excluding only volatile card metadata."""
     payload = {}
     for key, value in sorted((card.get("rewards") or {}).items()):
         if not isinstance(value, dict):
             payload[key] = value
             continue
-        # Exclude metric: promotion-candidate vs verified R24 metrics differ legitimately.
         payload[key] = {
             "state": value.get("state"),
+            "metric": value.get("metric"),
             "threshold": value.get("threshold"),
             "evidence": value.get("evidence"),
+            "negative_tests_passed": value.get("negative_tests_passed"),
             "failure_reasons": value.get("failure_reasons"),
         }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()

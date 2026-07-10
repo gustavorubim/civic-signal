@@ -9,7 +9,7 @@ import polars as pl
 from civic_signal.config import ProjectContext, Scenario, ScenarioRegistry
 from civic_signal.inference.failover import FailoverPolicy, exercise_timeout_failover
 from civic_signal.pipeline import ForecastPipeline
-from civic_signal.storage.io import write_json
+from civic_signal.storage.io import read_json, write_json
 from civic_signal.verification.checklist import VisualQAChecklist
 
 
@@ -48,6 +48,7 @@ class Phase8VerificationRunner:
             bayesian_backend=bayesian_backend,
             quiet=quiet,
         )
+        first_fingerprint = read_json(out_dir / "reproducibility_fingerprint.json")
         if reproducibility_check:
             out_dir = pipeline.run_forecast(
                 as_of=as_of,
@@ -57,7 +58,22 @@ class Phase8VerificationRunner:
                 bayesian_backend=bayesian_backend,
                 quiet=quiet,
             )
-
+        second_fingerprint = read_json(out_dir / "reproducibility_fingerprint.json")
+        first_artifacts = dict(first_fingerprint.get("stable_artifacts") or {})
+        second_artifacts = dict(second_fingerprint.get("stable_artifacts") or {})
+        changed_fingerprint_artifacts = sorted(
+            name
+            for name in set(first_artifacts) | set(second_artifacts)
+            if first_artifacts.get(name) != second_artifacts.get(name)
+        )
+        timeout_audit = exercise_timeout_failover(
+            FailoverPolicy.from_config(self.context.read_yaml("model.yaml"))
+        )
+        write_json(timeout_audit, out_dir / "timeout_failover_audit.json")
+        # Verify the forecast artifacts before an optional daily-update exercise.
+        # A fixture window with no newly eligible polls must remain an honest R15
+        # insufficient no-op without invalidating the anchor forecast itself.
+        artifact_verification = pipeline.verify_run(run_id)
         daily_update_payload = None
         if daily_update and inference_engine.lower().strip() == "bayes":
             update_as_of = (date.fromisoformat(as_of) + timedelta(days=1)).isoformat()
@@ -66,11 +82,6 @@ class Phase8VerificationRunner:
                 as_of=update_as_of,
             )
 
-        timeout_audit = exercise_timeout_failover(
-            FailoverPolicy.from_config(self.context.read_yaml("model.yaml"))
-        )
-        write_json(timeout_audit, out_dir / "timeout_failover_audit.json")
-        artifact_verification = pipeline.verify_run(run_id)
         visual_qa = VisualQAChecklist().run(
             out_dir,
             expected_offices=self._expected_offices(scenario_obj),
@@ -92,6 +103,12 @@ class Phase8VerificationRunner:
                 "live_source_scope": live_scope,
             },
             "artifact_verification": artifact_verification,
+            "reproducibility_comparison": {
+                "passed": not changed_fingerprint_artifacts,
+                "changed_artifacts": changed_fingerprint_artifacts,
+                "first_combined_hash": first_fingerprint.get("combined_hash"),
+                "second_combined_hash": second_fingerprint.get("combined_hash"),
+            },
             "visual_qa": visual_qa,
             "daily_update": daily_update_payload,
             "timeout_failover_audit": timeout_audit,
