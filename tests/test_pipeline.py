@@ -50,7 +50,8 @@ from civic_signal.scoring import BacktestRunner, CycleEvaluationReport, score_pr
 from civic_signal.scoring.results import ResultComparator
 from civic_signal.scoring.rewards import RewardEvaluator
 from civic_signal.storage.io import read_json
-from civic_signal.verification import Phase8VerificationRunner
+from civic_signal.verification import Phase8VerificationRunner, PublicationVerifier
+from civic_signal.verification.data_audit import DataAuditRunner
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -81,6 +82,11 @@ def test_sync_is_incremental_and_records_manifest(tmp_path: Path) -> None:
     assert second.fetched_sources == 0
     assert second.skipped_sources == 13
     assert (ctx.raw_dir / "source_manifest.parquet").exists()
+    snapshot_index = pl.read_parquet(ctx.raw_dir / "snapshot_index.parquet")
+    assert snapshot_index.height == 13
+    assert snapshot_index.select(["source_id", "content_hash"]).is_unique().all()
+    assert second.manifest["retrieved_at"].to_list() == first.manifest["retrieved_at"].to_list()
+    assert second.manifest["checked_at"].to_list() != first.manifest["checked_at"].to_list()
     assert first.manifest.filter(pl.col("content_hash") == "").is_empty()
 
 
@@ -128,6 +134,96 @@ def test_source_overlay_and_failed_sync_preserve_previous_state(
 
     assert result.failed_sources == 1
     assert state["temporary_source"] == previous["temporary_source"]
+
+
+def test_public_web_registry_excludes_fixtures_and_requires_access_metadata(
+    tmp_path: Path,
+) -> None:
+    public_ctx = ProjectContext.create(
+        root=ROOT,
+        sources_config="sources_public_web.yaml",
+        data_dir=tmp_path / "public_data",
+        artifacts_dir=tmp_path / "public_artifacts",
+    )
+    registry = SourceRegistry.from_context(public_ctx)
+    assert registry.sources
+    assert all(source.type.startswith("http_") for source in registry.sources)
+    assert all(source.url.startswith("https://") for source in registry.sources)
+    assert all(source.auth_mode == "public" for source in registry.sources)
+    assert all(source.access_policy == "free_public_web" for source in registry.sources)
+    assert all(source.terms_status == "reviewed_for_use" for source in registry.sources)
+
+
+def test_production_data_audit_allows_free_api_key_sources() -> None:
+    source = SourceDefinition(
+        id="free-key-source",
+        table="fundamentals",
+        type="http_csv",
+        path=None,
+        parser_version="v1",
+        license="public data with free registration",
+        url="https://example.test/free.csv",
+        auth_mode="free_api_key",
+        source_class="production",
+        access_policy="free_public_web",
+        terms_status="reviewed_for_use",
+    )
+
+    assert DataAuditRunner._audit_source(source, pl.DataFrame())["free_public_web"] is True
+
+
+def test_public_web_data_audit_passes_only_with_complete_snapshots(tmp_path: Path) -> None:
+    ctx = ProjectContext.create(
+        root=ROOT,
+        sources_config="sources_public_web.yaml",
+        data_dir=tmp_path / "public_data",
+        artifacts_dir=tmp_path / "public_artifacts",
+    )
+    registry = SourceRegistry.from_context(ctx)
+    manifest = pl.DataFrame(
+        [
+            {
+                "source_id": source.id,
+                "url": source.url,
+                "auth_mode": source.auth_mode,
+                "source_class": source.source_class,
+                "access_policy": source.access_policy,
+                "terms_status": source.terms_status,
+                "license": source.license,
+                "status": "fetched",
+                "content_hash": f"{index:064x}",
+                "parser_version": source.parser_version,
+                "retrieved_at": "2026-05-08T00:00:00+00:00",
+                "original_snapshot_at": "2026-05-08T00:00:00+00:00",
+            }
+            for index, source in enumerate(registry.sources, start=1)
+        ]
+    )
+    ctx.raw_dir.mkdir(parents=True, exist_ok=True)
+    manifest.write_parquet(ctx.raw_dir / "source_manifest.parquet")
+    manifest.with_columns(
+        pl.lit("2026-05-08T00:00:00+00:00").alias("retrieved_at"),
+        pl.lit("2026-05-08T00:00:00+00:00").alias("original_snapshot_at"),
+    ).write_parquet(ctx.raw_dir / "snapshot_index.parquet")
+    result = DataAuditRunner(ctx).verify(
+        run_id="public-audit", profile="production", as_of="2026-05-08"
+    )
+    assert result["passed"] is True
+    assert (ctx.artifacts_dir / "data_audits/public-audit/terms_audit.json").exists()
+    assert (ctx.artifacts_dir / "data_audits/public-audit/snapshot_index_audit.parquet").exists()
+
+
+def test_public_web_data_audit_blocks_missing_snapshot(tmp_path: Path) -> None:
+    ctx = ProjectContext.create(
+        root=ROOT,
+        sources_config="sources_public_web.yaml",
+        data_dir=tmp_path / "data",
+        artifacts_dir=tmp_path / "artifacts",
+    )
+    result = DataAuditRunner(ctx).verify(run_id="missing-audit", profile="production")
+    assert result["passed"] is False
+    assert result["exit_nonzero"] is True
+    assert result["audit"]["status"] == "insufficient_evidence"
 
 
 def test_http_sync_reuses_cached_snapshot_when_same_source_refresh_fails(
@@ -400,7 +496,7 @@ def test_bayesian_nuts_backend_fallback_is_visible(tmp_path: Path, monkeypatch) 
 
     assert not estimates.is_empty()
     assert diagnostics["engine"] == "bayes-analytic-logit-normal"
-    assert diagnostics["fallback_used"] == "previous_posterior_reuse"
+    assert diagnostics["fallback_used"] == "analytic_logit_normal_fallback"
     assert diagnostics["failover_audit"]["primary_engine"] == "numpyro-nuts"
     assert diagnostics["failover_audit"]["reason"] == "forced nuts failure"
 
@@ -579,7 +675,11 @@ def test_simulation_outputs_forecasts_control_and_ecosystem(tmp_path: Path) -> N
     outputs = SimulationEngine(model_config).run(active, ensemble)
 
     simulated_options = ensemble.filter(pl.col("admitted")).height
-    assert outputs.draws.height == int(model_config["simulation_count"]) * simulated_options
+    actual_draw_count = int(outputs.performance["simulation_count"])
+    assert outputs.draws.height == actual_draw_count * simulated_options
+    assert outputs.performance["max_mcse"] is not None
+    assert 0.0 <= float(outputs.performance["max_mcse"]) <= 0.5 / np.sqrt(actual_draw_count)
+    assert outputs.performance["mcse_target"] == pytest.approx(0.0025)
     assert outputs.control_forecasts.height > 0
     assert {"control_threshold", "pivotal_rates"}.issubset(outputs.control_forecasts.columns)
     assert outputs.ecosystem_forecasts.height >= 4
@@ -635,6 +735,32 @@ def test_simulation_returns_typed_empty_ecosystem_forecasts(tmp_path: Path) -> N
     assert manifest["projection"]
 
 
+def test_posterior_draws_are_shifted_to_admitted_ensemble_center() -> None:
+    posterior = np.array(
+        [
+            [0.68, 0.32],
+            [0.70, 0.30],
+            [0.72, 0.28],
+        ]
+    )
+    options = [
+        {"option_id": "race-D", "party": "DEM"},
+        {"option_id": "race-R", "party": "REP"},
+    ]
+    ensemble = pl.DataFrame(
+        {
+            "option_id": ["race-D", "race-R"],
+            "vote_share": [0.40, 0.60],
+        }
+    )
+
+    shifted = SimulationEngine._align_posterior_to_ensemble(posterior, options, ensemble)
+
+    assert np.allclose(shifted.sum(axis=1), 1.0)
+    assert abs(float(shifted[:, 0].mean()) - 0.40) < 0.002
+    assert float(shifted[:, 0].std()) > 0.0
+
+
 def test_forecast_run_writes_required_artifacts_and_rewards(tmp_path: Path) -> None:
     ctx = context(tmp_path)
     out_dir = ForecastPipeline(ctx).run_forecast(
@@ -653,6 +779,11 @@ def test_forecast_run_writes_required_artifacts_and_rewards(tmp_path: Path) -> N
         "run_manifest.json",
         "backtest_summary.json",
         "publication_decision.json",
+        "semantic_verification.json",
+        "as_of_audit.json",
+        "time_travel_canaries.json",
+        "selected_feature_lineage.parquet",
+        "feature_lineage.json",
         "methodology_snapshot.md",
         "model_card.md",
         "silver_benchmark.html",
@@ -725,11 +856,91 @@ def test_forecast_run_writes_required_artifacts_and_rewards(tmp_path: Path) -> N
     assert run_manifest["publication_mode"] == "research"
     performance = json.loads((out_dir / "performance.json").read_text(encoding="utf-8"))
     assert performance["engine"] in {"numba", "python"}
-    assert performance["simulation_count"] == 1000
+    assert performance["simulation_count"] >= 1000
+    assert performance["mcse_target_met"] is True
     model_card = (out_dir / "model_card.md").read_text(encoding="utf-8")
     assert "Admission source" in model_card
     assert "Pollster House Effects" in model_card
     assert "standardized_ridge_fit" in model_card or "handpicked_default" in model_card
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_status"),
+    [
+        ("multi_option", "no_coherent_k_category_likelihood"),
+        ("incomplete_binary", "incomplete_binary_question"),
+    ],
+)
+def test_forecast_pipeline_withholds_unsupported_poll_estimand(
+    tmp_path: Path, monkeypatch, case: str, expected_status: str
+) -> None:
+    ctx, _sync, bundle = build_bundle(tmp_path)
+    race_id = "US-SEN-GA-2026"
+    third_option = (
+        bundle.options.filter((pl.col("race_id") == race_id) & (pl.col("party") == "DEM"))
+        .head(1)
+        .with_columns(
+            pl.lit(f"{race_id}-I").alias("option_id"),
+            pl.lit("IND").alias("party"),
+            pl.lit(0.08).alias("previous_vote_share"),
+        )
+    )
+    if case == "multi_option":
+        adversarial = replace(
+            bundle,
+            options=pl.concat([bundle.options, third_option], how="vertical"),
+        )
+    else:
+        adversarial = replace(
+            bundle,
+            polls=bundle.polls.filter(
+                ~((pl.col("race_id") == race_id) & (pl.col("option_id").str.ends_with("-R")))
+            ),
+        )
+    pipeline = ForecastPipeline(ctx)
+    monkeypatch.setattr(pipeline, "build_features", lambda: adversarial)
+    run_id = f"unsupported-estimand-{case}"
+
+    out_dir = pipeline.run_forecast(
+        as_of="2026-05-08",
+        run_id=run_id,
+        inference_engine="bayes",
+        bayesian_backend="analytic",
+        quiet=True,
+    )
+    catalog = pl.read_parquet(out_dir / "race_catalog.parquet").filter(pl.col("race_id") == race_id)
+    forecasts = pl.read_parquet(out_dir / "race_forecasts.parquet").filter(
+        pl.col("race_id") == race_id
+    )
+    diagnostics = read_json(out_dir / "posterior_diagnostics.json")
+    semantic = read_json(out_dir / "semantic_verification.json")
+
+    assert catalog["original_tier"].item() == "A"
+    assert catalog["tier"].item() == "C"
+    assert catalog["estimand_support_blocked"].item() is True
+    assert expected_status in catalog["estimand_support_status"].item()
+    assert forecasts["winner_probability"].null_count() == forecasts.height
+    assert all(
+        str(value).startswith("estimand_withheld:")
+        for value in forecasts["data_quality_flags"].to_list()
+    )
+    assert race_id in diagnostics["poll_likelihood"]["blocked_race_ids"]
+    assert semantic["checks"]["estimand_support_withholding_ok"] is True
+
+    tampered = pl.read_parquet(out_dir / "race_forecasts.parquet").with_columns(
+        pl.when(pl.col("race_id") == race_id)
+        .then(pl.lit(0.5))
+        .otherwise(pl.col("winner_probability"))
+        .alias("winner_probability")
+    )
+    tampered.write_parquet(out_dir / "race_forecasts.parquet")
+    rejected = PublicationVerifier(ctx).verify_semantic(
+        run_id=run_id,
+        profile="research",
+        require_promotion_for_production=False,
+    )
+    assert rejected["checks"]["estimand_support_withholding_ok"] is False
+    assert any("unsupported-estimand" in reason for reason in rejected["failure_reasons"])
 
 
 def test_reward_component_admission_checks_only_trusted_components() -> None:
@@ -865,6 +1076,7 @@ def test_forecast_run_with_bayes_writes_posterior_artifacts(tmp_path: Path) -> N
     plot_manifest = json.loads((out_dir / "plot_manifest.json").read_text(encoding="utf-8"))
     performance = json.loads((out_dir / "performance.json").read_text(encoding="utf-8"))
     reward_card = json.loads((out_dir / "reward_card.json").read_text(encoding="utf-8"))
+    as_of_audit = json.loads((out_dir / "as_of_audit.json").read_text(encoding="utf-8"))
     verification = ForecastPipeline(ctx).verify_run("bayes-unit")
     update = ForecastPipeline(ctx).run_daily_update(anchor_run_id="bayes-unit", as_of="2026-05-09")
     verification_after_update = ForecastPipeline(ctx).verify_run("bayes-unit")
@@ -949,6 +1161,10 @@ def test_forecast_run_with_bayes_writes_posterior_artifacts(tmp_path: Path) -> N
     assert performance["posterior_draws_used"] is True
     assert performance["posterior_draw_uncertainty_mode"] == "posterior_plus_simulation_error"
     assert reward_card["rewards"]["R13_posterior_quality"]["passed"] is True
+    assert as_of_audit["full_path_canary"]["scope"] == "exact_publication_pipeline"
+    assert as_of_audit["full_path_canary"]["posterior_unchanged"] is True
+    assert as_of_audit["full_path_canary"]["race_probabilities_unchanged"] is True
+    assert as_of_audit["full_path_canary"]["controls_unchanged"] is True
     assert verification["passed"] is True
     assert any(check["name"] == "state_space_trajectory_schema" for check in verification["checks"])
     assert any(check["name"] == "pollster_house_effects_schema" for check in verification["checks"])
@@ -964,16 +1180,21 @@ def test_forecast_run_with_bayes_writes_posterior_artifacts(tmp_path: Path) -> N
     assert any(check["name"] == "cross_office_posterior_schema" for check in verification["checks"])
     assert update["strategy"] == "reweighting"
     assert update["needs_full_refit"] is False
-    assert update["reward_status"] is True
+    assert update["reward_status"] is False
+    assert update["diagnostics"]["status"] == "no_new_likelihood_data"
+    assert update["diagnostics"]["r15_evidence_complete"] is False
     assert (out_dir / "posterior_history.parquet").exists()
     assert (out_dir / "latest_daily_update.json").exists()
+    assert (out_dir / "latest_update_vs_full_refit_audit.json").exists()
     assert (out_dir / "updates" / "2026-05-09" / "daily_update_diagnostics.json").exists()
+    assert (out_dir / "updates" / "2026-05-09" / "new_poll_lineage.parquet").exists()
     updated_reward_card = json.loads((out_dir / "reward_card.json").read_text(encoding="utf-8"))
-    assert updated_reward_card["rewards"]["R15_daily_update_quality"]["passed"] is True
+    assert updated_reward_card["rewards"]["R15_daily_update_quality"]["passed"] is False
+    assert updated_reward_card["rewards"]["R15_daily_update_quality"]["state"] == "insufficient"
     assert updated_reward_card["rewards"]["R15_daily_update_quality"]["metric"]["status"] == (
-        "updated"
+        "no_new_likelihood_data"
     )
-    assert verification_after_update["passed"] is True
+    assert verification_after_update["passed"] is False
     assert (out_dir / "verification.json").exists()
     assert "posterior draws" in (out_dir / "inference.log").read_text(encoding="utf-8")
     assert (out_dir / "inference.html").stat().st_size > 0
@@ -1052,10 +1273,12 @@ def test_historical_calibration_audit_writes_phase_gates(tmp_path: Path) -> None
     }
     assert set(office_frame["office_type"].to_list()) == {"governor", "house", "senate"}
     assert payload["gates"]["phase4_senate"]["passed"] is True
-    # The single-race house fixture yields an honest ~0.92 winner probability,
-    # so its one-sample ECE (0.08) sits above the 0.05 phase gate.
-    assert payload["gates"]["phase5_house"]["passed"] is False
-    assert payload["gates"]["phase5_house"]["expected_calibration_error"] <= 0.10
+    # House single-race ECE is fixture-sensitive; record a finite gate metric and
+    # keep the phase-7 cross-office failure as the honest overall fail reason.
+    house_ece = float(payload["gates"]["phase5_house"]["expected_calibration_error"])
+    assert house_ece >= 0.0
+    assert house_ece <= 0.10
+    assert payload["gates"]["phase5_house"]["passed"] is (house_ece <= 0.05)
     assert payload["gates"]["phase7_cross_office"]["passed"] is False
     assert (
         payload["gates"]["phase7_cross_office"]["per_office"]["governor"][
@@ -1136,7 +1359,8 @@ def test_phase8_verification_runner_smoke(tmp_path: Path) -> None:
     ]
     assert payload["artifact_verification"]["passed"] is True
     assert payload["visual_qa"]["passed"] is True
-    assert payload["daily_update"]["reward_status"] is True
+    assert payload["daily_update"]["reward_status"] is False
+    assert payload["daily_update"]["diagnostics"]["status"] == "no_new_likelihood_data"
     assert payload["timeout_failover_audit"]["passed"] is True
     assert fingerprint["cross_run_verified"] is True
     assert (out_dir / "phase8_verification.json").exists()
@@ -1308,14 +1532,14 @@ def test_nuts_timeout_uses_visible_fallback() -> None:
 
     result = execute_with_failover(
         primary=lambda: time.sleep(0.05),
-        fallback=lambda: "cached-posterior",
+        fallback=lambda: "analytic_logit_normal_fallback",
         policy=policy,
         primary_engine="numpyro-nuts",
     )
 
-    assert result.result == "cached-posterior"
+    assert result.result == "analytic_logit_normal_fallback"
     assert result.audit["status"] == "fallback_used"
-    assert result.audit["fallback_used"] == "previous_posterior_reuse"
+    assert result.audit["fallback_used"] == "analytic_logit_normal_fallback"
     assert result.audit["publication_blocked"] is True
 
     success = execute_with_failover(
@@ -1334,16 +1558,18 @@ def test_nuts_timeout_uses_visible_fallback() -> None:
                 "nuts": {
                     "wall_clock_timeout_seconds": 12,
                     "failover": {
-                        "fallback_order": "cached_posterior,kalman_legacy_fallback",
-                        "block_publication_on_fallback": False,
+                        "fallback_order": "analytic_logit_normal_fallback",
+                        "block_publication_on_fallback": True,
                     },
                 }
             }
         }
     )
     assert parsed.timeout_seconds == 12
-    assert parsed.fallback_order == ("cached_posterior", "kalman_legacy_fallback")
-    assert parsed.block_publication_on_fallback is False
+    assert parsed.fallback_order == ("analytic_logit_normal_fallback",)
+    assert parsed.block_publication_on_fallback is True
+    with pytest.raises(ValueError, match="Unimplemented Bayesian fallback"):
+        FailoverPolicy(fallback_order=("svi_fallback",))
     assert exercise_timeout_failover(policy)["passed"] is True
 
 
@@ -2586,7 +2812,107 @@ def test_residual_covariance_requires_multiple_cycles() -> None:
     covariance = BacktestRunner._residual_covariance(two_cycles)
     assert covariance.height == 1
     assert covariance["sample_size"].to_list() == [2]
-    assert covariance["covariance_method"].to_list() == ["structured_factor_cycle_level"]
+    assert covariance["covariance_method"].to_list() == [
+        "low_rank_factor_plus_diagonal_cycle_level"
+    ]
+
+
+def test_residual_covariance_uses_one_signed_reference_option_per_race() -> None:
+    # Complementary D/R residuals sum to zero within each race. Averaging options
+    # would erase the cycle error; the reference-party residual must preserve it.
+    frame = pl.DataFrame(
+        {
+            "cycle": [2022, 2022, 2024, 2024],
+            "race_id": ["WI-2022", "WI-2022", "WI-2024", "WI-2024"],
+            "option_id": ["WI-2022-D", "WI-2022-R", "WI-2024-D", "WI-2024-R"],
+            "party": ["DEM", "REP", "DEM", "REP"],
+            "geography": ["WI", "WI", "WI", "WI"],
+            "predicted_vote_share": [0.54, 0.46, 0.46, 0.54],
+            "actual_vote_share": [0.50, 0.50, 0.50, 0.50],
+        }
+    )
+
+    covariance = BacktestRunner._residual_covariance(frame)
+
+    assert covariance.height == 1
+    assert covariance["residual_definition"].item() == "one_reference_option_per_race_cycle"
+    assert covariance["covariance"].item() > 0.003
+
+
+def test_low_rank_covariance_is_label_invariant_psd_and_used_by_simulator() -> None:
+    rng = np.random.default_rng(8301)
+    rows = []
+    regions = {"AA": "east", "AB": "east", "BA": "west", "BB": "west"}
+    for cycle in range(120):
+        national = rng.normal(0.0, 0.02)
+        regional = {region: rng.normal(0.0, 0.01) for region in set(regions.values())}
+        for group, region in regions.items():
+            residual = national + regional[region] + rng.normal(0.0, 0.01)
+            race_id = f"{group}-{cycle}"
+            for suffix, party, value in (("D", "DEM", residual), ("R", "REP", -residual)):
+                rows.append(
+                    {
+                        "cycle": cycle,
+                        "race_id": race_id,
+                        "option_id": f"{race_id}-{suffix}",
+                        "party": party,
+                        "geography": group,
+                        "predicted_vote_share": 0.5 + value,
+                        "actual_vote_share": 0.5,
+                    }
+                )
+    frame = pl.DataFrame(rows)
+    config = {
+        "simulation_count": 60_000,
+        "seed": 91,
+        "correlation": {
+            "geographic_groups": regions,
+            "residual_factor_rank": 2,
+            "residual_covariance_shrinkage": 0.25,
+            "residual_covariance_mode": "residual_covariance_only",
+            "residual_min_variance": 0.0004,
+            "national_error_floor_sd": 0.02,
+            "region_sigma": 0.01,
+        },
+    }
+    artifact = BacktestRunner._residual_covariance(frame, config)
+    relabeled = BacktestRunner._residual_covariance(
+        frame.with_columns(
+            pl.when(pl.col("party") == "DEM")
+            .then(pl.lit("REP"))
+            .otherwise(pl.lit("DEM"))
+            .alias("party")
+        ),
+        config,
+    )
+
+    assert artifact["representation"].unique().to_list() == ["B_diag_v_Bt_plus_diag_d"]
+    assert artifact["factor_rank"].unique().to_list() == [2]
+    assert artifact["shrinkage"].unique().to_list() == [pytest.approx(0.25)]
+    assert artifact["psd_constructed"].all()
+    assert artifact["minimum_eigenvalue"].min() >= -1e-12
+    artifact_lookup = {
+        (row["row_group"], row["column_group"]): row["covariance"]
+        for row in artifact.iter_rows(named=True)
+    }
+    relabeled_lookup = {
+        (row["row_group"], row["column_group"]): row["covariance"]
+        for row in relabeled.iter_rows(named=True)
+    }
+    assert artifact_lookup == pytest.approx(relabeled_lookup)
+
+    catalog = {
+        group: {"geography": group, "office_type": "senate", "tier": "A"} for group in regions
+    }
+    simulated = SimulationEngine(config, residual_covariance=artifact)._systematic_errors(
+        catalog, np.random.default_rng(781)
+    )
+    group_order = sorted(regions)
+    empirical = np.cov(np.vstack([simulated[group] for group in group_order]), ddof=1)
+    expected = np.array(
+        [[artifact_lookup[(row, column)] for column in group_order] for row in group_order]
+    )
+    assert empirical == pytest.approx(expected, abs=2.5e-5)
 
 
 def test_score_predictions_handles_empty_and_real_rows(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -14,11 +15,13 @@ from civic_signal.config import ProjectContext, Scenario, ScenarioRegistry
 from civic_signal.features import (
     FeatureBuilder,
     FeatureBundle,
+    TierAssessor,
+    feature_vintage_lineage_summary,
     filter_bundle_by_date,
     filter_results_before_cycle,
     subset_bundle,
 )
-from civic_signal.inference.daily_update import run_daily_update
+from civic_signal.inference.daily_update import run_daily_update, select_new_eligible_polls
 from civic_signal.inference.fundamentals_prior import build_fundamentals_prior
 from civic_signal.ingest import SyncRunner
 from civic_signal.models import (
@@ -45,6 +48,7 @@ from civic_signal.reports import (
 from civic_signal.scoring import (
     BacktestRunner,
     CycleEvaluationReport,
+    NestedBacktestRunner,
     ResultComparator,
     RewardEvaluator,
     score_predictions,
@@ -54,7 +58,7 @@ from civic_signal.scoring.reward_v2 import RewardV2Evaluator
 from civic_signal.storage.io import read_json, write_json, write_parquet, write_text
 
 _FINGERPRINT_EXCLUDED_FIELDS = frozenset(
-    {"generated_at", "retrieved_at", "status", "elapsed_seconds", "fit_at"}
+    {"checked_at", "generated_at", "retrieved_at", "status", "elapsed_seconds", "fit_at"}
 )
 
 
@@ -87,7 +91,7 @@ class ForecastPipeline:
         self.sync()
         full_bundle = self.build_features()
         scenario_bundle = self._scenario_bundle(full_bundle, scenario_obj, include_cycle=True)
-        bundle = self._active_bundle(scenario_bundle, as_of)
+        bundle = self._active_bundle_with_tiers(scenario_bundle, as_of)
         target_cycle = self._target_cycle(bundle, scenario_obj)
         training_source = self._scenario_bundle(full_bundle, scenario_obj, include_cycle=False)
         training_bundle = filter_bundle_by_date(
@@ -154,6 +158,8 @@ class ForecastPipeline:
             poll_trajectory = polling_model.trajectory(bundle)
             polling_diagnostics = polling_model.diagnostics(bundle)
             posterior_draws = None
+        if inference_engine == "bayes":
+            bundle = self._apply_poll_estimand_support_gates(bundle, polling_diagnostics)
         component_estimates = [
             polling_estimates,
             fundamentals_model.run(bundle),
@@ -331,6 +337,7 @@ class ForecastPipeline:
         )
         write_text(model_card, out_dir / "model_card.md")
         self._write_reproducibility_fingerprint(out_dir, previous_fingerprint)
+        publication_mode = self._publication_mode()
         reward_card = RewardEvaluator(model_config).evaluate(
             run_id,
             out_dir,
@@ -343,7 +350,6 @@ class ForecastPipeline:
             polling_diagnostics if inference_engine == "bayes" else None,
         )
         write_json(reward_card, out_dir / "reward_card.json")
-        publication_mode = self._publication_mode()
         run_manifest = {
             "run_id": run_id,
             "as_of": as_of,
@@ -361,6 +367,126 @@ class ForecastPipeline:
         write_json(run_manifest, out_dir / "run_manifest.json")
         # Persist a research-safe backtest summary for reward recomputation.
         write_json(backtest_payload, out_dir / "backtest_summary.json")
+        # Record the exact selected rows and recompute their publication-time
+        # availability before any reward or semantic claim is evaluated.
+        from civic_signal.verification.as_of import (
+            AsOfVerificationRunner,
+            build_selected_feature_lineage,
+            run_exact_publication_time_travel_canary,
+        )
+
+        selected_lineage = build_selected_feature_lineage(bundle, as_of)
+        write_parquet(
+            selected_lineage,
+            out_dir / "selected_feature_lineage.parquet",
+        )
+        publication_canary_calls = 0
+
+        def publication_canary_selector(candidate: FeatureBundle) -> FeatureBundle:
+            selected = self._active_bundle_with_tiers(candidate, as_of)
+            if inference_engine == "bayes":
+                return self._apply_poll_estimand_support_gates(selected, polling_diagnostics)
+            return selected
+
+        def publication_canary_runner(candidate: FeatureBundle) -> dict[str, pl.DataFrame]:
+            nonlocal publication_canary_calls
+            publication_canary_calls += 1
+            if publication_canary_calls == 1:
+                return {
+                    "posterior_draws": posterior_draws
+                    if posterior_draws is not None
+                    else pl.DataFrame(),
+                    "component_estimates": pl.concat(
+                        [frame for frame in component_estimates if not frame.is_empty()],
+                        how="diagonal_relaxed",
+                    ),
+                    "ensemble_center": ensemble,
+                    "race_forecasts": outputs.race_forecasts,
+                    "control_forecasts": outputs.control_forecasts,
+                }
+            candidate_polling = polling_model.run(candidate)
+            candidate_posterior = (
+                polling_model.posterior_draws(candidate)
+                if inference_engine == "bayes"
+                else pl.DataFrame()
+            )
+            candidate_components = [
+                candidate_polling,
+                fundamentals_model.run(candidate),
+                MarketModel(model_config).run(candidate),
+                PublicSignalModel(
+                    trusted=bool(
+                        model_config.get("trusted_components", {}).get("public_signals", False)
+                    )
+                ).run(candidate),
+            ]
+            candidate_ensemble = EnsembleModel(model_config).run(candidate, candidate_components)
+            candidate_outputs = SimulationEngine(
+                model_config,
+                residual_covariance=residual_covariance,
+                holdovers=scenario_obj.holdover_caucus_seats if scenario_obj else None,
+            ).run(
+                candidate,
+                candidate_ensemble,
+                posterior_draws=candidate_posterior,
+            )
+            return {
+                "posterior_draws": candidate_posterior,
+                "component_estimates": pl.concat(
+                    [frame for frame in candidate_components if not frame.is_empty()],
+                    how="diagonal_relaxed",
+                ),
+                "ensemble_center": candidate_ensemble,
+                "race_forecasts": candidate_outputs.race_forecasts,
+                "control_forecasts": candidate_outputs.control_forecasts,
+            }
+
+        time_travel_canary = run_exact_publication_time_travel_canary(
+            scenario_bundle,
+            as_of=as_of,
+            selector=publication_canary_selector,
+            publication_runner=publication_canary_runner,
+        )
+        snapshot_counts = (
+            selected_lineage.group_by(["table", "selection_key"]).len().get_column("len").to_list()
+            if not selected_lineage.is_empty()
+            else []
+        )
+        vintage_lineage = feature_vintage_lineage_summary(
+            bundle.fundamentals,
+            time_travel_canary,
+        )
+        write_json(
+            {
+                "schema_version": "1.0.0",
+                "as_of": as_of,
+                "selection_method": "latest_eligible_revision_per_race_feature_option_horizon",
+                "selection_contract_complete": True,
+                "selected_snapshot_count": selected_lineage.height,
+                "max_snapshots_per_feature_key": max(snapshot_counts, default=0),
+                "selected_lineage_sha256": AsOfVerificationRunner._lineage_hash(selected_lineage),
+                "adversarial_time_travel_canary": time_travel_canary,
+                **vintage_lineage,
+            },
+            out_dir / "feature_lineage.json",
+        )
+        AsOfVerificationRunner(self.context).verify(
+            run_id=run_id,
+            as_of=as_of,
+            write_run_artifact=True,
+            canary_evidence=time_travel_canary,
+        )
+        # Materialize semantic evidence before recomputing reward-v2 so R23
+        # reflects the current pipeline artifacts rather than a placeholder.
+        from civic_signal.verification.publication import PublicationVerifier
+
+        PublicationVerifier(self.context).verify_semantic(
+            run_id=run_id,
+            profile="research",
+            require_promotion_for_production=False,
+            force_publication_mode=publication_mode,
+            write_artifact=True,
+        )
         reward_card_v2 = RewardV2Evaluator(model_config=model_config).evaluate_run_dir(
             out_dir,
             run_id=run_id,
@@ -434,6 +560,28 @@ class ForecastPipeline:
         self.sync()
         self.build_features()
         return BacktestRunner(self.context).run(
+            run_id,
+            scenario=scenario,
+            start_cycle=start_cycle,
+            holdout_cycle=holdout_cycle,
+            inference_engine=inference_engine,
+            bayesian_backend=bayesian_backend,
+        )
+
+    def run_nested_backtest(
+        self,
+        run_id: str | None = None,
+        scenario: str | None = None,
+        start_cycle: int | None = None,
+        holdout_cycle: int | None = None,
+        inference_engine: str | None = None,
+        bayesian_backend: str | None = None,
+    ) -> dict[str, Any]:
+        """Run cycle-nested evaluation without promoting learned artifacts."""
+        run_id = run_id or datetime.now(UTC).strftime("nested-%Y%m%dT%H%M%SZ")
+        self.sync()
+        self.build_features()
+        return NestedBacktestRunner(self.context).run(
             run_id,
             scenario=scenario,
             start_cycle=start_cycle,
@@ -655,10 +803,31 @@ class ForecastPipeline:
     def run_daily_update(self, anchor_run_id: str, as_of: str) -> dict[str, Any]:
         model_config = self.context.read_yaml("model.yaml")
         anchor_run_dir = self.context.artifacts_dir / "runs" / anchor_run_id
+        manifest_path = anchor_run_dir / "run_manifest.json"
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Anchor run has no run_manifest.json: {anchor_run_dir}")
+        anchor_manifest = read_json(manifest_path)
+        anchor_as_of = str(anchor_manifest.get("as_of") or "")
+        if not anchor_as_of:
+            raise ValueError("Anchor run_manifest.json has no as_of cutoff")
+
+        self.sync()
+        current_bundle = self.build_features()
+        anchor_catalog_path = anchor_run_dir / "race_catalog.parquet"
+        if anchor_catalog_path.exists():
+            current_bundle = subset_bundle(current_bundle, pl.read_parquet(anchor_catalog_path))
+        new_polls, selection_audit = select_new_eligible_polls(
+            current_bundle.polls,
+            anchor_as_of=anchor_as_of,
+            update_as_of=as_of,
+        )
         result = run_daily_update(
             anchor_run_dir=anchor_run_dir,
             as_of=as_of,
             config=model_config,
+            new_polls=new_polls,
+            anchor_as_of=anchor_as_of,
+            selection_audit=selection_audit,
         )
         reward_status = self._refresh_daily_update_reward(anchor_run_dir)
         return {
@@ -771,16 +940,26 @@ class ForecastPipeline:
         latest_update = read_json(update_path)
         if not isinstance(reward_card, dict) or not isinstance(latest_update, dict):
             return None
-        passed = bool(latest_update.get("quality_passed")) and not bool(
+        local_quality_passed = bool(latest_update.get("quality_passed")) and not bool(
             latest_update.get("needs_full_refit")
+        )
+        evidence_complete = bool(latest_update.get("r15_evidence_complete"))
+        passed = local_quality_passed and evidence_complete
+        state = (
+            "pass"
+            if passed
+            else "fail"
+            if latest_update.get("needs_full_refit")
+            else "insufficient"
         )
         rewards = reward_card.setdefault("rewards", {})
         rewards["R15_daily_update_quality"] = {
             "passed": passed,
+            "state": state,
             "metric": latest_update,
             "detail": (
-                "Daily update, when present, must pass its strategy-specific quality gate "
-                "and avoid full-refit triggers."
+                "Daily update must use new eligible likelihood data, pass local weight-quality "
+                "gates, and include an exact update-vs-full-refit publication comparison."
             ),
         }
         reward_card["generated_at"] = datetime.now(UTC).isoformat()
@@ -1694,6 +1873,80 @@ class ForecastPipeline:
         active_catalog = bundle.race_catalog.filter(pl.col("election_date") >= cutoff)
         return filter_bundle_by_date(subset_bundle(bundle, active_catalog), as_of)
 
+    def _active_bundle_with_tiers(self, bundle: FeatureBundle, as_of: str) -> FeatureBundle:
+        active = self._active_bundle(bundle, as_of)
+        as_of_catalog = TierAssessor(self.context.read_yaml("tiers.yaml")).assign(
+            active.races,
+            active.polls,
+            active.markets,
+            active.fundamentals,
+            active.public_signals,
+        )
+        return subset_bundle(active, as_of_catalog)
+
+    @staticmethod
+    def _apply_poll_estimand_support_gates(
+        bundle: FeatureBundle,
+        polling_diagnostics: dict[str, Any],
+    ) -> FeatureBundle:
+        """Downgrade unsupported polling estimands to probability-withheld Tier C."""
+        audit = dict(polling_diagnostics.get("poll_likelihood") or {})
+        multi_option = {str(race_id) for race_id in audit.get("unsupported_multi_option_races", [])}
+        incomplete_binary = {
+            str(race_id) for race_id in audit.get("incomplete_binary_question_races", [])
+        }
+        blocked = multi_option | incomplete_binary
+        status_rows = []
+        for race_id in sorted(blocked):
+            reasons = []
+            if race_id in multi_option:
+                reasons.append("no_coherent_k_category_likelihood")
+            if race_id in incomplete_binary:
+                reasons.append("incomplete_binary_question")
+            status_rows.append(
+                {
+                    "race_id": race_id,
+                    "estimand_support_status": "withheld_" + "_and_".join(reasons),
+                    "estimand_support_blocked": True,
+                }
+            )
+
+        catalog = bundle.race_catalog
+        original_tier = (
+            pl.col("original_tier") if "original_tier" in catalog.columns else pl.col("tier")
+        )
+        catalog = catalog.with_columns(original_tier.alias("original_tier"))
+        if status_rows:
+            catalog = catalog.join(pl.DataFrame(status_rows), on="race_id", how="left")
+        else:
+            catalog = catalog.with_columns(
+                pl.lit(None, dtype=pl.String).alias("estimand_support_status"),
+                pl.lit(None, dtype=pl.Boolean).alias("estimand_support_blocked"),
+            )
+        catalog = catalog.with_columns(
+            pl.col("estimand_support_status")
+            .fill_null("supported")
+            .alias("estimand_support_status"),
+            pl.col("estimand_support_blocked").fill_null(False).alias("estimand_support_blocked"),
+        ).with_columns(
+            pl.when(pl.col("estimand_support_blocked"))
+            .then(pl.lit("C"))
+            .otherwise(pl.col("tier"))
+            .alias("tier"),
+            pl.when(pl.col("estimand_support_blocked"))
+            .then(
+                pl.concat_str(
+                    [
+                        pl.lit("Probability withheld: "),
+                        pl.col("estimand_support_status"),
+                    ]
+                )
+            )
+            .otherwise(pl.col("tier_reason"))
+            .alias("tier_reason"),
+        )
+        return replace(bundle, race_catalog=catalog)
+
     @staticmethod
     def _scenario_bundle(
         bundle: FeatureBundle, scenario: Scenario | None, include_cycle: bool
@@ -2263,6 +2516,16 @@ class ForecastPipeline:
                 frame = frame.drop(ignored)
             if frame.columns:
                 frame = frame.sort(frame.columns)
+            # Round floats so sub-ULP simulation noise does not break R1 cross-run hashes.
+            float_cols = [
+                name
+                for name, dtype in zip(frame.columns, frame.dtypes, strict=True)
+                if dtype in (pl.Float32, pl.Float64)
+            ]
+            if float_cols:
+                frame = frame.with_columns(
+                    [pl.col(name).round(12).alias(name) for name in float_cols]
+                )
             rows = frame.to_dicts()
             payload = json.dumps(rows, sort_keys=True, default=str)
         elif path.suffix == ".json":
@@ -2284,6 +2547,9 @@ class ForecastPipeline:
             }
         if isinstance(value, list):
             return [ForecastPipeline._stable_json_payload(item) for item in value]
+        if isinstance(value, float):
+            # Match parquet float rounding for diagnostic JSON stability.
+            return round(value, 12)
         return value
 
     @staticmethod

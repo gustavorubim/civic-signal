@@ -15,6 +15,8 @@ report_app = typer.Typer(help="Report commands.")
 benchmark_app = typer.Typer(help="Performance benchmark commands.")
 results_app = typer.Typer(help="Forecast-vs-actual result comparison commands.")
 verify_app = typer.Typer(help="Run artifact verification commands.")
+data_app = typer.Typer(help="Audit production data and source inputs.")
+shadow_app = typer.Typer(help="Shadow forecasting (non-public pre-production runs).")
 spike_app = typer.Typer(help="Methodology spike commands.")
 app.add_typer(forecast_app, name="forecast")
 app.add_typer(backtest_app, name="backtest")
@@ -22,6 +24,8 @@ app.add_typer(report_app, name="report")
 app.add_typer(benchmark_app, name="benchmark")
 app.add_typer(results_app, name="results")
 app.add_typer(verify_app, name="verify")
+app.add_typer(data_app, name="data")
+app.add_typer(shadow_app, name="shadow")
 app.add_typer(spike_app, name="spike")
 console = Console()
 
@@ -168,6 +172,44 @@ def backtest_run(
         bayesian_backend=bayesian_backend,
     )
     console.print(f"[green]Backtest complete[/green]: {payload['row_count']} rows")
+
+
+@backtest_app.command("nested")
+def backtest_nested(
+    run_id: str | None = typer.Option(None, help="Stable nested-backtest run id."),
+    scenario: str | None = typer.Option(None, help="Scenario key from configs/scenarios.yaml."),
+    start_cycle: int | None = typer.Option(None, help="First outer holdout cycle to score."),
+    holdout_cycle: int | None = typer.Option(None, help="Single outer holdout cycle to score."),
+    inference_engine: str | None = typer.Option(
+        None, help="Polling engine for inner and outer folds: kalman or bayes."
+    ),
+    bayesian_backend: str | None = typer.Option(
+        None, help="Bayesian backend for nested folds: analytic or nuts."
+    ),
+    root: Path | None = typer.Option(None, help="Project root."),
+    sources_config: str = typer.Option("sources.yaml", help="Source registry config file."),
+    data_dir: Path | None = typer.Option(None, help="Data directory override."),
+    artifacts_dir: Path | None = typer.Option(None, help="Artifacts directory override."),
+) -> None:
+    """Run outer-cycle nested evaluation through the publication simulation path."""
+    context = _context(
+        root=root,
+        sources_config=sources_config,
+        data_dir=data_dir,
+        artifacts_dir=artifacts_dir,
+    )
+    payload = ForecastPipeline(context).run_nested_backtest(
+        run_id=run_id,
+        scenario=scenario,
+        start_cycle=start_cycle,
+        holdout_cycle=holdout_cycle,
+        inference_engine=inference_engine,
+        bayesian_backend=bayesian_backend,
+    )
+    console.print(
+        f"[green]Nested backtest complete[/green]: {payload['fold_count']} outer folds, "
+        f"{payload['row_count']} rows"
+    )
 
 
 @backtest_app.command("refresh-hyperpriors")
@@ -493,6 +535,254 @@ def verify_as_of(
     console.print(f"[{color}]As-of verification[/{color}]: passed={payload['passed']}")
     console.print(payload["audit_path"])
     if payload.get("exit_nonzero"):
+        raise typer.Exit(code=1)
+
+
+@verify_app.command("coherence")
+def verify_coherence(
+    run_id: str = typer.Option(..., help="Forecast run id to audit."),
+    audit_id: str | None = typer.Option(None, help="Optional coherence audit id."),
+    root: Path | None = typer.Option(None, help="Project root."),
+    sources_config: str = typer.Option("sources.yaml", help="Source registry config file."),
+    data_dir: Path | None = typer.Option(None, help="Data directory override."),
+    artifacts_dir: Path | None = typer.Option(None, help="Artifacts directory override."),
+) -> None:
+    """Reconstruct race, draw, elector, and chamber-control coherence."""
+    from civic_signal.verification.coherence import CoherenceVerificationRunner
+
+    context = _context(
+        root=root,
+        sources_config=sources_config,
+        data_dir=data_dir,
+        artifacts_dir=artifacts_dir,
+    )
+    payload = CoherenceVerificationRunner(context).verify(run_id=run_id, audit_id=audit_id)
+    color = "green" if payload["passed"] else "red"
+    console.print(f"[{color}]Coherence verification[/{color}]: passed={payload['passed']}")
+    console.print(payload["output_dir"])
+    if not payload["passed"]:
+        raise typer.Exit(code=1)
+
+
+@verify_app.command("recovery")
+def verify_recovery(
+    run_id: str | None = typer.Option(None, help="Stable recovery audit id."),
+    backend: str = typer.Option(
+        "analytic", help="Bayesian polling backend for the bounded smoke: analytic or nuts."
+    ),
+    replicates: int = typer.Option(12, min=2, help="Synthetic recovery replicates."),
+    root: Path | None = typer.Option(None, help="Project root."),
+    sources_config: str = typer.Option("sources.yaml", help="Source registry config file."),
+    data_dir: Path | None = typer.Option(None, help="Data directory override."),
+    artifacts_dir: Path | None = typer.Option(None, help="Artifacts directory override."),
+) -> None:
+    """Run bounded Bayesian recovery checks without claiming production sufficiency."""
+    from civic_signal.verification.recovery import RecoveryVerificationRunner
+
+    context = _context(
+        root=root,
+        sources_config=sources_config,
+        data_dir=data_dir,
+        artifacts_dir=artifacts_dir,
+    )
+    payload = RecoveryVerificationRunner(context).verify(
+        run_id=run_id,
+        backend=backend,
+        replicates=replicates,
+    )
+    color = "green" if payload["smoke_checks_passed"] else "red"
+    console.print(
+        f"[{color}]Recovery smoke[/{color}]: checks={payload['smoke_checks_passed']} "
+        f"evidence={payload['status']}"
+    )
+    console.print(payload["output_dir"])
+    if not payload["smoke_checks_passed"]:
+        raise typer.Exit(code=1)
+
+
+@verify_app.command("shadow")
+def verify_shadow(
+    profile: str = typer.Option(
+        "2026-general-shadow",
+        help="Shadow profile id from configs/shadow.yaml.",
+    ),
+    window_start: str = typer.Option(..., help="Inclusive window start YYYY-MM-DD."),
+    window_end: str = typer.Option(..., help="Inclusive window end YYYY-MM-DD."),
+    root: Path | None = typer.Option(None, help="Project root."),
+    sources_config: str = typer.Option("sources.yaml", help="Source registry config file."),
+    data_dir: Path | None = typer.Option(None, help="Data directory override."),
+    artifacts_dir: Path | None = typer.Option(None, help="Artifacts directory override."),
+) -> None:
+    """Verify a shadow window; incomplete history cannot pass."""
+    from civic_signal.verification.shadow import ShadowVerificationRunner
+
+    context = _context(
+        root=root,
+        sources_config=sources_config,
+        data_dir=data_dir,
+        artifacts_dir=artifacts_dir,
+    )
+    payload = ShadowVerificationRunner(context).verify(
+        profile=profile,
+        window_start=window_start,
+        window_end=window_end,
+    )
+    color = "green" if payload["passed"] else "red"
+    console.print(
+        f"[{color}]Shadow verification[/{color}]: passed={payload['passed']} "
+        f"consecutive={payload['consecutive_days']} missing={len(payload['missing_runs'])}"
+    )
+    console.print(payload["report_path"])
+    if payload.get("violations"):
+        console.print(payload["violations"])
+    if payload.get("exit_nonzero"):
+        raise typer.Exit(code=1)
+
+
+@verify_app.command("scientific")
+def verify_scientific(
+    live_canaries: bool = typer.Option(
+        False,
+        "--live-canaries",
+        help="Hit real free-public HTTP canaries (offline mocks used by default).",
+    ),
+    nuts_smoke: bool = typer.Option(
+        False,
+        "--nuts-smoke",
+        help="Run a tiny real NumPyro/NUTS fit (slow; optional CI job).",
+    ),
+    root: Path | None = typer.Option(None, help="Project root."),
+    sources_config: str = typer.Option("sources.yaml", help="Source registry config file."),
+    data_dir: Path | None = typer.Option(None, help="Data directory override."),
+    artifacts_dir: Path | None = typer.Option(None, help="Artifacts directory override."),
+) -> None:
+    """Run M7 scientific checks; optional NUTS/live suites do not hard-fail offline CI."""
+    from civic_signal.verification.scientific import ScientificVerificationRunner
+
+    context = _context(
+        root=root,
+        sources_config=sources_config,
+        data_dir=data_dir,
+        artifacts_dir=artifacts_dir,
+    )
+    payload = ScientificVerificationRunner(context).verify(
+        include_live_canaries=live_canaries,
+        include_nuts_smoke=nuts_smoke,
+    )
+    color = "green" if payload["passed"] else "red"
+    console.print(
+        f"[{color}]Scientific verification[/{color}]: passed={payload['passed']} "
+        f"state={payload.get('evidence_state')} "
+        f"failures={len(payload.get('failures') or [])}"
+    )
+    console.print(payload["report_path"])
+    if payload.get("failures"):
+        console.print(payload["failures"])
+    if payload.get("missing_optional_suites"):
+        console.print(f"optional pending: {payload['missing_optional_suites']}")
+    if payload.get("exit_nonzero"):
+        raise typer.Exit(code=1)
+
+
+@shadow_app.command("preregister")
+def shadow_preregister(
+    profile: str = typer.Option("2026-general-shadow", help="Shadow profile id."),
+    cycle: int = typer.Option(2026, help="Election cycle being preregistered."),
+    force: bool = typer.Option(False, help="Allow rewriting a frozen preregistration."),
+    root: Path | None = typer.Option(None, help="Project root."),
+    sources_config: str = typer.Option("sources.yaml", help="Source registry config file."),
+    data_dir: Path | None = typer.Option(None, help="Data directory override."),
+    artifacts_dir: Path | None = typer.Option(None, help="Artifacts directory override."),
+) -> None:
+    """Freeze primary model and baseline definitions before a shadow window."""
+    from civic_signal.shadow import ShadowForecastRunner
+
+    context = _context(
+        root=root,
+        sources_config=sources_config,
+        data_dir=data_dir,
+        artifacts_dir=artifacts_dir,
+    )
+    payload = ShadowForecastRunner(context, profile_id=profile).ensure_preregistration(
+        cycle=cycle, force=force
+    )
+    console.print(f"[green]Preregistration frozen[/green]: {payload['profile_id']}")
+    console.print(payload.get("frozen_at"))
+
+
+@shadow_app.command("run")
+def shadow_run(
+    profile: str = typer.Option("2026-general-shadow", help="Shadow profile id."),
+    window_start: str = typer.Option(..., help="Inclusive window start YYYY-MM-DD."),
+    window_end: str = typer.Option(..., help="Inclusive window end YYYY-MM-DD."),
+    execute: bool = typer.Option(
+        True,
+        "--execute/--schedule-only",
+        help="Execute forecasts or only materialize the schedule.",
+    ),
+    scenario: str | None = typer.Option(None, help="Override scenario key."),
+    inference_engine: str | None = typer.Option(None, help="kalman or bayes."),
+    bayesian_backend: str | None = typer.Option(None, help="analytic or nuts."),
+    quiet: bool = typer.Option(True, help="Suppress forecast progress."),
+    root: Path | None = typer.Option(None, help="Project root."),
+    sources_config: str = typer.Option("sources.yaml", help="Source registry config file."),
+    data_dir: Path | None = typer.Option(None, help="Data directory override."),
+    artifacts_dir: Path | None = typer.Option(None, help="Artifacts directory override."),
+) -> None:
+    """Run scheduled shadow forecasts (no public production probabilities)."""
+    from civic_signal.shadow import ShadowForecastRunner
+
+    context = _context(
+        root=root,
+        sources_config=sources_config,
+        data_dir=data_dir,
+        artifacts_dir=artifacts_dir,
+    )
+    payload = ShadowForecastRunner(context, profile_id=profile).run_window(
+        window_start=window_start,
+        window_end=window_end,
+        execute=execute,
+        scenario=scenario,
+        inference_engine=inference_engine,
+        bayesian_backend=bayesian_backend,
+        quiet=quiet,
+    )
+    console.print(
+        f"[green]Shadow window ready[/green]: profile={payload['profile_id']} "
+        f"days={payload['scheduled_days']} executed={len(payload['executed'])}"
+    )
+    console.print(payload["profile_dir"])
+
+
+@data_app.command("audit")
+def data_audit(
+    run_id: str = typer.Option(..., help="Stable data-audit run id."),
+    profile: str = typer.Option("production", help="Audit profile."),
+    as_of: str | None = typer.Option(None, help="Input cutoff date YYYY-MM-DD."),
+    root: Path | None = typer.Option(None, help="Project root."),
+    sources_config: str = typer.Option(
+        "sources_public_web.yaml", help="Source registry config file."
+    ),
+    data_dir: Path | None = typer.Option(None, help="Data directory override."),
+    artifacts_dir: Path | None = typer.Option(None, help="Artifacts directory override."),
+) -> None:
+    """Audit source access, terms, snapshots, and fixture exclusion."""
+    from civic_signal.verification.data_audit import DataAuditRunner
+
+    context = _context(
+        root=root,
+        sources_config=sources_config,
+        data_dir=data_dir,
+        artifacts_dir=artifacts_dir,
+    )
+    payload = DataAuditRunner(context).verify(run_id=run_id, profile=profile, as_of=as_of)
+    color = "green" if payload["passed"] else "yellow"
+    console.print(
+        f"[{color}]Data audit[/{color}]: passed={payload['passed']} "
+        f"status={payload['audit']['status']}"
+    )
+    console.print(payload["audit_path"])
+    if payload["exit_nonzero"]:
         raise typer.Exit(code=1)
 
 
