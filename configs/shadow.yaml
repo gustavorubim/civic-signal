@@ -1,0 +1,41 @@
+# Shadow forecasting profiles (M8). Not public probabilities.
+version: "1.0.0"
+default_profile: 2026-general-shadow
+
+profiles:
+  2026-general-shadow:
+    description: Pre-production shadow window for free-web general-election path.
+    publication_mode: shadow
+    # Prefer free-web registry when available; callers may override via CLI.
+    sources_config: sources_public_web.yaml
+    scenario: 2026-multioffice-verification
+    offices: [president, senate, house, governor]
+    horizon_buckets: [30, 14, 7, 1]
+    min_consecutive_days: 60
+    # If true, a fully complete predeclared window may pass without 60 calendar days.
+    allow_predeclared_window: true
+    max_source_age_hours: 72
+    max_fallback_rate: 0.0
+    max_silent_publication_failures: 0
+    require_preregistration: true
+    require_source_health: true
+    require_no_unquarantined_fallback: true
+    inference_engine: bayes
+    bayesian_backend: analytic
+
+monitors:
+  - source_freshness
+  - source_coverage
+  - poll_movement
+  - posterior_drift
+  - sampler_health
+  - update_vs_refit
+  - calibration
+  - mcse
+  - fallback_frequency
+
+scorecard:
+  primary_metric: mean_log_score
+  secondary_metrics: [brier_score, interval_90_coverage]
+  uncertainty: cycle_clustered_bootstrap
+  min_cycles_for_claim: 6
