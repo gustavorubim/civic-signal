@@ -94,6 +94,19 @@ uv run civic-signal forecast run \
 ```
 
 The default polling engine is resolved from `configs/model.yaml`.
+The fixture registry remains the default for deterministic local validation. For a web-only
+production candidate, pass `--sources-config sources_public_web.yaml`; that registry contains
+free HTTPS sources explicitly marked `free_public_web`. Its initial adapters are keyless,
+but a freely issued API key is also eligible when auth mode, limits, and terms are recorded.
+It inherits only the production-only `sources_official_results.yaml` registry, never the
+fixture registry. That implemented historical path snapshots a commit-pinned MEDSL
+1976-2018 House constituency file sourced from the Office of the Clerk, then emits canonical
+House race and official-result rows. The underlying Clerk returns are federal public records;
+MEDSL requests dataset citation but does not publish an explicit data-license file in that
+repository, so Civic Signal records the citation and terms URL and never redistributes the raw
+snapshot from version control.
+Production R16 rejects local fixtures, generated rows, paid sources, unknown access policy,
+or unreviewed terms metadata; authentication by itself is not a paid-data signal.
 The Bayesian path is the production default **polling engine** in config for research
 and operational engineering runs, so those forecasts emit Bayesian posterior artifacts.
 **Publication mode defaults to `research`** (`configs/rewards.yaml`); fixture-backed
@@ -116,9 +129,19 @@ acceptance probability. A plain `uv sync` installs JAX, NumPyro, and ArviZ. The
 deterministic analytic bridge remains available for fast smoke runs by selecting it
 explicitly:
 
-NUTS polling observations use the empirical-Bayes pollster house-effect adjustment, a
-Bayesian-specific 7-day half-life, population/methodology quality weights, and
-poll-age process variance before fitting the as-of latent state. Exported Bayesian
+Bayesian polling observations use explicit methodology and sponsor bias adjustments plus
+mode/sponsor/nonsampling variance, a 7-day half-life, population quality weights, and
+poll-age process variance before fitting the as-of latent state. Survey/question identity
+deduplicates repeated option rows. Binary polls contribute one shared two-party contrast;
+undecided/other mass is proportionally removed from the two-party estimand and inflates
+uncertainty. Three-or-more-option polling estimands are withheld because the repository
+does not yet implement a coherent K-category likelihood; normalized diagonal option fits
+must not be presented as a real multiclass model. An incomplete binary question is also
+excluded instead of fitting its sole option as independent evidence. These statuses propagate
+through the full forecast: the affected race retains `original_tier`, is downgraded to Tier C,
+receives an `estimand_support_status`, and publishes null winner probabilities even when
+fundamentals or markets are otherwise available. Semantic publication verification rejects
+any blocked estimand that is not Tier C or has a non-null probability. Exported Bayesian
 draws are inflated from `as_of` to election day with
 `bayesian.state_space.forecast_drift_sd_per_sqrt_day`, then constrained within each
 race so binary shares are anti-correlated and sum to one. The simulator uses those
@@ -137,13 +160,154 @@ If the runtime environment is missing NumPyro/JAX or NUTS exceeds the configured
 falls back through the configured policy and records that status in
 `posterior_diagnostics.json`.
 
+### Scientific CI (M7)
+
+Property, numerical-parity, mutation, golden-fixture, contract-parity, and offline
+canary checks recompute under one command:
+
+```bash
+uv run civic-signal verify scientific
+# optional network canaries / tiny real NUTS smoke
+uv run civic-signal verify scientific --live-canaries --nuts-smoke
+```
+
+Golden fixtures live in `tests/golden_fixtures/` (small election, chamber control,
+multi-option race, quarantine failure, parity fingerprints). Pytest markers:
+`nuts` (tiny real MCMC), `live` (network canaries). Default unit tests use offline
+canary mocks so CI stays deterministic.
+
+The required mutation suite corrupts the actual reward/publication verifier paths: it
+removes a required reward-card schema field, injects duplicate forecast keys and
+out-of-range probabilities, supplies stale calibration lineage, and violates the blocked
+estimand publication gate. For each family, the checked-in verifier must reject the
+corruption while a controlled predicate-removal mutant accepts it. `verify scientific`
+fails closed if any required mutation family is absent or survives. R27 is generated from
+the repository rather than maintained as a hand-written checklist: configured reward IDs
+must match threshold entries and evaluator methods exactly, profiles may reference only
+known rewards, README/SPEC must document every reward and required command, and the real
+CLI decorators must expose those commands. Live free-web canaries and the tiny real NUTS
+smoke remain optional additions to the deterministic offline gate.
+
+Run the bounded Bayesian model-recovery harness separately:
+
+```bash
+uv run civic-signal verify recovery \
+  --backend analytic \
+  --replicates 12 \
+  --run-id recovery-smoke
+```
+
+This exercises the real Bayesian polling model with parameter-recovery, label-swap,
+unpolled-propagation, and small simulation-based-calibration checks. Polled signed swings
+are partially pooled at global, office, and geography levels into fundamentals-only races;
+`bayesian.state_space.unpolled_pooling_prior_races` controls shrinkage toward zero. The
+result is intentionally `insufficient_evidence` for production R20: the command writes
+bounded smoke details under `artifacts/recovery/<run-id>/`, while the top-level R20 proof
+fields remain null until large repeated SBC, real NUTS hierarchy recovery, and complete
+control-bearing catalog evidence exist. The same command writes
+`covariance_recovery.json` and `covariance_recovery.parquet`: a fixed-seed known-factor
+experiment checks PSD construction, factor-variance error, correlation RMSE, label reversal,
+and complementary-option invariance against preregistered tolerances. It remains explicitly
+`production_sufficient=false`; a bounded synthetic panel is not large-cycle covariance proof.
+
+Bounded hierarchy/parameter recovery smoke (always `production_sufficient=false`):
+
+```bash
+uv run civic-signal verify recovery --backend analytic --replicates 4
+```
+
+### Shadow forecasting (M8)
+
+Shadow mode stores immutable, non-public forecasts for a declared window. It never
+publishes production probabilities.
+
+```bash
+# Freeze model/baseline definitions before the evaluation window
+uv run civic-signal shadow preregister --profile 2026-general-shadow --cycle 2026
+
+# Materialize schedule only (or --execute to run each day)
+uv run civic-signal shadow run \
+  --profile 2026-general-shadow \
+  --window-start 2026-05-01 \
+  --window-end 2026-06-29 \
+  --schedule-only
+
+# Verify readiness: missing days / fallbacks / public-prob leaks cannot pass
+uv run civic-signal verify shadow \
+  --profile 2026-general-shadow \
+  --window-start 2026-05-01 \
+  --window-end 2026-06-29
+```
+
+Artifacts land under `artifacts/shadow/<profile>/` (`schedule_history.parquet`,
+`preregistration.json`, `shadow_scorecard.json`, `shadow_readiness.json`). A full pass
+requires either 60 consecutive completed days or the exact window dates explicitly
+declared in the checked-in shadow profile, with frozen preregistration and no source-age /
+fallback / silent-publication violations.
+Scorecards remain observational (`insufficient_evidence` for “best evidenced” claims)
+until nested multi-cycle comparators exist.
+
 ### Reward-v2 verification
+
+Audit the production candidate registry and its fetched snapshots before building a
+production-scoped forecast:
+
+```bash
+uv run civic-signal sync \
+  --sources-config sources_official_results.yaml \
+  --data-dir data/official-results
+uv run civic-signal build-features \
+  --sources-config sources_official_results.yaml \
+  --data-dir data/official-results
+uv run civic-signal data audit \
+  --profile production \
+  --sources-config sources_official_results.yaml \
+  --data-dir data/official-results \
+  --run-id official-results-audit
+```
+
+This standalone path is a real-data warehouse check, not a forecast publication claim.
+`races.parquet` and `results.parquet` cover official-source House history through 2018;
+current-cycle results, Senate/presidential official returns, and option/fundamental joins remain
+separate milestones. Use `sources_public_web.yaml` when auditing the broader production
+candidate registry after every configured source has been synced.
 
 Recompute every reward from primary artifacts (never trust a previously written boolean):
 
 ```bash
 uv run civic-signal verify rewards --profile production --run-id <run-id>
 ```
+
+Recompute temporal integrity directly from the selected row-level lineage:
+
+```bash
+uv run civic-signal verify as-of --run-id <run-id>
+```
+
+Before tiering or model fitting, each time-varying table is filtered on event/observation,
+publication, and availability time, then reduced to one deterministic eligible revision
+per race/feature/option/horizon. Selection orders by observation time, publication time,
+availability, revision id, and a stable row hash. Canonical snapshot identity coalesces
+question/series/rating/finance IDs, so a nullable primary ID cannot collapse distinct
+secondary series. File order cannot choose the winning revision.
+Selected option-level finance and rating vintages overlay static option records only after
+this cut; undated fundraising/rating values are excluded from the fundamentals model.
+Economic conditions are converted once onto the incumbent-party axis and then onto each
+option's party axis. Open major-party races require an explicit `incumbent_party`; without
+one, their economic effect is neutral and the lineage proof remains incomplete.
+Each forecast writes `selected_feature_lineage.parquet`, including selection keys,
+snapshot ids, revision ids, and the selection predicate, plus `feature_lineage.json`.
+`as_of_audit.json` is recomputed from those rows. R17 requires explicit availability,
+unique selection keys, a matching lineage hash, and an adversarial canary that inserts
+future revisions and reruns feature selection, tiering, and a deterministic forecast
+fingerprint. Forecast runs now label this canary `exact_publication_pipeline`: the baseline
+publication execution and a hostile-future counterfactual use the same active-bundle,
+component, ensemble, posterior, `SimulationEngine`, race-probability, and control path.
+The audit records separate hashes for posterior draws, component estimates, ensemble center,
+race forecasts, and controls, and requires hostile rows in every nonempty time-varying table.
+Production R17 rejects narrower scopes or any unchanged-output field that is not explicitly
+true. When a source lacks record-level availability, ingestion conservatively uses retrieval
+time; an event-date proxy is reported as implicit and cannot pass R17.
 
 On a fixture-only or research run this command exits nonzero and lists real-data,
 nested-backtest, and publication rewards as `fail` or `insufficient_evidence`.
@@ -154,9 +318,17 @@ Semantic publication checks refuse a `production` label without a verified
 uv run civic-signal verify publication --run-id <attempt-id> --profile production
 ```
 
+Promotion attempts first recompute semantic_verification.json from the current
+catalog, forecast, draw, control, and source artifacts, then recompute the required
+rewards. Verification is read-only by default; it does not rewrite a promoted run.
+Successful promotion creates a create-once immutable snapshot under
+artifacts/promoted/<profile>/attempts/<attempt-id>/ and content-hashes the complete
+set of present scientific and reward evidence files. Reusing an attempt ID or presenting
+an incomplete hash manifest is rejected.
+
 Thresholds and profile membership live only in `configs/rewards.yaml`. Forecast runs
 write `reward_card.json` (legacy), `reward_card_v2.json`, `run_manifest.json` (with
-`publication_mode`), and `publication_decision.json`.
+`publication_mode`), `semantic_verification.json`, and `publication_decision.json`.
 
 Open the main report:
 
@@ -206,8 +378,24 @@ uv run civic-signal forecast update \
   --as-of 2026-05-09
 ```
 
-The update appends posterior history, writes run-local update diagnostics, and refreshes
-`reward_card.json` so `R15_daily_update_quality` reflects the latest update gate.
+The update refreshes the free-source warehouse, selects only poll revisions whose recorded
+`available_at` is strictly after the anchor cutoff and no later than the update cutoff, and
+writes the exact selected rows to
+`updates/<as_of>/new_poll_lineage.parquet`. It appends posterior history, records ESS,
+weight-degeneracy, anchor age, systematic-resampling lineage, and an explicit
+Pareto-k-unavailable diagnostic, then refreshes `reward_card.json`. Binary poll questions
+contribute one deterministic positive/reference-party contrast rather than complementary
+D/R rows twice. Multi-option questions currently use a documented K-1 diagonal share
+approximation that omits simplex covariance; they do not claim a multinomial likelihood.
+An anchor older than `full_refit_days_since_anchor` requires a refit even when ESS is high.
+Only `reweighting` plus `systematic` resampling may be configured because those are the
+literal implemented algorithms. A no-new-poll update is an honest no-op and leaves
+`R15_daily_update_quality` insufficient. The bounded reweighting path also writes
+`update_vs_full_refit_audit.json` with null difference metrics until an exact full-refit
+publication-path comparison is executed; it does not claim zero disagreement. When a
+fixture or audit supplies a full-refit posterior for comparison, the audit records measured
+probability MAE and max absolute difference (and `status=passed|failed`) rather than
+fabricating a pass with null metrics.
 
 Audit whether the Bayesian path is eligible to become the production default:
 
@@ -245,6 +433,9 @@ artifacts/runs/full-forecast/
   control_forecasts.parquet
   ecosystem_forecasts.parquet
   source_manifest.parquet
+  selected_feature_lineage.parquet
+  feature_lineage.json
+  as_of_audit.json
   diagnostics.html
   reward_card.json
   methodology_snapshot.md
@@ -356,6 +547,45 @@ uv run civic-signal backtest run \
 Use `--bayesian-backend analytic` for a fast deterministic bridge run when you are
 debugging scorecard plumbing rather than exercising the production NUTS backend.
 
+Run the cycle-nested publication-path evaluation separately from the artifact-promoting
+rolling-origin command:
+
+```bash
+uv run civic-signal backtest nested \
+  --scenario president_state \
+  --holdout-cycle 2024 \
+  --run-id president-state-nested-2024 \
+  --inference-engine kalman
+```
+
+For every outer cycle, inner validation cycles are strictly earlier than the outer cycle.
+Only those inner rows fit hyperparameters, simplex weights, and Platt calibration. The
+outer fold then refits components on earlier cycles and runs the same `EnsembleModel` and
+`SimulationEngine` used for publication, including Bayesian posterior draws when the Bayes
+engine is selected. Held-out results are removed from the model-facing bundle and rejoined
+only for scoring. Outputs are
+`artifacts/backtests/<run-id>/nested_evaluation.json`, `fold_manifest.parquet`,
+`nested_predictions.parquet`, `baseline_scorecard.json`, and
+`paired_cycle_clustered_uncertainty.json`. Durable fold lineage is written into both the
+JSON payload (`fold_lineage`, `training_lineage_sha256`, `held_out_permutation_canary`) and
+the parquet manifest (training/inner cycles and source-hash digests). `exact_pipeline` is
+`true` only when every outer as-of cut actually ran the publication
+`components+ensemble+SimulationEngine` path; otherwise it remains `false`/`null` scope and
+must not be treated as a pass. A held-out-outcome permutation canary proves outer results
+cannot alter the training lineage.
+
+Nested scoring reports five explicit comparators: uniform prior-only, previous-cycle share
+mapped through the training-only share scale, fundamentals-only, normalized eligible poll
+average, and market-implied probability when a qualifying market is actually present. Market
+rows are never imputed merely to make that comparator complete. Paired ensemble-minus-baseline
+Brier and log-score differences are first averaged within each election cycle, then whole
+cycles are bootstrapped with equal cycle weight. Race rows and repeated as-of cuts are never
+resampled as independent evidence. The default minimum is three independent cycles; fewer
+cycles remain `insufficient_evidence` regardless of row count. This closes the bounded
+uncertainty estimator but still does not permit a “best evidenced” claim: promoted real-data
+training-bundle compatibility and the full result-derived feature-injection canary remain
+explicitly insufficient.
+
 Write scheduled hyperprior refresh candidates without changing the production `latest`
 artifacts:
 
@@ -465,10 +695,20 @@ runs to set the Election-Day extra-variance and fundamentals-prior strength. The
 combined dimensionality ladder unless its ESS/drift thresholds pass; the current
 configured daily-update strategy remains cached posterior reweighting with full-refit
 fallback semantics. Bayesian NUTS configuration includes a wall-clock timeout and an
-ordered fallback policy (`previous_posterior_reuse`, `bayes_svi_fallback`,
-`kalman_legacy_fallback`); Phase 8 writes `timeout_failover_audit.json` from a forced
-fixture timeout so the policy is exercised without marking the forecast itself as a
-fallback run.
+auditable ordered dispatcher. Implemented labels are `previous_posterior_reuse`,
+`analytic_logit_normal_fallback`, `kalman_fallback`, and literal `refuse`. The label in
+`posterior_diagnostics.json` is the path that actually executed; skipped, incompatible,
+failed, and refused attempts are retained in `failover_audit.attempts`. Previous-posterior
+reuse is available only when a Parquet artifact passes strict schema, unique-key,
+probability, model-config hash, source-manifest hash, as-of age, and exact race-option
+lineage checks. A missing, corrupt, stale, or incompatible artifact is skipped and cannot
+be reported as reused. SVI remains unavailable and its fallback label is rejected at
+configuration load. Every executed fallback sets `fallback_used`; publication rewards
+therefore quarantine it, and the explicit refuse path raises without producing a forecast.
+Phase 8 writes `timeout_failover_audit.json` from a forced fixture timeout so the policy is
+exercised without marking the forecast itself as a fallback run. The checked-in default
+keeps the fast analytic fallback as the sole configured path; operators must explicitly
+configure other implemented paths and the required previous-artifact metadata.
 
 ### 3. Full Cycle Analysis
 
@@ -640,6 +880,17 @@ Forecast runs prefer promoted scenario residual covariance from
 `artifacts/backtests/latest/`. If no promoted covariance exists yet, the run uses the
 same rolling-origin covariance it just evaluated in memory so seat/control simulations
 do not fall back to only the small configured national/region/office shock terms.
+The fitted covariance uses one deterministic reference-party residual per race and cycle;
+it does not average complementary D/R option residuals, which would cancel by construction.
+The persisted representation is `B diag(v) B' + diag(d)`: national and retained regional
+factor variances/loadings plus nonnegative group idiosyncratic variances. Rank and shrinkage
+are configured by `correlation.residual_factor_rank` and
+`correlation.residual_covariance_shrinkage`. This construction is PSD by definition, and the
+simulator samples the same saved factors directly rather than reconstructing a different
+dense approximation.
+For Bayesian races, posterior log-ratio deviations are recentered on the admitted ensemble
+vote-share target before election-error draws are added. This makes the ensemble affect the
+published center as well as its uncertainty while preserving posterior shape.
 If rolling-origin component admission rejects every available component for a scenario,
 the run does not resurrect a rejected component to publish trusted probabilities; those
 races remain tracked without trusted control probabilities until a component passes the
@@ -790,6 +1041,16 @@ Important forecast artifacts:
 - `control_forecasts.parquet`: EC/control probability, EV/seat distributions, and
   pivotal/tipping information.
 - `reward_card.json`: machine-readable reward checks.
+- `selected_feature_lineage.parquet`: selected input and selection keys, snapshot and
+  revision ids, selection predicates, provenance hashes, availability timestamps/basis,
+  and cutoff used for temporal leakage verification.
+- `feature_lineage.json`: deterministic snapshot-selection summary and adversarial
+  feature/tier/exact-publication canary evidence. Macro, finance, and rating vintage
+  counts plus incumbent-relative sign proof are computed from selected rows. A leakage
+  field remains null whenever that feature type lacks observed/published/available/revision
+  lineage, so R22 cannot overclaim completeness from static end-of-cycle inputs.
+- `as_of_audit.json`: recomputed R17 evidence, lineage hash, duplicate/missing/future
+  row counts, and lineage plus full-path time-travel canary results.
 - `model_card.md`: learned/configured/placeholder parameter status.
 
 Current trust boundary:
@@ -1128,6 +1389,60 @@ races; neutral Wikipedia `public_signals` rows alone cannot.
 If an HTTP refresh stalls after a prior successful sync, the source manifest records
 `status = stale_reused` and uses the cached raw snapshot rather than blocking the
 verification run indefinitely.
+Fresh failures are classified rather than collapsed into a generic success/failure flag:
+`empty`, `rate_limited`, and `schema_change` are explicit statuses. A cached snapshot may be
+reused only as `stale_reused`, with the triggering condition retained in `refresh_status`;
+production data audit treats every one of these degraded states as non-passing.
+
+Raw responses are stored under their SHA-256 content hash. `data/raw/snapshot_index.parquet`
+retains one immutable index row for every source/content-hash version, while the current
+manifest distinguishes the original `retrieved_at` from the latest volatile `checked_at`.
+An unchanged refresh preserves its original availability time; this is required both for
+honest source age and deterministic as-of forecasts. Production `data audit` verifies that
+every current source/hash pair appears in this append-only index with parser and timestamp
+lineage.
+
+The source manifest retains `source_class`, `source_priority`, and source access metadata;
+curated rows retain source hash, parser version, and availability lineage. Deduplication is
+deterministic: official/production-web rows always rank ahead of fixtures, fixtures always
+rank ahead of synthetic rows, and configured `priority`, retrieval time, source ID, and
+content hash resolve ties in that order. File or registry order is never a tie-breaker. Poll
+ingestion additionally materializes
+`poll_surveys.parquet`, `poll_questions.parquet`, and `poll_revisions.parquet`; model-facing
+`polls.parquet` selects one highest-ranked revision per question/race/option while the
+revision table preserves every distinct content-hash revision.
+
+Machine-readable canonical entity contracts live in `schemas/raw_contracts/` and
+`schemas/curated_tables/`. They cover source snapshots, surveys, questions, revisions,
+races, options, official results, fundamental snapshots, and market quotes. These contracts
+make entity identity and required provenance explicit; they do not turn fixture data into
+production-eligible evidence.
+
+### Adaptive MCSE and coherence verification
+
+Simulation starts at `simulation_count`, computes the maximum binomial MCSE from raw draw
+event frequencies (before any Platt transformation) over race and control outcomes, and
+deterministically reruns at the required batch-rounded draw count until MCSE is at most
+`0.0025`. `performance.json` records every attempted draw
+count, the final count, target, cap, and status. If `simulation_max_draws` is reached first,
+the run honestly records `cap_reached_target_not_met`; it never reports convergence. When
+adaptive simulation needs more draws than a Bayesian posterior contains, posterior draw IDs
+are cycled deterministically so the simulation continues using the posterior rather than
+silently falling back to a non-Bayesian path.
+
+Recompute joint outcome coherence from a completed run:
+
+```bash
+uv run civic-signal verify coherence --run-id <run-id>
+```
+
+This fails nonzero for out-of-range probabilities, duplicate race/draw/control keys,
+multiclass simplex or draw-winner violations, published Tier C probabilities, control
+probabilities that cannot be reconstructed from draws, incorrect Senate tie/VP thresholds,
+or malformed Maine/Nebraska elector allocations. A single aggregate four-elector Maine or
+five-elector Nebraska row is insufficient: in-scope runs must represent the legal 2-vote
+statewide allocation plus one-vote congressional districts. Evidence is written under
+`artifacts/coherence/<audit-id>/` without modifying the forecast run.
 
 ### Performance Benchmark
 
@@ -1211,6 +1526,10 @@ PY
   use `--inference-engine bayes` or `--inference-engine kalman` to override it in the
   same historical harness. Use `--bayesian-backend analytic` or `--bayesian-backend nuts`
   to choose the Bayesian backend for Bayes folds.
+- `backtest nested`: fit hyperparameters, ensemble weights, and calibration on inner
+  historical folds, then score held-out outer cycles through `EnsembleModel` plus the
+  publication `SimulationEngine`. It writes immutable fold lineage but does not promote
+  anything under `artifacts/backtests/latest/`.
 - `backtest refresh-hyperpriors`: run the configured scheduled hyperprior refresh and
   write candidate artifacts plus a comparison report under `artifacts/hyperprior_refreshes/`
   without promoting `artifacts/backtests/latest/`. It accepts the same
@@ -1276,9 +1595,10 @@ awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ {print $1}' .env.example
 
 Remaining live-adapter implementation order:
 
-1. Historical results: MIT Election Lab or official state/federal archives.
-2. Fundamentals: Census, FRED, BEA/BLS.
-3. Polls: public poll feeds and pollster metadata.
+1. Extend official results beyond the implemented MEDSL/Clerk House 1976-2018 path:
+   Senate, president, 2020/2022/2024 House, certified corrections, and redistricting crosswalks.
+2. Fundamentals: production-ready Census, FRED, and BEA/BLS vintages joined to every race.
+3. Polls: current public poll feeds, pollster metadata, and revision histories.
 4. Markets: read-only Kalshi/Polymarket public data, with no trading credentials.
 5. Public signals: GDELT and Wikimedia/pageview-style public attention features.
 

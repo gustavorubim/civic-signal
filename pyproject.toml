@@ -24,6 +24,7 @@ dependencies = [
   "rich>=13.9.4",
   "scikit-learn>=1.5.2",
   "typer>=0.15.1",
+  "jsonschema>=4.26.0",
 ]
 
 [project.optional-dependencies]
@@ -43,6 +44,10 @@ civic-signal = "civic_signal.cli:app"
 [tool.hatch.build.targets.wheel]
 packages = ["src/civic_signal"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"schemas" = "civic_signal/schemas"
+"tests/golden_fixtures" = "civic_signal/scientific/golden_fixtures"
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
@@ -61,10 +66,13 @@ indent-style = "space"
 testpaths = ["tests"]
 addopts = "-q"
 pythonpath = ["src"]
+markers = [
+  "nuts: tiny real NumPyro/NUTS smoke (slower; include in CI scientific job)",
+  "live: hits free public HTTP endpoints (network required)",
+]
 
 [tool.coverage.run]
 source = ["src/civic_signal"]
-omit = ["src/civic_signal/cli.py"]
 
 [tool.coverage.report]
 show_missing = true

@@ -13,6 +13,19 @@ plotting, and validation contract is deterministic. The opt-in live registry
 Wisconsin presidential archive, 2026 Senate/Governor/House poll streams when upstream
 FiveThirtyEight/Datasette rows exist, keyless FRED UNRATE macro fundamentals for the
 compact 2026 multi-office smoke races, and neutral Wikipedia race-presence metadata.
+The separate `configs/sources_public_web.yaml` registry is the production candidate
+surface: it contains free HTTPS sources explicitly classified as `free_public_web`.
+It extends only `configs/sources_official_results.yaml`, a production-only registry with
+no fixture/generated inheritance. The first implemented official-history contract uses a
+commit-pinned MEDSL House constituency CSV for 1976-2018 whose documented underlying source
+is the Office of the Clerk. It materializes canonical `races` and `results` tables with
+content-hash, parser, authority, citation, and retrieval lineage. MEDSL requests citation
+and publishes no explicit data-license file in that repository; raw snapshots therefore
+remain local and unredistributed while the manifest records that limitation and terms URL.
+Freely issued API keys are permitted when auth mode, rate limits, and terms are recorded;
+authentication is not treated as evidence of paid access. Local fixture registries are
+never valid production inputs. The R16 gate also requires source-class, access-policy, and
+terms-status fields in the source manifest.
 
 ## Required Run Outcomes
 
@@ -31,10 +44,25 @@ Every `forecast run` must create `artifacts/runs/<run_id>/` with:
   enabled as experimental output.
 - `source_manifest.parquet`: source ids, URLs/paths, retrieval timestamps, content hashes,
   parser versions, license/terms notes, status, and downstream usage.
+- `selected_feature_lineage.parquet`: the exact selected poll, market, public-signal,
+  and fundamentals row keys with canonical selection keys, snapshot/revision ids,
+  selection predicates, source hashes, availability timestamps/basis, and forecast cutoff.
+- `feature_lineage.json`: proof that filtering precedes revision selection and that at
+  most one eligible snapshot exists per race/feature/option/horizon. It reports selected
+  macro/finance/rating vintage counts and incumbent-relative economic-sign proof. Any
+  feature type without complete observation/publication/availability/revision lineage
+  keeps its leakage result null rather than claiming a pass.
+- `as_of_audit.json`: a freshly recomputed temporal-integrity audit over selected feature
+  lineage. It records future-eligible, missing-availability, implicit-proxy, and duplicate
+  rows plus lineage-filter and adversarial feature/tier/forecast-fingerprint canaries.
+  Production requires the adversarial canary scope to be `exact_publication_pipeline`;
+  narrower deterministic component-center evidence remains research-only.
 - `diagnostics.html`: top-line summary, paired Electoral College distribution and
   simulation swarm, scorecards, reward status, source coverage, model-quality section,
   and embedded plots.
 - `reward_card.json`: machine-readable reward checks.
+- `semantic_verification.json`: read-only semantic reconciliation evidence for the
+  catalog, published probabilities, draws, controls, and source manifest.
 - `methodology_snapshot.md`: model version, config, source coverage, and limitations.
 - `model_card.md`: learned/configured/placeholder parameter status, component admission,
   backtest sample status, covariance status, and source coverage for the run.
@@ -107,6 +135,7 @@ each reward is `pass`, `fail`, `insufficient_evidence`, or `not_applicable`; thr
 live only in config; production verification **recomputes** rewards from primary
 artifacts; `fail` and `insufficient_evidence` hard-block the `production` profile.
 Default `publication_mode` is `research` until the production profile can pass.
+`data audit --profile production` is the source/snapshot eligibility entry point.
 `verify rewards --profile <name>` is the recompute entry point. Rewards `R0`–`R15` are
 strengthened; `R16`–`R27` cover real-data exclusivity, as-of integrity, nested evaluation,
 covariance recovery, hierarchy, poll identity, feature validity, joint coherence, atomic
@@ -122,7 +151,11 @@ dashboards. Strengthened pass rules (summary):
   and incremental-sync status fields.
 - `R2_provenance`: forecast rows trace to source hashes and model-config hashes.
 - `R3_sync_integrity`: incremental sync fetches new/changed sources only, dedupes records,
-  and records failures explicitly.
+  and records failures explicitly. Raw snapshots are keyed by source and SHA-256 content
+  hash and retained in an append-only index. Curated deduplication first enforces the hard
+  source-class order official/production > fixture > synthetic, then applies explicit
+  source priority, retrieval time, source ID, and content hash; registry order cannot alter
+  the winner.
 - `R4_calibration`: backtests report Brier score, log score, calibration line, expected
   calibration error, interval coverage, learned ensemble weights, and the probability
   calibration transform applied to published marginal race probabilities.
@@ -157,17 +190,60 @@ dashboards. Strengthened pass rules (summary):
 - `R15_daily_update_quality`: daily Bayesian updates pass strategy-specific quality
   gates and do not require a full refit.
 - `R16_real_data_exclusivity`: production inputs contain zero synthetic/fixture rows.
-- `R17_as_of_integrity`: selected records satisfy `available_at ≤ as_of`.
+- `R17_as_of_integrity`: selected records have explicit availability evidence satisfying
+  `available_at ≤ as_of`; missing timestamps, event-date proxies, duplicate snapshot keys,
+  a failed future-row canary, a stale audit, or a lineage-hash mismatch block production.
+  Production additionally requires `scope=exact_publication_pipeline`: hostile future rows
+  are injected into every nonempty time-varying table and the same selected-bundle,
+  component, ensemble, posterior, simulation, race-probability, and control path must remain
+  bit-for-bit stable. A narrower component-center fingerprint is research evidence only.
 - `R18_nested_evaluation`: outer-cycle exact-pipeline evaluation with fold lineage.
 - `R19_covariance_recovery`: one signed residual per race; PSD covariance; recovery tolerances.
 - `R20_all_race_hierarchy`: control-bearing races in the joint model; unpolled propagation.
 - `R21_poll_observation_identity`: canonical survey/question identity without double count.
 - `R22_feature_validity`: one eligible snapshot per feature key; vintage-correct inputs.
 - `R23_joint_outcome_coherence`: probabilities and draws reconcile to control outcomes.
-- `R24_atomic_publication`: only a verified immutable attempt can replace the promoted pointer.
+- `R24_atomic_publication`: only a verified immutable attempt can replace the promoted
+  pointer; the snapshot is create-once and its complete present-artifact hash set is
+  validated on every production verification.
 - `R25_live_source_resilience`: adapter canaries for empty/stale/malformed live feeds.
 - `R26_benchmark_superiority`: preregistered “best evidenced” criteria for a named scope.
 - `R27_contract_parity`: README/SPEC/config/schema/CLI claims agree.
+
+Scientific CI (M7) recomputes property tests (simplex, option-order invariance,
+interval ordering, covariance PSD, label symmetry, control reconciliation),
+Numba/Python and serial/parallel numerical parity fingerprints, and mutation probes against
+the actual reward-card schema, publication reconciliation, and calibrated-publication
+reward evaluator. Required corruptions cover a removed schema-required field, duplicate
+forecast keys, out-of-range probabilities, stale calibration lineage, and blocked-estimand
+publication. Each probe must show that the checked-in verifier accepts a valid fixture,
+rejects the corruption, and that a controlled predicate-removal mutant accepts that same
+corruption. A missing family or surviving mutant is a required-suite failure.
+
+R27 contract parity is generated from `configs/rewards.yaml`, evaluator method names,
+README/SPEC text, and actual CLI decorators. Reward IDs and threshold IDs must match
+exactly; profile and conditional rewards must be registered; every reward must have a
+nonempty threshold and evaluator; and required verification, audit, nested-backtest, and
+shadow CLI surfaces must both exist and be documented. Golden fixtures under
+`tests/golden_fixtures/` and offline canaries also run by default. Entry point:
+`verify scientific` → `artifacts/scientific/scientific_report.json` (`passed` fails closed
+on the complete offline suite; `missing_required_suites` identifies incomplete mutation
+evidence; `missing_optional_suites` records live free-web canaries and tiny NUTS smoke when
+not requested). Bounded recovery smoke is separate: `verify recovery`
+writes `artifacts/recovery/<run_id>/hierarchy_recovery.json`,
+`covariance_recovery.json`, and `covariance_recovery.parquet`. Both recovery branches always
+mark bounded synthetic evidence `production_sufficient=false` (insufficient for R19/R20
+promotion without large-cycle evidence).
+
+Shadow (M8) is a separate publication mode: scheduled forecasts under
+`artifacts/shadow/<profile>/` with frozen preregistration, source-health monitors,
+office/horizon scorecards, and `verify shadow` readiness. Shadow runs set
+`publication_mode=shadow` and must not publish public production probabilities.
+Production promotion still requires the production reward profile; a green shadow
+window is a necessary pre-P4 operational gate, not a substitute for nested science.
+Shadow readiness requires 60 clean consecutive days unless the checked-in profile names
+the exact alternative predeclared window; an arbitrary short or unknown-profile window
+cannot pass.
 
 Primary baselines:
 
@@ -176,6 +252,23 @@ Primary baselines:
 - Market-implied where liquid markets exist.
 - Incumbent/party prior for sparse races.
 - Previous-cycle swing baseline.
+
+Canonical warehouse entities are source snapshot, poll survey, poll question, poll
+revision, race, option, official result, fundamental snapshot, and market quote. Their
+checked-in JSON Schemas live under `schemas/raw_contracts/` and
+`schemas/curated_tables/`. The curated poll projection preserves all immutable revisions in
+`poll_revisions.parquet` but admits only one deterministic highest-ranked revision per
+question/race/option to model-facing `polls.parquet`.
+
+Every HTTP source may declare a deterministic `required_columns` contract. A successful
+non-empty payload is content-addressed and appended to the immutable snapshot index;
+unchanged payloads preserve their original retrieval timestamp. Empty payloads, HTTP 429
+responses, and required-column drift are recorded as `empty`, `rate_limited`, and
+`schema_change`. When an immutable prior snapshot exists, refresh failure may produce only
+`stale_reused` with the triggering condition in `refresh_status`. Production data audit
+fails all degraded states and reports explicit zero fixture/synthetic counts; it accepts
+`official_public` sources only when HTTPS, free-web access, reviewed terms, citation/license
+metadata, and snapshot-index lineage are present.
 
 ## Repository Design
 
@@ -231,6 +324,13 @@ Important config contracts:
 - `configs/backtests.yaml`: rolling-origin settings, as-of date sweep, metrics, and
   baselines.
 
+Sync writes content-addressed raw responses plus `raw/snapshot_index.parquet`. The index
+retains each distinct `(source_id, content_hash)` version with parser, URL, original
+snapshot time, and latest check metadata. Unchanged content preserves its original
+`retrieved_at`; `checked_at` records the refresh attempt and is excluded from scientific
+fingerprints. Production data audit fails when a current source/hash is absent from the
+index or its hash/parser/timestamp lineage is incomplete.
+
 Current implementation note: the repo runs a rolling-origin component refit harness and
 writes `rolling_predictions.parquet`, `component_admission.json`, `ensemble_learning.json`,
 `probability_calibration.json`, `recalibration_map.parquet`,
@@ -250,6 +350,25 @@ same harness supports `backtest run --inference-engine bayes` plus
 `--bayesian-backend analytic|nuts` so the Bayesian bridge and production NUTS backend
 can both be scored against the legacy Kalman path without changing global model
 configuration.
+
+`backtest nested` is the non-promoting R18 evidence surface. Each fold manifest must show
+`max(inner_validation_cycles) < outer_cycle`, exclude the outer cycle from every fit set,
+and bind training race IDs plus source hashes into a lineage digest. Inner folds alone fit
+hyperparameters, simplex weights, and Platt calibration. Outer scoring refits the same
+component models on pre-outer data and executes `EnsembleModel` and `SimulationEngine`;
+Bayesian outer folds must pass polling posterior draws into simulation. The model-facing
+outer bundle contains no held-out results; results are joined only after prediction.
+Held-out result permutation must leave the training-lineage digest unchanged. The bounded
+output must separately score uniform prior-only, previous-cycle swing, fundamentals-only,
+eligible poll-average, and markets-if-present comparators. Missing market evidence remains
+null/not-available rather than being filled by another baseline. Paired Brier and log-score
+differences are collapsed to one mean per outer election cycle before a deterministic
+nonparametric bootstrap resamples whole cycles with equal weight. Row-level resampling is
+forbidden. `configs/backtests.yaml` sets the explicit minimum independent-cycle count; fewer
+cycles are `insufficient_evidence` regardless of race-row count. The estimator writes
+`baseline_scorecard.json` and `paired_cycle_clustered_uncertainty.json`. Nested execution still
+cannot support a best-evidenced promotion claim while promoted real-data training-bundle
+compatibility and the result-derived feature-injection canary remain insufficient.
 
 `backtest refresh-hyperpriors` is the scheduled refresh surface for hyperprior drift.
 It writes candidate artifacts under `artifacts/hyperprior_refreshes/<run_id>/`,
@@ -295,23 +414,48 @@ Component models:
   and pollster house-effect artifacts behind the same component schema. Candidate
   offices without eligible polls may receive fundamentals-prior-only posterior draws so
   sparse House/Senate races still produce auditable uncertainty artifacts and sparse
-  forecast rows. The Bayesian
+  forecast rows. When same-office/geography polled races exist, one party-signed residual
+  per observed race is partially pooled through global, office, and geography levels and
+  applied as a shrunk logit shift to those fundamentals-only options. Complementary party
+  rows are averaged within race before pooling, preventing cancellation and double count;
+  `unpolled_pooling_prior_races` controls shrinkage toward zero. `verify recovery` exercises
+  parameter recovery, label symmetry, this unpolled propagation, and a bounded SBC smoke
+  through the real polling model. Its default artifact remains `insufficient_evidence` for
+  R20 because a small synthetic analytic check is not a large real-NUTS hierarchy recovery
+  study or proof that every control-bearing production race is present. The Bayesian
   backend defaults to compact hierarchical NumPyro/NUTS with two vectorized chains, 500
   warmup iterations, 2,000 sampling iterations per chain, and a `0.99` target
   acceptance probability; `--bayesian-backend analytic` selects the deterministic bridge
   for fast smoke runs. The JAX/NumPyro/ArviZ dependencies are base dependencies so the
   NUTS path is available after plain `uv sync`. The NUTS backend pools options through
   non-centered office, geography, and race-level effects plus pollster effects. Poll
-  observations use empirical-Bayes pollster house-effect adjustment, a Bayesian-specific
-  7-day recency half-life, population screen, methodology weights, and poll-age process
-  variance so stale or lower-quality polls do not dominate the as-of latent state. The
+  observations use one canonical survey/question identity, explicit methodology and sponsor
+  bias terms, mode/sponsor/nonsampling variance, a 7-day recency half-life, population
+  screen, and poll-age process variance. Two-party option rows from one question form one
+  shared contrast rather than independent evidence. Undecided/other mass is proportionally
+  excluded from the two-party estimand and increases nonsampling uncertainty. Polling
+  estimands with more than two modeled options are withheld until a coherent K-category
+  likelihood replaces the diagonal approximation; simplex normalization alone is not a
+  likelihood. Incomplete binary questions are discarded rather than treated as independent
+  option evidence. Either unsupported status is a race-level trust gate: the forecast catalog
+  preserves `original_tier`, sets `estimand_support_blocked`, downgrades the race to Tier C,
+  and withholds winner probabilities even if fundamentals or markets exist. Semantic
+  publication verification recomputes this withholding invariant from the catalog and
+  forecast artifacts. The
   exported posterior draw artifact inflates that state from `as_of` to election day with
   `bayesian.state_space.forecast_drift_sd_per_sqrt_day` and constrains all options
   within each race to sum to one before ensemble calibration.
 - Fundamentals model: historical vote share, partisan lean, incumbency, finance, economy,
   demographics, turnout history, and election type through a standardized ridge fit when
-  enough prior-cycle rows exist, otherwise explicit defaults. Bayesian runs convert the
-  fitted fundamentals model into an Election-Day prior artifact.
+  enough prior-cycle rows exist, otherwise explicit defaults. Macro, candidate-finance,
+  and rating snapshots are filtered on observation, publication, and availability before
+  deterministic revision selection and before any feature is constructed. Option-level
+  finance/rating vintages then overlay static option records; undated values are not used.
+  Economic conditions are first signed to the incumbent party and then multiplied once by
+  the modeled option's party sign. For an open major-party race, an explicit
+  `incumbent_party` is required; otherwise the economic contribution is neutral and the
+  lineage proof is incomplete. Ballot/nonpartisan races treat the sign as not applicable.
+  Bayesian runs convert the fitted fundamentals model into an Election-Day prior artifact.
 - Market model: public read-only market probabilities adjusted for liquidity and spread,
   then mapped to vote-share proxy through a configurable normal inverse-CDF scale.
 - Public-signal model: news/pageview/official-release features, experimental by default.
@@ -325,22 +469,61 @@ Component models:
   forecast.
 - Simulation: structured-factor election-error draws. When a residual covariance artifact
   is available, that covariance replaces the configured national/region/office layers;
+  covariance fitting uses one consistently signed reference-party residual per
+  race/cycle and averages repeated horizons, never complementary candidate-option errors;
+  the persisted covariance is an explicit configurable-rank, shrinkage-regularized
+  `B diag(v) B' + diag(d)` representation with nonnegative variances, so it is PSD by
+  construction. Simulation consumes those exact factor loadings, variances, and diagonal
+  terms rather than a separately approximated matrix;
   otherwise the engine falls back to national, region, and office factors plus
   heavy-tailed local error. Bayesian posterior draws seed the race-level simulation
-  center for Bayesian races, but the simulator still applies national, region, office,
+  distribution for Bayesian races; their log-ratio deviations are recentered on the
+  admitted ensemble vote-share target so the ensemble controls the forecast center while
+  the posterior retains its uncertainty. The simulator then applies national, region, office,
   and heavy-tailed local forecast-error layers. Race-level winners, vote shares, and
   turnout are always emitted; thresholded control outcomes are emitted only for races with a
   configured `control_body`, so non-control tracker rows can participate in posterior
   and cross-office artifacts without changing seat-count math.
+  Simulation must adapt deterministically from the configured initial draw count in fixed
+  batches until the maximum raw empirical race/control binomial MCSE, computed before
+  probability calibration, is at most `0.0025`, or
+  stop at the configured cap and record a blocking non-convergence status. Bayesian
+  posterior draw IDs are deterministically cycled when more simulation draws are required;
+  adaptive stopping must never disable posterior use.
 - Daily update: `forecast update --from-anchor <run_id> --as-of <date>` appends
   posterior summaries from a Bayesian anchor run, writes update diagnostics, and refreshes
-  `R15_daily_update_quality`. The current implemented strategy is the Phase 0b-selected
-  cached-posterior reweighting/summary path with full-refit fallback semantics; full SVI
-  or SMC strategies remain gated until Phase 0b accepts them for the target scope.
+  `R15_daily_update_quality`. Eligibility is computed from immutable poll lineage:
+  `anchor_as_of < available_at <= update_as_of` and poll event time must be no later than
+  the update. The exact selected revision/source rows are persisted with the update. The
+  current implemented strategy is the Phase 0b-selected cached-posterior likelihood
+  reweighting path with deterministic-seeded, lower-variance systematic resampling.
+  A binary poll question contributes one positive/reference-party likelihood contrast;
+  its complementary D/R row is counted in the contrast audit but is not persisted as a
+  used likelihood row or treated as a second independent observation.
+  Multi-option questions use K-1 diagonal share likelihood terms relative to a dropped
+  category as an explicit approximation; cross-option simplex covariance remains pending.
+  It records ESS, degeneracy, and anchor-age diagnostics; anchor age beyond
+  `full_refit_days_since_anchor` forces `needs_full_refit`. Pareto-k remains explicitly
+  unavailable until PSIS is implemented. Strategy/resampling config values that do not
+  name literal implemented algorithms are rejected. No-new-poll updates are no-ops, and R15 remains
+  insufficient until an exact update-vs-full-refit publication-path audit supplies measured
+  probability differences. When that comparison is not executed, MAE and max-diff remain
+  null with `status=unavailable` (never a fabricated pass). When a fixture/audit supplies
+  a full-refit posterior, the comparison records measured MAE/max-diff and
+  `status=passed|failed`. Full SVI or SMC strategies remain gated until Phase 0b accepts
+  them for the target scope.
 - NUTS failover: `bayesian.nuts.wall_clock_timeout_seconds` and
-  `bayesian.nuts.failover.fallback_order` define production timeout semantics. Phase 8
-  exercises this policy on a fixture timeout and records the audit separately from the
-  forecast-level `fallback_used` field.
+  `bayesian.nuts.failover.fallback_order` define production timeout semantics. The ordered
+  dispatcher may literally execute `previous_posterior_reuse`,
+  `analytic_logit_normal_fallback`, `kalman_fallback`, or terminal `refuse`; its audit must
+  distinguish skipped/unavailable/incompatible/failed attempts from the one executed path.
+  Previous-posterior reuse requires a readable posterior artifact whose schema, unique
+  draw/race/option keys, finite shares, model-config hash, source-manifest hash, artifact
+  as-of age, and exact race-option lineage all match the declared current contract. SVI is
+  not implemented and any SVI fallback label is rejected. Executed fallbacks retain
+  `fallback_used` and are publication-quarantined by posterior-quality rewards; `refuse`
+  raises and emits no forecast. Phase 8 exercises the timeout policy on a fixture and
+  records that audit separately from the forecast-level `fallback_used` field.
 - Performance: two-option race draw generation uses a Numba parallel kernel with a Python
   fallback, while table transforms should stay vectorized through Polars/DuckDB.
 - Live-source readiness: Phase 8 records live 2026 scope from the actual curated source
@@ -393,6 +576,11 @@ Every forecast run must emit calibration and projection visuals:
 - Polling probability trajectories when rolling-origin polling probability and as-of
   cut columns are available.
 - Simulation probability convergence when draw-level winner rows are available.
+- `verify coherence` recomputes probability ranges and simplices, key uniqueness, Tier C
+  withholding, draw-level winner/share coherence, Maine/Nebraska elector allocation,
+  Senate tie-to-VP thresholds, and chamber-control probabilities reconstructed from draws.
+  Maine and Nebraska require explicit statewide two-elector plus district one-elector rows;
+  aggregate-only state rows cannot satisfy this check.
 - MCMC-style posterior simulation chain traces for Electoral College totals.
 - Kalman posterior uncertainty traces for state-space polling fits.
 - Bayesian posterior latent-share intervals and posterior diagnostics when
