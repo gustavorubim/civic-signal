@@ -39,6 +39,12 @@ bayesian:
   enabled: true
   backend: nuts
   posterior_draw_count: 1000
+  polling:
+    # Analytic backend recency weighting (audit P0-1b). Poll precision is scaled by
+    # 0.5 ** (age_days / half_life); valid range 14-21 days. Polls older than
+    # max_poll_age_days (relative to as_of; null = no hard window) are ignored.
+    analytic_half_life_days: 18
+    max_poll_age_days: null
   nuts:
     num_warmup: 500
     num_samples: 2000

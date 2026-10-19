@@ -10,6 +10,7 @@ import polars as pl
 
 from civic_signal.features import FeatureBundle
 from civic_signal.inference.failover import FailoverPolicy
+from civic_signal.inference.state_space import _recency_weight
 from civic_signal.models.common import inv_logit, logit, normal_cdf, normalize_rows
 from civic_signal.models.polling_kalman import (
     HouseEffectEstimate,
@@ -62,6 +63,13 @@ class BayesianPollingModel(KalmanPollingModel):
             dict(bayesian_config.get("observation", {})).get("nonsampling_logit_floor", 0.02)
         )
         self.parameterization = str(state_space.get("parameterization", "noncentered"))
+        polling_config = dict(bayesian_config.get("polling", {}))
+        # Recency weighting for the analytic backend (audit P0-1b): each poll's precision
+        # is multiplied by 0.5 ** (age_days / half_life). None/0 disables it.
+        half_life = polling_config.get("analytic_half_life_days")
+        self.analytic_half_life_days = float(half_life) if half_life else None
+        max_age = polling_config.get("max_poll_age_days")
+        self.max_poll_age_days = int(max_age) if max_age else None
         self.failover_policy = FailoverPolicy.from_config(config)
         self._config = config
         self._fallback_audit_override: dict[str, Any] | None = None
@@ -152,7 +160,11 @@ class BayesianPollingModel(KalmanPollingModel):
             observations = [
                 self._observation(row, house_effects) for row in group.iter_rows(named=True)
             ]
-            observations = [observation for observation in observations if observation is not None]
+            observations = [
+                observation
+                for observation in observations
+                if observation is not None and self._within_max_age(observation, as_of)
+            ]
             if not observations:
                 continue
             fitted_keys.add((race_id, option_id))
@@ -164,7 +176,7 @@ class BayesianPollingModel(KalmanPollingModel):
                 prior = option_priors.get((race_id, option_id), 0.5)
                 prior_sd_logit = self.initial_state_logit_sd
             mean_logit, sd_logit = self._posterior_logit(
-                prior, observations, prior_sd_logit=prior_sd_logit
+                prior, observations, prior_sd_logit=prior_sd_logit, as_of=as_of
             )
             poll_counts.append(len(observations))
             forecast_sd_logit = self._forecast_logit_sd(sd_logit, inv_logit(mean_logit))
@@ -228,6 +240,7 @@ class BayesianPollingModel(KalmanPollingModel):
         )
         self._cached_diagnostics = {
             "engine": "bayes-analytic-logit-normal",
+            "as_of": as_of.isoformat(),
             "parameterization": self.parameterization,
             "draw_count": self.posterior_draw_count,
             "race_option_count": len(estimate_rows),
@@ -237,6 +250,11 @@ class BayesianPollingModel(KalmanPollingModel):
             "fundamentals_prior_rows": len(self._fundamentals_prior),
             "fundamentals_prior_used": bool(self._fundamentals_prior),
             "posterior_logit_sd_mean": float(np.mean(posterior_sds)) if posterior_sds else None,
+            "analytic_recency": {
+                "half_life_days": self.analytic_half_life_days,
+                "max_poll_age_days": self.max_poll_age_days,
+                "reference": "as_of minus poll end_date",
+            },
             "forecast_horizon_inflation": self._forecast_horizon_metadata(
                 election_day_by_race, as_of, fitted_keys
             ),
@@ -454,6 +472,11 @@ class BayesianPollingModel(KalmanPollingModel):
             "fundamentals_prior_rows": len(self._fundamentals_prior),
             "fundamentals_prior_used": bool(self._fundamentals_prior),
             "posterior_logit_sd_mean": float(np.mean(posterior_sds)) if posterior_sds else None,
+            "analytic_recency": {
+                "half_life_days": self.analytic_half_life_days,
+                "max_poll_age_days": self.max_poll_age_days,
+                "reference": "as_of minus poll end_date",
+            },
             "posterior_sample_resampling": "with_replacement"
             if sample_count < self.posterior_draw_count
             else "without_replacement",
@@ -615,11 +638,23 @@ class BayesianPollingModel(KalmanPollingModel):
             .drop(["_race_option_count", "_race_probability_sum"])
         )
 
+    def _recency_weight(self, observation: PollObservation, as_of: date | None) -> float:
+        if self.analytic_half_life_days is None or as_of is None:
+            return 1.0
+        age_days = (as_of - observation.end_date).days
+        return _recency_weight(age_days, self.analytic_half_life_days)
+
+    def _within_max_age(self, observation: PollObservation, as_of: date | None) -> bool:
+        if self.max_poll_age_days is None or as_of is None:
+            return True
+        return (as_of - observation.end_date).days <= self.max_poll_age_days
+
     def _posterior_logit(
         self,
         prior_share: float,
         observations: list[PollObservation],
         prior_sd_logit: float | None = None,
+        as_of: date | None = None,
     ) -> tuple[float, float]:
         prior_mean = logit(prior_share)
         prior_sd = self.initial_state_logit_sd if prior_sd_logit is None else prior_sd_logit
@@ -634,7 +669,7 @@ class BayesianPollingModel(KalmanPollingModel):
                 obs_sd_share / max(share * (1.0 - share), 1e-6),
                 self.nonsampling_logit_floor,
             )
-            obs_precision = 1.0 / max(obs_sd_logit**2, 1e-10)
+            obs_precision = self._recency_weight(observation, as_of) / max(obs_sd_logit**2, 1e-10)
             precision += obs_precision
             weighted += obs_logit * obs_precision
         posterior_mean = weighted / precision
@@ -681,7 +716,10 @@ class BayesianPollingModel(KalmanPollingModel):
         while trajectory_date <= as_of:
             observed_so_far.extend(observations_by_date.get(trajectory_date, []))
             mean_logit, sd_logit = self._posterior_logit(
-                initial_mean, observed_so_far, prior_sd_logit=initial_sd_logit
+                initial_mean,
+                observed_so_far,
+                prior_sd_logit=initial_sd_logit,
+                as_of=trajectory_date,
             )
             share = inv_logit(mean_logit)
             share_sd = max(share * (1.0 - share) * sd_logit, self.min_nonsampling_error)

@@ -204,7 +204,11 @@ def main() -> None:
     )
     ap.add_argument("--chamber", required=True, choices=["senate", "house"])
     ap.add_argument("--run-date", required=True)
-    ap.add_argument("--as-of", default="2026-11-02")
+    ap.add_argument(
+        "--as-of",
+        default=None,
+        help="Forecast as-of date; defaults to the run's posterior_diagnostics as_of, else today.",
+    )
     ap.add_argument("--artifact-root", required=True, type=Path)
     ap.add_argument("--data-dir", required=True, type=Path)
     ap.add_argument("--out", required=True, type=Path)
@@ -233,6 +237,8 @@ def main() -> None:
     catalog = pl.read_parquet(art / "race_catalog.parquet")
     manifest = pl.read_parquet(art / "source_manifest.parquet")
     diag = json.loads((art / "posterior_diagnostics.json").read_text())
+    if args.as_of is None:
+        args.as_of = str(diag.get("as_of") or datetime.now(UTC).date().isoformat())
     perf = json.loads((art / "performance.json").read_text())
     reward_text = (art / "reward_card.json").read_text()
     pdraws = pl.read_parquet(

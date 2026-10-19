@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, timedelta
 from typing import Any
 
 import polars as pl
@@ -17,6 +18,28 @@ class Scenario:
     def default_as_of(self) -> str | None:
         value = self.payload.get("default_as_of")
         return str(value) if value else None
+
+    @property
+    def as_of_policy(self) -> str:
+        """``today`` for live forecasts (audit P1-5); ``default`` uses ``default_as_of``."""
+        return str(self.payload.get("as_of_policy") or "default").lower()
+
+    @property
+    def election_date(self) -> str | None:
+        value = self.payload.get("election_date")
+        return str(value) if value else None
+
+    def resolve_as_of(self, as_of: str | None, today: date | None = None) -> str | None:
+        """Explicit ``as_of`` wins; live scenarios default to today (capped at election eve)."""
+        if as_of:
+            return as_of
+        if self.as_of_policy == "today":
+            current = today or date.today()
+            if self.election_date:
+                eve = date.fromisoformat(self.election_date) - timedelta(days=1)
+                current = min(current, eve)
+            return current.isoformat()
+        return self.default_as_of
 
     @property
     def cycle(self) -> int | None:

@@ -397,6 +397,9 @@ scenarios:
     geography_type: state
     control_body: senate
     election_date: "2026-11-03"
+    # Live forecast: --as-of defaults to today (capped at election eve); default_as_of is
+    # only the fallback when as_of_policy is not "today" (fixtures/backtests).
+    as_of_policy: today
     default_as_of: "2026-11-02"
     senate_class: II
     # 2024 outcome carried forward: DEM 47, REP 53 (incl. IND caucusing). Class I + III
@@ -482,6 +485,7 @@ scenarios:
     geography_type: district
     control_body: house
     election_date: "2026-11-03"
+    as_of_policy: today
     default_as_of: "2026-11-02"
     redistricting_era: "2022_plus"
 

@@ -79,7 +79,7 @@ class ForecastPipeline:
         run_id = run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         reporter = get_reporter(quiet=quiet)
         scenario_obj = ScenarioRegistry.from_context(self.context).get(scenario)
-        as_of = as_of or (scenario_obj.default_as_of if scenario_obj else None)
+        as_of = scenario_obj.resolve_as_of(as_of) if scenario_obj else as_of
         if as_of is None:
             raise ValueError("as_of is required unless the selected scenario defines default_as_of")
         self.sync()
@@ -520,7 +520,7 @@ class ForecastPipeline:
     ) -> dict[str, Any]:
         run_id = run_id or datetime.now(UTC).strftime("historical-calibration-%Y%m%dT%H%M%SZ")
         scenario_obj = ScenarioRegistry.from_context(self.context).get(scenario)
-        as_of = as_of or (scenario_obj.default_as_of if scenario_obj else None)
+        as_of = scenario_obj.resolve_as_of(as_of) if scenario_obj else as_of
         if as_of is None:
             raise ValueError("as_of is required unless the selected scenario defines default_as_of")
 
