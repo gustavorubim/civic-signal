@@ -630,7 +630,9 @@ states/districts.
 configs/sources.yaml         # Presidential state-panel + fixture defaults.
 configs/sources_senate.yaml  # Senate state-panel (Class rotation), 6 cycles.
 configs/sources_house.yaml   # House district-panel, 6 cycles, 2 redistricting eras.
-configs/sources_live.yaml    # Live 538 polling and Wikipedia metadata overlay.
+configs/sources_senate_live.yaml  # 2026 Senate: VoteHub polls (CC BY 4.0) + Wikipedia overlay. Production.
+configs/sources_house_live.yaml   # 2026 House: VoteHub polls + Wikipedia overlay. Production.
+configs/sources_live.yaml         # DEPRECATED: FiveThirtyEight Datasette mirror (archived; no 2026 rows).
 ```
 
 Each registry supports `extends:` to layer real-data adapters on top of the panel
@@ -654,8 +656,12 @@ The 2014–2024 Senate and House panels are deterministic procedural draws that 
 aggregate historical patterns (D/R seat swings, Cook PVI distribution, incumbency
 advantage). They are not actual historical results. The harness exists to exercise
 the rolling-origin and majority-threshold contracts at scale; production runs should
-ingest real returns from MIT Election Lab + 538 senate/house polls. Regenerate panels
-with:
+ingest real returns. The 2026 rows are now rebuilt from cited data
+(`scripts/build_senate_2026_panel.py`, `scripts/build_house_2026_panel.py`; sources in
+`fixtures/*_2026_panel.SOURCES.txt`). The history rows stay synthetic and are flagged
+`synthetic=True`. Race forecasts carry `;synthetic_fundamentals` in `data_quality_flags` when
+any fundamentals input is synthetic, and calibration is labelled `*_on_synthetic_backtest`.
+Regenerate the synthetic history with:
 
 ```bash
 uv run python scripts/generate_senate_panel.py
@@ -716,6 +722,37 @@ uv run civic-signal forecast run --run-id house-2026-midterm-live \
   paginated: per https://votehub.com/polls/api/ it documents only filters, and
   `page`/`offset`/`limit` don't change the result (checked 2026-10-19).
 
+### Packaging, comparison and digest fields
+
+```bash
+uv run python scripts/package_run.py --chamber senate --run-date <YYYY-MM-DD> \
+  --artifact-root artifacts/senate-2026-live-<tag>/runs/senate-2026-midterm-live \
+  --data-dir data/senate-live-<tag> --out runs/<kind>/<date> \
+  --sources-config sources_senate_live.yaml --scenario senate_2026_state \
+  --prior runs/<kind>/<previous-date>
+# (same for --chamber house)
+uv run python scripts/compare_runs.py runs/<old> runs/<new> \
+  --out runs/<new>/comparison_vs_<old> --plot runs/<new>/movers_dumbbell.png
+```
+
+`runs/<kind>/<date>/summary.json` (written by `package_run.py`, rewritten after each chamber):
+- `senate` / `house`: `dem_control_prob` (headline: independents excluded),
+  `dem_control_prob_with_independents`, `dem_seats_mean`, `p10`/`p50`/`p90`,
+  `rep_control_prob`, `rep_seats_mean`;
+- `week_over_week` (with `--prior`): old/new/delta for control and seats;
+- `inference` (engine, backend, sims per chamber, as_of) and `source_fetch_status`
+  (`fresh`/`cached` and `fetched_at` per source).
+
+Per-chamber `summary.json` adds full race tables, `tipping_point_frequencies` (true
+tipping point; legacy runs are labelled `decisive_legacy`), poll accounting, and the config
+used. `compare_runs.py` labels a race move as Monte Carlo noise when it is within 2 MC SE
+(Bonferroni-adjusted across races). It reports "No significant movers" when nothing
+exceeds that.
+
+**Synthetic-baseline caveat:** fundamentals coefficients, the calibration map and the
+fundamentals-prior SD are fit on synthetic 2014-2024 panels, not real results. Treat the
+probabilities as model output under that caveat (see `docs/error_model.md`).
+
 ### Inspect The Midterm Outputs
 
 ```bash
@@ -742,10 +779,10 @@ for chamber, path in [
 
 - `compare_results` against 2026 returns empty (no actuals yet). R5/R6/R8 still gate
   on the rolling-origin backtest of 2014–2024.
-- The 2026 environment seed (D+3.0 for Senate, D+4.0 for House) is a midterm
-  out-party assumption baked into `scripts/generate_*_panel.py`. Replace it with real
-  poll-aggregate values via `sources_live.yaml` once upstream 538 or other live poll
-  streams contribute 2026 model-bearing rows.
+- The 2026 national environment is measured, not assumed:
+  `fixtures/measured_environment.json` (median of the generic-ballot aggregators,
+  `scripts/measure_environment.py`). The panel builders turn it into `national_swing` in
+  share points. Each run writes the value it used to `environment.json`.
 - House 2026 inherits the `2022_plus` redistricting era, so rolling-origin training
   uses 2022 + 2024 boundaries.
 
@@ -1070,7 +1107,11 @@ PYTHONPATH=src uv run civic-signal results cycle-eval \
   --reuse-existing
 ```
 
-### Live Source Smoke Run
+### Live Source Smoke Run (deprecated FiveThirtyEight path)
+
+> Deprecated: the FiveThirtyEight Datasette mirror is archived and has no 2026 rows. The
+> production 2026 path is VoteHub (`sources_senate_live.yaml`, `sources_house_live.yaml`;
+> see "Live 2026 forecast" above). This section is kept for the 2020 archive smoke test.
 
 The first live-ingestion path uses FiveThirtyEight's public Datasette CSV stream for
 the 2020 presidential poll archive. The same live registry also includes keyless

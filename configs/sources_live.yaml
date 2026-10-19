@@ -1,3 +1,5 @@
+# DEPRECATED (audit P2-7): the FiveThirtyEight Datasette mirror is archived and has no 2026
+# rows. Use sources_senate_live.yaml / sources_house_live.yaml (VoteHub) for 2026 forecasts.
 extends: sources.yaml
 sources:
   - id: fivethirtyeight_president_polls
