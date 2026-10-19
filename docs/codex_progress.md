@@ -51,3 +51,16 @@ Open items:
 - Montana three-way race (Bodnar I) is modeled as D vs R. TODO.
 - Senate fundraising and economic/turnout indices for 2026 are carried-over synthetic values, flagged in `synthetic_fields`.
 - Commits `14ef1fd`, `f7dd086` and `6c2a602` predate the extra tests and sit below the 90% coverage gate (89.35% / 89.93% / 89.97%; the pre-work baseline was 89.35%). `14ef1fd` also still had 2 ruff errors in `builder.py`, fixed in `f7dd086`. Every commit from `a8b8ab0` onward passes the full gate.
+
+## Phase 3
+| Task | Commit | Summary |
+|---|---|---|
+| 3.1 (P0-5 House) | `9a8c39b` | `scripts/build_house_2026_panel.py` rebuilds the 435 cycle-2026 House rows. Lean comes from the 2024 presidential result by district on the 2026 maps (The Downballot, attribution), minus the MIT national two-party share (0.4925); it is within about 2 pts of Cook PVI everywhere. Seats, incumbents and nominees come from the Wikipedia ballot files, cross-checked against congress-legislators (CC0). Handles same-party top-two (CA DEM v DEM, CA-40 REP v REP), DEM v IND (CA-06 Kiley), and unopposed placeholders. 173 seats were redrawn for 2026. Sources: `fixtures/house_2026_panel.SOURCES.txt`. The MIT House file is guestbook-gated, so the previous share is the 2024 presidential share (documented). **Also fixed:** `national_swing` is now in share points (margin change / 2) relative to the baseline year's environment, in both builders. The earlier margin-point value double-counted the swing (House DEM had gone to 0.99). |
+| 3.2 (P1-3) | `ae3bc06` | Explicit national (2.5 pts share) and regional (1.5 pts) error (`residual_covariance_mode: national_regional`); no extra local noise on posterior draws; race forecast floor 0.02; fundamentals-prior SD capped at 6 pts share. Sources and before/after SDs are in `docs/error_model.md`. Senate per-race SD 6.6 → 4.2 pts, mean pairwise correlation 0.11 → 0.40; House SD 12.1 → 5.2 pts, correlation 0.03 → 0.23. |
+| 3.3 (P1-2) | `d1ada09` | True tipping point (`tipping_point_probability`, sums to 1 with `tipping_point_none_probability`); the old metric is `decisive_probability`; plots, package_run and compare_runs updated (legacy runs labelled). |
+
+Phase-3 attribution (frozen 2026-10-19 payloads):
+- p3a, real House panel with the margin-unit swing (bug): House DEM 0.992.
+- p3b, swing in share units: Senate DEM 0.373 (0.391 with independents), mean 49.4; House DEM 0.887, mean 238.7 (216/238/261).
+- p3c, error structure: Senate DEM 0.455, mean 49.7 (45/50/54); House DEM 0.711, mean 227.3 (209/225/248).
+- p3d, tipping point: no change to probabilities (the metric only). Senate tipping top 3: IA 15.1%, TX 13.8%, ME 12.0%.
