@@ -1,0 +1,158 @@
+office,jurisdiction,name,party
+house,AK-01,Eric Hafner,DEM
+house,AK-01,Matt Schultz,REP
+house,AK-01,Nick Begich,REP
+house,AK-01,Nick Begich III,REP
+house,AR-02,Chris Jones,DEM
+house,AR-02,French Hill,REP
+house,AZ-06,Dem,DEM
+house,AZ-06,Juan Ciscomani,REP
+house,AZ-06,Rep,REP
+house,CA-06,Kevin Kiley,REP
+house,CA-06,Richard Pan,DEM
+house,CA-22,David Valadao,REP
+house,CA-22,Jasmeet Bains,DEM
+house,CA-22,Randy Villegas,DEM
+house,CA-40,Ken Calvert,REP
+house,CA-40,Young Kim,REP
+house,CA-48,Jim Desmond,REP
+house,CA-48,Marni von Wilpert,DEM
+house,CO-03,Jeff Hurd,REP
+house,FL-13,Anna Paulina Luna,REP
+house,FL-27,Eliott Rodriguez,DEM
+house,FL-27,María Elvira Salazar,REP
+house,FL-28,Carlos Giménez,REP
+house,FL-28,Dem,DEM
+house,FL-28,Rep,REP
+house,IA-01,Christina Bohannan,DEM
+house,IA-01,Mariannette Miller-Meeks,REP
+house,IA-02,Joe Mitchell,REP
+house,IA-02,Lindsay James,DEM
+house,IL-04,Ed Hershey,DEM
+house,ME-02,Joe Baldacci,DEM
+house,ME-02,Paul LePage,REP
+house,MI-04,Bill Huizenga,REP
+house,MI-04,Dem,DEM
+house,MI-04,Rep,REP
+house,MI-04,Sean McCann,DEM
+house,MI-07,Bridget Brink,DEM
+house,MI-07,Tom Barrett,REP
+house,MI-07,William Lawrence,DEM
+house,MT-01,Aaron Flint,REP
+house,MT-01,Sam Forstag,DEM
+house,NE-01,Mike Flood,REP
+house,NH-02,Lily Tang Williams,REP
+house,NH-02,Maggie Goodlander,DEM
+house,NJ-07,Tom Kean Jr.,DEM
+house,NM-02,Gabe Vasquez,DEM
+house,NM-02,Greg Cunningham,REP
+house,NY-01,Chris Gallant,DEM
+house,NY-01,Nick LaLota,REP
+house,NY-04,Dem,DEM
+house,NY-04,Rep,REP
+house,NY-17,Cait Conley,DEM
+house,NY-17,Dem,DEM
+house,NY-17,Mike Lawler,REP
+house,NY-17,Rep,REP
+house,NY-18,Dem,DEM
+house,NY-18,Rep,REP
+house,NY-21,Anthony Constantino,DEM
+house,OH-01,Greg Landsman,DEM
+house,OH-07,Max Miller,REP
+house,OH-15,Don Leonard,DEM
+house,OH-15,Mike Carey,REP
+house,PA-01,Brian Fitzpatrick,REP
+house,PA-07,Bob Brooks,REP
+house,PA-07,Ryan Mackenzie,REP
+house,PA-08,Paige Cognetti,DEM
+house,PA-08,Rob Bresnahan,REP
+house,PA-10,Janelle Stelson,DEM
+house,PA-10,Janelle Stetson,DEM
+house,PA-10,Scott Perry,REP
+house,SC-01,Nancy Lacore,DEM
+house,TN-09,Brent Taylor,REP
+house,TN-09,Justin Pearson,DEM
+house,TX-15,Bobby Pulido,DEM
+house,TX-15,Monica De La Cruz,REP
+house,TX-23,Brandon Herrera,REP
+house,TX-23,Dem,DEM
+house,TX-23,Katy Padilla Stout,DEM
+house,TX-23,Rep,REP
+house,TX-28,Henry Cuellar,DEM
+house,TX-34,Vicente Gonzalez,DEM
+house,VA-01,Dem,DEM
+house,VA-01,Rep,REP
+house,VA-01,Rob Wittman,REP
+house,VA-01,Shannon Taylor,DEM
+house,VA-02,Elaine Luria,DEM
+house,VA-02,Jen Kiggans,REP
+house,VT-01,Becca Balint,DEM
+house,VT-01,Gerald Malloy,DEM
+house,WA-03,John Braun,REP
+house,WA-03,Marie Gluesenkamp Perez,DEM
+house,WI-03,Derrick Van Orden,REP
+house,WI-03,Rebecca Cooke,DEM
+senate,Alabama,Barry Moore,REP
+senate,Alabama,Everett Wess,REP
+senate,Alaska,Dan Sullivan,REP
+senate,Alaska,Dan Sullvian,REP
+senate,Alaska,Mary Peltola,DEM
+senate,Arkansas,Tom Cotton,REP
+senate,Florida,Angie Nixon,DEM
+senate,Florida,Ashley Moody,REP
+senate,Georgia,Buddy Carter,REP
+senate,Georgia,Jon Ossoff,DEM
+senate,Georgia,Mike Collins,REP
+senate,Idaho,Jim Risch,REP
+senate,Idaho,Todd Achilles,REP
+senate,Iowa,Ashley Hinson,REP
+senate,Iowa,Josh Turek,DEM
+senate,Iowa,Zach Wahls,DEM
+senate,Kansas,Adam Hamilton,DEM
+senate,Kansas,Roger Marshall,REP
+senate,Maine,Dem,DEM
+senate,Maine,Graham Platner,DEM
+senate,Maine,Janet Mills,DEM
+senate,Maine,Susan Collins,REP
+senate,Maine,Troy Jackson,DEM
+senate,Massachusetts,Ed Markey,DEM
+senate,Massachusetts,Joe Tache,REP
+senate,Massachusetts,John Deaton,REP
+senate,Massachusetts,Seth Moulton,DEM
+senate,Michigan,Abdul El-Sayed,DEM
+senate,Michigan,Haley Stevens,DEM
+senate,Michigan,Mallory McMorrow,DEM
+senate,Michigan,Mike Rogers,REP
+senate,Michigan,Tim Long,DEM
+senate,Minnesota,Angie Craig,DEM
+senate,Minnesota,Michele Tafoya,REP
+senate,Minnesota,Peggy Flanagan,DEM
+senate,Minnesota,Rep,REP
+senate,Mississippi,Cindy Hyde-Smith,REP
+senate,Mississippi,Scott Colom,DEM
+senate,Montana,Kurt Alme,REP
+senate,Montana,Reilly Neill,DEM
+senate,Montana,Seth Bodnar,DEM
+senate,New Hampshire,Chris Pappas,DEM
+senate,New Hampshire,John Sununu,REP
+senate,New Hampshire,Scott Brown,REP
+senate,New Mexico,Ben Ray Luján,DEM
+senate,New Mexico,Larry Marker,DEM
+senate,North Carolina,Lara Trump,REP
+senate,North Carolina,Michael Whatley,REP
+senate,North Carolina,Roy Cooper,DEM
+senate,North Carolina,Thom Thillis,REP
+senate,Ohio,Jon Husted,REP
+senate,Ohio,Sherrod Brown,DEM
+senate,Rhode Island,Jack Reed,DEM
+senate,Rhode Island,Michael Bahry,REP
+senate,Rhode Island,Raymond McKay,REP
+senate,South Carolina,Annie Andrews,DEM
+senate,South Carolina,Darline Graham,REP
+senate,Tennessee,Bill Hagerty,REP
+senate,Tennessee,Marquita Bradshaw,DEM
+senate,Texas,James Talarico,DEM
+senate,Texas,John Cornyn,REP
+senate,Texas,Ken Paxton,REP
+senate,Virginia,Bert Mizusawa,REP
+senate,Virginia,Mark Warner,DEM

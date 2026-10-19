@@ -1934,6 +1934,74 @@ def test_538_general_polls_normalizer_covers_2026_offices(tmp_path: Path) -> Non
     )
 
 
+def test_votehub_race_polls_normalizer_maps_generals_and_skips_primaries(
+    tmp_path: Path,
+) -> None:
+    fixture_path = ROOT / "tests" / "golden_fixtures" / "votehub_race_polls_sample.json"
+    assert fixture_path.exists()
+
+    ctx = context(tmp_path)
+    fixture_registry = SourceRegistry.from_context(ctx)
+    live_sources = [
+        SourceDefinition(
+            id="votehub_senate_polls_test",
+            table="polls",
+            type="http_json",
+            path=fixture_path,
+            parser_version="votehub-race-polls-v1",
+            license="VoteHub golden fixture (CC BY 4.0 style).",
+            url=fixture_path.resolve().as_uri(),
+            auth_mode="public",
+            parser_args={
+                "cycle": 2026,
+                "office": "senate",
+                "poll_type": "us-senator",
+                "parties": ["DEM", "REP"],
+                "party_map_path": "fixtures/candidates_2026_parties.csv",
+            },
+        ),
+        SourceDefinition(
+            id="votehub_house_polls_test",
+            table="polls",
+            type="http_json",
+            path=fixture_path,
+            parser_version="votehub-race-polls-v1",
+            license="VoteHub golden fixture (CC BY 4.0 style).",
+            url=fixture_path.resolve().as_uri(),
+            auth_mode="public",
+            parser_args={
+                "cycle": 2026,
+                "office": "house",
+                "poll_type": "us-representative",
+                "parties": ["DEM", "REP"],
+                "house_race_id_format": "hyphenated",
+                "party_map_path": "fixtures/candidates_2026_parties.csv",
+            },
+        ),
+    ]
+    SyncRunner(ctx, registry=SourceRegistry([*fixture_registry.sources, *live_sources])).run()
+    result = CuratedDataBuilder(ctx).run()
+
+    polls = result.tables["polls"].filter(pl.col("poll_id").str.starts_with("votehub-"))
+    assert set(polls["source_id"].unique().to_list()) == {
+        "votehub_senate_polls_test",
+        "votehub_house_polls_test",
+    }
+    assert set(polls["race_id"].to_list()) == {"US-SEN-GA-2026", "US-HOUSE-CA-22-2026"}
+    # Primary (Texas Democratic) and unmapped-candidate Alaska polls are dropped.
+    assert "US-SEN-TX-2026" not in polls["race_id"].to_list()
+    assert "US-SEN-AK-2026" not in polls["race_id"].to_list()
+    ga = polls.filter(pl.col("race_id") == "US-SEN-GA-2026").sort("option_id")
+    assert ga.height == 2
+    assert ga["pct"].to_list() == [47.7, 43.3]
+    assert set(ga["option_id"].to_list()) == {"US-SEN-GA-2026-D", "US-SEN-GA-2026-R"}
+    ca = polls.filter(pl.col("race_id") == "US-HOUSE-CA-22-2026")
+    assert ca.height == 2
+    assert {"US-HOUSE-CA-22-2026-D", "US-HOUSE-CA-22-2026-R"}.issubset(
+        set(ca["option_id"].to_list())
+    )
+
+
 def test_phase8_live_source_scope_claims_when_non_file_sources_cover_offices(
     tmp_path: Path,
 ) -> None:

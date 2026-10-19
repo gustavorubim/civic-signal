@@ -24,6 +24,7 @@ Current source modes:
 - `fixture`: copy a local CSV into the raw lake and hash it.
 - `http_csv`: download a public CSV endpoint into the raw lake and hash it.
 - `http_text`: download a public text endpoint into the raw lake and hash it.
+- `http_json`: download a public JSON endpoint into the raw lake and hash it.
 
 HTTP sources use bounded retries. When a refresh fails but the same source id, URL, and
 parser version already have a raw snapshot, sync records `status = stale_reused` and
@@ -32,11 +33,22 @@ transient upstream stall while preserving the manifest evidence that the current
 used a stale raw snapshot.
 
 The live polling adapters in `configs/sources_live.yaml` download public
-FiveThirtyEight/Datasette CSV streams. `fivethirtyeight_president_polls` normalizes
-Wisconsin 2020 Democratic/Republican rows into the existing `polls` contract for
-`US-PRES-WI-2020`. The `fivethirtyeight_*_polls_2026` adapters normalize Senate,
-Governor, and House Democratic/Republican general-election rows when the upstream
-tables contain 2026 polls.
+FiveThirtyEight/Datasette CSV streams for presidential verification and other legacy
+feeds. `fivethirtyeight_president_polls` normalizes Wisconsin 2020
+Democratic/Republican rows into the existing `polls` contract for `US-PRES-WI-2020`.
+The archived Datasette mirror currently returns zero rows for `cycle=2026`, so it is
+not a viable 2026 midterm poll source.
+
+For 2026 Senate and House live forecasts, `configs/sources_senate_live.yaml` and
+`configs/sources_house_live.yaml` use VoteHub's keyless JSON API
+(`https://api.votehub.com/polls`, CC BY 4.0 — attribute [VoteHub](https://votehub.com/polls/api/)).
+The `votehub-race-polls-v1` parser expands nested `answers[{choice,pct}]`, maps subjects
+such as `2026 Georgia` / `2026 CA-22` onto `US-SEN-{ST}-2026` and hyphenated
+`US-HOUSE-{ST}-{NN}-2026` race ids, drops primary-labeled subjects, and maps candidate
+names to DEM/REP via `fixtures/candidates_2026_parties.csv` (Wikipedia + VoteHub primary
+subject labels). Polls with unmapped candidates are skipped rather than guessed.
+Synthetic panel polls for cycle 2026 are excluded from those live registries so curated
+2026 poll rows come from VoteHub only.
 
 `fred_unrate_2026_fundamentals` downloads FRED's keyless UNRATE CSV and emits
 model-bearing national macro fundamentals rows for the compact 2026
@@ -73,6 +85,6 @@ This registry is intentionally not the default source config. Use it when the op
 wants Phase 4/5/7 historical calibration and sampler diagnostics at full Senate/House
 dimensions without increasing routine test and smoke-run cost.
 
-Remaining source families to implement include MIT Election Lab, FEC, VoteHub or other
-poll feeds, Census/FRED/BEA/BLS, Kalshi, Polymarket, GDELT, Wikimedia, and optional
-Civic-style race catalog enrichment.
+Remaining source families to implement include MIT Election Lab, FEC, additional
+poll feeds beyond VoteHub, Census/FRED/BEA/BLS, Kalshi, Polymarket, GDELT, Wikimedia,
+and optional Civic-style race catalog enrichment.

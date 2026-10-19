@@ -1,0 +1,108 @@
+[
+  {
+    "id": "us-fixture-ga-sen-1",
+    "poll_type": "us-senator",
+    "sample_size": 1000,
+    "population": "lv",
+    "url": "https://example.test/ga-sen",
+    "created_at": "2026-03-30",
+    "start_date": "2026-02-28",
+    "end_date": "2026-03-02",
+    "pollster": "Emerson College",
+    "answers": [
+      {
+        "choice": "Jon Ossoff",
+        "pct": 47.7
+      },
+      {
+        "choice": "Mike Collins",
+        "pct": 43.3
+      }
+    ],
+    "seat_name": null,
+    "sponsors": [],
+    "internal": false,
+    "partisan": null,
+    "subject": "2026 Georgia"
+  },
+  {
+    "id": "us-fixture-tx-dem-primary",
+    "poll_type": "us-senator",
+    "sample_size": 800,
+    "population": "lv",
+    "url": "https://example.test/tx-dem",
+    "created_at": "2026-01-22",
+    "start_date": "2026-01-10",
+    "end_date": "2026-01-12",
+    "pollster": "Emerson College",
+    "answers": [
+      {
+        "choice": "Jasmine Crockett",
+        "pct": 40.0
+      },
+      {
+        "choice": "James Talarico",
+        "pct": 50.0
+      }
+    ],
+    "seat_name": null,
+    "sponsors": [],
+    "internal": false,
+    "partisan": null,
+    "subject": "2026 Texas Democratic"
+  },
+  {
+    "id": "us-fixture-ca22-1",
+    "poll_type": "us-representative",
+    "sample_size": 600,
+    "population": "lv",
+    "url": "https://example.test/ca22",
+    "created_at": "2026-04-01",
+    "start_date": "2026-03-20",
+    "end_date": "2026-03-22",
+    "pollster": "Coastal Poll",
+    "answers": [
+      {
+        "choice": "David Valadao",
+        "pct": 46.0
+      },
+      {
+        "choice": "Jasmeet Bains",
+        "pct": 44.0
+      }
+    ],
+    "seat_name": "CA-22",
+    "sponsors": [
+      "Example Sponsor"
+    ],
+    "internal": false,
+    "partisan": "DEM",
+    "subject": "2026 CA-22"
+  },
+  {
+    "id": "us-fixture-unmapped",
+    "poll_type": "us-senator",
+    "sample_size": 500,
+    "population": "rv",
+    "url": "https://example.test/unmapped",
+    "created_at": "2026-04-01",
+    "start_date": "2026-03-01",
+    "end_date": "2026-03-03",
+    "pollster": "Mystery Poll",
+    "answers": [
+      {
+        "choice": "Unknown Candidate Alpha",
+        "pct": 40.0
+      },
+      {
+        "choice": "Unknown Candidate Beta",
+        "pct": 41.0
+      }
+    ],
+    "seat_name": null,
+    "sponsors": [],
+    "internal": true,
+    "partisan": null,
+    "subject": "2026 Alaska"
+  }
+]

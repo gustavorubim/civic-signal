@@ -1,23 +1,34 @@
 extends: sources_senate.yaml
 sources:
-  # Live 2026 Senate polling overlay on top of the synthetic state panel.
-  # NOTE: the FiveThirtyEight Datasette mirror is a frozen archive (538 shut down
-  # before the 2026 cycle) and currently returns zero rows for cycle=2026. The
-  # adapter is wired so the run degrades gracefully to panel polls until the URL
-  # is pointed at a real 2026 aggregate.
-  - id: fivethirtyeight_senate_polls_2026
+  # Exclude synthetic 2026 panel polls on the live path; keep historical panel cycles
+  # for calibration while 2026 polling comes from VoteHub.
+  - id: senate_state_panel_polls
     table: polls
-    type: http_csv
-    path: senate_polls_2026.csv
-    parser_version: fivethirtyeight-general-polls-v1
-    license: Public FiveThirtyEight/Datasette polling table; record terms before redistribution.
+    type: fixture
+    path: fixtures/senate_state_panel.csv
+    parser_version: senate-state-panel-polls-v1
+    license: Synthetic Senate state panel; see scripts/generate_senate_panel.py.
+    url: file://fixtures/senate_state_panel.csv
+    parser_args:
+      cycles: [2014, 2016, 2018, 2020, 2022, 2024]
+      as_of_offsets_days: [90, 60, 31, 30, 7, 1]
+      sample_size: 850
+  # Live 2026 Senate polling via VoteHub (CC BY 4.0). FiveThirtyEight Datasette has
+  # zero cycle=2026 rows; VoteHub is the production live poll feed.
+  - id: votehub_senate_polls_2026
+    table: polls
+    type: http_json
+    path: votehub_senate_polls_2026.json
+    parser_version: votehub-race-polls-v1
+    license: VoteHub Polling API data under CC BY 4.0; attribute VoteHub (https://votehub.com/polls/api/).
     auth_mode: public
-    url: https://fivethirtyeight.datasettes.com/polls/senate_polls.csv?cycle=2026&_stream=on
+    url: https://api.votehub.com/polls?poll_type=us-senator
     parser_args:
       cycle: 2026
       office: senate
-      stage: general
+      poll_type: us-senator
       parties: [DEM, REP]
+      party_map_path: fixtures/candidates_2026_parties.csv
   - id: wikipedia_senate_2026_race_presence
     table: public_signals
     type: http_text

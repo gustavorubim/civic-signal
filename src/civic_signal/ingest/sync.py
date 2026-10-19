@@ -29,6 +29,7 @@ HTTP_ALLOWED_CONTENT_TYPES = (
     "text/x-wiki",
     "text/plain",
     "application/csv",
+    "application/json",
     "application/octet-stream",
 )
 
@@ -94,7 +95,7 @@ class SyncRunner:
         previous: dict[str, str],
         retrieved_at: str,
     ) -> tuple[dict[str, object], bool]:
-        if source.type in {"http_csv", "http_text"}:
+        if source.type in {"http_csv", "http_text", "http_json"}:
             return self._sync_http(source, previous, retrieved_at)
         if source.type != "fixture":
             raise ValueError(f"Unsupported source type: {source.type}")
@@ -241,6 +242,12 @@ class SyncRunner:
     def _http_suffix(source: SourceDefinition) -> str:
         if source.path and source.path.suffix:
             return source.path.suffix
+        if source.type == "http_json":
+            return ".json"
+        if source.type == "http_text":
+            return ".txt"
+        if source.type == "http_csv":
+            return ".csv"
         parsed = urllib.parse.urlparse(source.url)
         suffix = Path(parsed.path).suffix
         return suffix or ".dat"

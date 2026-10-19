@@ -1,25 +1,35 @@
 extends: sources_house.yaml
 sources:
-  # Live 2026 House polling overlay on top of the synthetic district panel.
-  # NOTE: the FiveThirtyEight Datasette mirror is a frozen archive (538 shut down
-  # before the 2026 cycle) and currently returns zero rows for cycle=2026. The
-  # adapter is wired so the run degrades gracefully to panel polls until the URL
-  # is pointed at a real 2026 aggregate. house_race_id_format is hyphenated to
-  # match the panel's US-HOUSE-{ST}-{NN}-2026 race ids.
-  - id: fivethirtyeight_house_polls_2026
+  # Exclude synthetic 2026 panel polls on the live path; keep historical panel cycles
+  # for calibration while 2026 polling comes from VoteHub.
+  - id: house_district_panel_polls
     table: polls
-    type: http_csv
-    path: house_polls_2026.csv
-    parser_version: fivethirtyeight-general-polls-v1
-    license: Public FiveThirtyEight/Datasette polling table; record terms before redistribution.
+    type: fixture
+    path: fixtures/house_district_panel.csv
+    parser_version: house-district-panel-polls-v1
+    license: Synthetic House district panel; see scripts/generate_house_panel.py.
+    url: file://fixtures/house_district_panel.csv
+    parser_args:
+      cycles: [2014, 2016, 2018, 2020, 2022, 2024]
+      as_of_offsets_days: [90, 60, 31, 30, 7, 1]
+      sample_size: 600
+  # Live 2026 House polling via VoteHub (CC BY 4.0). house_race_id_format is hyphenated
+  # to match the panel's US-HOUSE-{ST}-{NN}-2026 race ids.
+  - id: votehub_house_polls_2026
+    table: polls
+    type: http_json
+    path: votehub_house_polls_2026.json
+    parser_version: votehub-race-polls-v1
+    license: VoteHub Polling API data under CC BY 4.0; attribute VoteHub (https://votehub.com/polls/api/).
     auth_mode: public
-    url: https://fivethirtyeight.datasettes.com/polls/house_polls.csv?cycle=2026&_stream=on
+    url: https://api.votehub.com/polls?poll_type=us-representative
     parser_args:
       cycle: 2026
       office: house
-      stage: general
+      poll_type: us-representative
       parties: [DEM, REP]
       house_race_id_format: hyphenated
+      party_map_path: fixtures/candidates_2026_parties.csv
   - id: wikipedia_house_2026_race_presence
     table: public_signals
     type: http_text
