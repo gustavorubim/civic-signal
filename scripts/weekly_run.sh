@@ -13,8 +13,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PYTHONPATH=src
 KIND=$1; DATE=$2; PRIOR=$3; EXTRA=${4:-}
-TAG="${KIND}-${DATE}"
-OUT="runs/${KIND}/${DATE}"
+TAG="${RUN_TAG:-${KIND}-${DATE}}"
+OUT="${OUT_DIR:-runs/${KIND}/${DATE}}"  # OUT_DIR overrides, e.g. runs/adhoc/2026-10-19-postfix
 mkdir -p "${OUT}/logs"
 cp "$0" "${OUT}/logs/commands.sh"
 for CH in senate house; do
