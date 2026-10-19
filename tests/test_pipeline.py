@@ -581,7 +581,9 @@ def test_simulation_outputs_forecasts_control_and_ecosystem(tmp_path: Path) -> N
     simulated_options = ensemble.filter(pl.col("admitted")).height
     assert outputs.draws.height == int(model_config["simulation_count"]) * simulated_options
     assert outputs.control_forecasts.height > 0
-    assert {"control_threshold", "pivotal_rates"}.issubset(outputs.control_forecasts.columns)
+    assert {"control_threshold", "tipping_point_probability", "decisive_probability"}.issubset(
+        outputs.control_forecasts.columns
+    )
     assert outputs.ecosystem_forecasts.height >= 4
     assert outputs.ecosystem_forecasts["demographic_model_status"].unique().to_list() == [
         "placeholder_not_estimated"

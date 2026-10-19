@@ -1267,12 +1267,30 @@ class PlotGenerator:
         plot_dir: Path,
         control_forecasts: pl.DataFrame,
     ) -> Path | None:
-        """Horizontal bars of pivotal-flip rates for the top tipping-point races."""
-        if control_forecasts.is_empty() or "pivotal_rates" not in control_forecasts.columns:
+        """Horizontal bars of true tipping-point probabilities (audit P1-2).
+
+        Falls back to the legacy pivotal-flip rate for control frames that predate it."""
+        if control_forecasts.is_empty():
+            return None
+        if "tipping_point_probability" in control_forecasts.columns:
+            column, key, xlabel = (
+                "tipping_point_probability",
+                "tipping_point_probability",
+                "P(race is the tipping point for control)",
+            )
+        elif "pivotal_rates" in control_forecasts.columns:
+            column, key, xlabel = (
+                "pivotal_rates",
+                "pivotal_rate",
+                "Legacy pivotal-flip rate (P this race decides control)",
+            )
+        else:
             return None
         rows: list[dict[str, object]] = []
         for record in control_forecasts.iter_rows(named=True):
-            raw = record.get("pivotal_rates")
+            if column == "tipping_point_probability" and str(record.get("party")).upper() != "DEM":
+                continue  # one chamber-wide ordering; the DEM view is the headline
+            raw = record.get(column)
             if not raw:
                 continue
             try:
@@ -1284,7 +1302,7 @@ class PlotGenerator:
                     {
                         "race_id": str(item.get("race_id")),
                         "party": str(record.get("party") or "").upper(),
-                        "pivotal_rate": float(item.get("pivotal_rate") or 0.0),
+                        "pivotal_rate": float(item.get(key) or 0.0),
                     }
                 )
         if not rows:
@@ -1298,7 +1316,7 @@ class PlotGenerator:
         ]
         fig, ax = plt.subplots(figsize=(9.6, max(3.6, len(labels) * 0.42)), dpi=150)
         ax.barh(labels, values, color=colors)
-        ax.set_xlabel("Pivotal-flip rate (P this race decides control)")
+        ax.set_xlabel(xlabel)
         ax.set_title("Tipping-Point Races", loc="left", fontweight="bold")
         ax.xaxis.set_major_formatter(PercentFormatter(1.0))
         for index, value in enumerate(values):

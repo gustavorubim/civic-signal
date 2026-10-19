@@ -97,10 +97,40 @@ def seat_distribution(seat_posterior: pl.DataFrame, party: str) -> dict[str, Any
     }
 
 
+def tipping_rates(
+    control_row: dict[str, Any],
+    forecast_draws: pl.DataFrame | None = None,
+    seat_posterior: pl.DataFrame | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """(metric, [{"race_id", "rate"}]) for one control row, best first (audit P1-2).
+
+    Runs since P1-2 carry the true tipping point (``tipping_point_probability``). Older runs
+    only have the legacy "pivotal"/decisive metric, recomputed for every race when draws are
+    available. The metric name says which one it is.
+    """
+    raw = control_row.get("tipping_point_probability")
+    if raw:
+        items = json.loads(raw)
+        return "tipping_point", [
+            {"race_id": x["race_id"], "rate": float(x["tipping_point_probability"])} for x in items
+        ]
+    threshold = int(control_row["control_threshold"])
+    party = str(control_row.get("party") or "DEM")
+    if forecast_draws is not None and seat_posterior is not None:
+        items = full_pivotal_rates(forecast_draws, seat_posterior, party, threshold)
+    else:
+        items = json.loads(control_row.get("pivotal_rates") or "[]")
+    return "decisive_legacy", [
+        {"race_id": x["race_id"], "rate": float(x["pivotal_rate"])} for x in items
+    ]
+
+
 def full_pivotal_rates(
     forecast_draws: pl.DataFrame, seat_posterior: pl.DataFrame, party: str, threshold: int
 ) -> list[dict[str, Any]]:
-    """Recompute pivotal rates for every race (the pipeline only persists the top 3)."""
+    """Legacy decisive ("pivotal") rate for every race: P(this race's flip changes control).
+
+    Not the tipping point; see ``tipping_rates``. The pipeline only persists the top 3."""
     counts = (
         seat_posterior.filter(pl.col("party") == party)
         .sort("draw_id")
@@ -287,7 +317,10 @@ def main() -> None:
             "modeled_seats": row["modeled_seats"],
             "holdover_seats": row["holdover_seats"],
             "tipping_point_races": json.loads(row["tipping_point_races"]),
-            "pivotal_rates": json.loads(row["pivotal_rates"]),
+            "tipping_point_probability": json.loads(row.get("tipping_point_probability") or "[]"),
+            "decisive_probability": json.loads(
+                row.get("decisive_probability") or row.get("pivotal_rates") or "[]"
+            ),
         }
 
     # polls per race (2026 VoteHub rows in curated polls, modeled races only)
@@ -309,6 +342,9 @@ def main() -> None:
     rep_map = dict(zip(rep["race_id"], rep["rep_p"], strict=False))
     piv_dem = full_pivotal_rates(fd, sp, "DEM", thresholds["DEM"])
     piv_map = {r["race_id"]: r["pivotal_rate"] for r in piv_dem}
+    dem_control_row = cf.filter(pl.col("party") == "DEM").row(0, named=True)
+    tip_metric, tip_dem = tipping_rates(dem_control_row, fd, sp)
+    tip_map = {r["race_id"]: r["rate"] for r in tip_dem}
     races = []
     for r in dem.sort("race_id").iter_rows(named=True):
         info = pr_map.get(r["race_id"], {})
@@ -332,7 +368,8 @@ def main() -> None:
                 else None,
                 "polled": bool(info.get("poll_rows", 0)),
                 "model_polled": r["race_id"] in model_polled,
-                "dem_pivotal_rate": piv_map.get(r["race_id"], 0.0),
+                "dem_tipping_point_probability": tip_map.get(r["race_id"], 0.0),
+                "dem_decisive_probability": piv_map.get(r["race_id"], 0.0),
             }
         )
     closest = sorted(races, key=lambda x: (abs(x["dem_win_prob"] - 0.5), x["race_id"]))[
@@ -486,7 +523,9 @@ def main() -> None:
         "tipping_point_frequencies": {
             "party": "DEM",
             "threshold": thresholds["DEM"],
-            "races": piv_dem,
+            "metric": tip_metric,
+            "races": [{"race_id": x["race_id"], "rate": round(x["rate"], 4)} for x in tip_dem],
+            "decisive_probability": piv_dem,
         },
         "poll_diagnostics": poll_diag,
         "plots": plots,

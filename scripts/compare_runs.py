@@ -36,7 +36,7 @@ import numpy as np
 import polars as pl
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from package_run import classify_raw_votehub, full_pivotal_rates, poll_stem
+from package_run import classify_raw_votehub, poll_stem, tipping_rates
 
 TOP_N = {"senate": 8, "house": 12}
 BAND = (0.35, 0.65)
@@ -381,35 +381,31 @@ def compare_chamber(
     res["dem_seats"] = seats
     fo, fn = flip_stats(old), flip_stats(new)
     res["seat_flips_vs_incumbent_party"] = {"old": fo, "new": fn}
-    # ---- tipping
-    to = json.loads(co["tipping_point_races"])
-    tn = json.loads(cn["tipping_point_races"])
+    # ---- tipping (audit P1-2: true tipping point; legacy runs carry the decisive metric)
+    metric_old, fo_p = tipping_rates(co, old["fd"], old["sp"])
+    metric_new, fn_p = tipping_rates(cn, new["fd"], new["sp"])
+    to = [x["race_id"] for x in fo_p[:3]]
+    tn = [x["race_id"] for x in fn_p[:3]]
+    om = {x["race_id"]: x["rate"] for x in fo_p}
+    o10 = [x["race_id"] for x in fo_p[:10]]
+    n10 = [x["race_id"] for x in fn_p[:10]]
     tip: dict[str, Any] = {
-        "top3_old": json.loads(co["pivotal_rates"]),
-        "top3_new": json.loads(cn["pivotal_rates"]),
+        "metric_old": metric_old,
+        "metric_new": metric_new,
+        "top3_old": fo_p[:3],
+        "top3_new": fn_p[:3],
         "entered_top3": [x for x in tn if x not in to],
         "left_top3": [x for x in to if x not in tn],
+        "top10_old": fo_p[:10],
+        "top10_new": fn_p[:10],
+        "entered_top10": [
+            {"race_id": x["race_id"], "old": om.get(x["race_id"]), "new": x["rate"]}
+            for x in fn_p[:10]
+            if x["race_id"] not in o10
+        ],
+        "left_top10": [x for x in o10 if x not in n10],
+        "rate_mc_se_at_top": round(mc_se(fn_p[0]["rate"], n_new), 4) if fn_p else None,
     }
-    if old["fd"] is not None and new["fd"] is not None:
-        thr = int(co["control_threshold"])
-        fo_p = full_pivotal_rates(old["fd"], old["sp"], "DEM", thr)
-        fn_p = full_pivotal_rates(new["fd"], new["sp"], "DEM", int(cn["control_threshold"]))
-        o10 = [x["race_id"] for x in fo_p[:10]]
-        n10 = [x["race_id"] for x in fn_p[:10]]
-        om = {x["race_id"]: x["pivotal_rate"] for x in fo_p}
-        tip["top10_old"] = fo_p[:10]
-        tip["top10_new"] = fn_p[:10]
-        tip["entered_top10"] = [
-            {
-                "race_id": x,
-                "old": om.get(x),
-                "new": next(y["pivotal_rate"] for y in fn_p if y["race_id"] == x),
-            }
-            for x in n10
-            if x not in o10
-        ]
-        tip["left_top10"] = [x for x in o10 if x not in n10]
-        tip["pivotal_rate_mc_se_at_top"] = round(mc_se(fn_p[0]["pivotal_rate"], n_new), 4)
     res["tipping"] = tip
     # ---- races
     ro, rn = race_table(old), race_table(new)
@@ -778,7 +774,7 @@ def fmt_d(x: float | None, nd: int = 3) -> str:
 
 
 def _piv_list(items: list[dict[str, Any]]) -> str:
-    return ", ".join("{} ({:.3f})".format(x["race_id"], x["pivotal_rate"]) for x in items)
+    return ", ".join("{} ({:.3f})".format(x["race_id"], x["rate"]) for x in items)
 
 
 def _move_list(items: list[dict[str, Any]]) -> str:
@@ -917,13 +913,19 @@ def to_markdown(res: dict[str, Any]) -> str:
         L += [
             "### Tipping points",
             "",
+            f"- Metric: old run `{tp['metric_old']}`, new run `{tp['metric_new']}`"
+            + (
+                " (not comparable: the old run predates the true tipping-point metric)"
+                if tp["metric_old"] != tp["metric_new"]
+                else ""
+            ),
             f"- Top-3 old: {_piv_list(tp['top3_old'])}",
             f"- Top-3 new: {_piv_list(tp['top3_new'])}",
             f"- Entered top-3: {', '.join(tp['entered_top3']) or 'none'}; left: {', '.join(tp['left_top3']) or 'none'}",
         ]
-        if "top10_new" in tp:
+        if tp.get("rate_mc_se_at_top") is not None:
             L.append(
-                f"- Top-10 entered: {', '.join(x['race_id'] for x in tp['entered_top10']) or 'none'}; left: {', '.join(tp['left_top10']) or 'none'} (pivotal-rate MC SE ≈ {tp['pivotal_rate_mc_se_at_top']:.3f})"
+                f"- Top-10 entered: {', '.join(x['race_id'] for x in tp['entered_top10']) or 'none'}; left: {', '.join(tp['left_top10']) or 'none'} (MC SE at top ≈ {tp['rate_mc_se_at_top']:.3f})"
             )
         L.append("")
         cb = c["competitive_band"]

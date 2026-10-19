@@ -608,7 +608,8 @@ seats are forecast through fundamentals only.
   holdovers, with 80% interval.
 - `majority_probability` — `P(seat_count >= control_threshold)`.
 - `seats_to_majority_mean` — seats short of majority on average.
-- `tipping_point_races`, `pivotal_rates` — most pivotal contests for control.
+- `tipping_point_probability` (JSON, every race with a non-zero share) and `tipping_point_races` (top 3) give the true tipping point. In each draw, races are sorted by the party's margin and seats are added to the holdovers until the control threshold is reached; the race that crosses it is the tipping point. `tipping_point_none_probability` is the share of draws with no tipping race.
+- `decisive_probability` is the old "pivotal" metric (P a single race's flip changes control), renamed in audit P1-2.
 
 Forecast runs prefer promoted scenario residual covariance from
 `artifacts/backtests/latest/`. If no promoted covariance exists yet, the run uses the

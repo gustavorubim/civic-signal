@@ -825,6 +825,13 @@ class SimulationEngine:
                 party=str(party),
                 threshold=threshold,
             )
+            tipping_point = self._tipping_point_probabilities(
+                joined=joined,
+                control_body=str(control_body),
+                party=str(party),
+                holdover_seats=holdover_seats,
+                threshold=threshold,
+            )
             caucus_races = [
                 race
                 for race, target in self.independent_caucus_races.items()
@@ -864,10 +871,22 @@ class SimulationEngine:
                     "majority_probability": float(np.mean(counts >= threshold)),
                     "control_probability": float(np.mean(counts >= threshold)),
                     "seats_to_majority_mean": seats_to_majority,
+                    # Audit P1-2: true tipping point (538-style). The old "pivotal" metric
+                    # (a single race flip changes control) is kept as decisive_probability.
                     "tipping_point_races": json.dumps(
-                        [item["race_id"] for item in tipping[:3]], sort_keys=True
+                        [item["race_id"] for item in tipping_point["races"][:3]]
                     ),
-                    "pivotal_rates": json.dumps(tipping[:3], sort_keys=True),
+                    "tipping_point_probability": json.dumps(tipping_point["races"]),
+                    "tipping_point_none_probability": tipping_point["none"],
+                    "decisive_probability": json.dumps(
+                        [
+                            {
+                                "race_id": item["race_id"],
+                                "decisive_probability": item["pivotal_rate"],
+                            }
+                            for item in tipping[:3]
+                        ]
+                    ),
                 }
             )
         return pl.DataFrame(rows)
@@ -906,6 +925,73 @@ class SimulationEngine:
             .item()
             or 0
         )
+
+    def _tipping_point_probabilities(
+        self,
+        joined: pl.DataFrame,
+        control_body: str,
+        party: str,
+        holdover_seats: int,
+        threshold: int,
+    ) -> dict[str, object]:
+        """Share of draws in which each race is the tipping point for ``party``.
+
+        Within a draw, races are sorted by ``party``'s margin (its share minus the best
+        other option's share; a race with no ``party`` option sorts last). Seats are added
+        to the holdovers in that order, and the race whose seats first reach ``threshold``
+        is the tipping point. When ``party`` wins control, that race is one it won; when it
+        loses, it is the race it would have needed. ``none`` is the share of draws where
+        holdovers alone reach the threshold or all races together cannot.
+        """
+        body = joined.filter(pl.col("control_body") == control_body)
+        empty = {"races": [], "none": 1.0}
+        if body.is_empty() or "vote_share" not in body.columns:
+            return empty
+        per_race = body.group_by(["race_id", "draw_id"]).agg(
+            pl.when(pl.col("party") == party)
+            .then(pl.col("vote_share"))
+            .otherwise(0.0)
+            .sum()
+            .alias("own"),
+            pl.when(pl.col("party") != party)
+            .then(pl.col("vote_share"))
+            .otherwise(None)
+            .max()
+            .fill_null(0.0)
+            .alias("other"),
+            pl.col("seats").max().fill_null(1).alias("seats"),
+            (pl.col("party") == party).any().alias("has_party"),
+        )
+        per_race = per_race.with_columns(
+            pl.when(pl.col("has_party"))
+            .then(pl.col("own") - pl.col("other"))
+            .otherwise(pl.lit(-2.0))
+            .alias("margin")
+        ).filter((pl.col("draw_id") >= 0) & (pl.col("draw_id") < self.draw_count))
+        races = sorted(per_race["race_id"].unique().to_list())
+        if not races:
+            return empty
+        index = {race: i for i, race in enumerate(races)}
+        margins = np.full((self.draw_count, len(races)), -3.0)
+        seats = np.ones(len(races))
+        race_idx = np.array([index[r] for r in per_race["race_id"].to_list()], dtype=np.int64)
+        margins[per_race["draw_id"].to_numpy().astype(np.int64), race_idx] = per_race[
+            "margin"
+        ].to_numpy()
+        seats[race_idx] = per_race["seats"].to_numpy().astype(np.float64)
+        order = np.argsort(-margins, axis=1, kind="stable")
+        cumulative = holdover_seats + np.cumsum(seats[order], axis=1)
+        reached = cumulative >= threshold
+        has_tip = reached.any(axis=1) & (holdover_seats < threshold)
+        first = np.argmax(reached, axis=1)
+        tipping_races = order[np.arange(self.draw_count), first][has_tip]
+        counts = np.bincount(tipping_races, minlength=len(races)) / self.draw_count
+        rows = [
+            {"race_id": races[i], "tipping_point_probability": round(float(counts[i]), 6)}
+            for i in np.flatnonzero(counts)
+        ]
+        rows.sort(key=lambda item: (-item["tipping_point_probability"], item["race_id"]))
+        return {"races": rows, "none": round(float(1.0 - has_tip.mean()), 6)}
 
     def _pivotal_races(
         self,
