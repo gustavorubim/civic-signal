@@ -69,6 +69,12 @@ class BayesianPollingModel(KalmanPollingModel):
         self.nonsampling_logit_floor = float(
             dict(bayesian_config.get("observation", {})).get("nonsampling_logit_floor", 0.02)
         )
+        # Audit P1-3: floor on each option's election-day share SD. National and regional
+        # errors are now drawn explicitly in the simulation, so this floor only has to
+        # cover race-specific nonsampling error. Defaults to the per-poll nonsampling error.
+        self.forecast_floor_sd = float(
+            state_space.get("race_forecast_floor_sd", self.min_nonsampling_error)
+        )
         self.parameterization = str(state_space.get("parameterization", "noncentered"))
         polling_config = dict(bayesian_config.get("polling", {}))
         # Recency weighting for the analytic backend (audit P0-1b): each poll's precision
@@ -388,7 +394,7 @@ class BayesianPollingModel(KalmanPollingModel):
             draw_shares = np.array([inv_logit(float(value)) for value in draw_logits])
             uncertainty = max(
                 float(draw_shares.std()),
-                self.min_nonsampling_error,
+                self.forecast_floor_sd,
             )
             trajectory_rows.append(
                 {
@@ -669,7 +675,7 @@ class BayesianPollingModel(KalmanPollingModel):
 
     def _forecast_logit_sd(self, posterior_sd_logit: float, mean_share: float) -> float:
         share = min(0.999999, max(0.000001, mean_share))
-        floor_logit_sd = self.min_nonsampling_error / max(share * (1.0 - share), 1e-6)
+        floor_logit_sd = self.forecast_floor_sd / max(share * (1.0 - share), 1e-6)
         return max(
             math.sqrt(max(posterior_sd_logit, 0.0) ** 2 + self.election_day_extra_sd**2),
             floor_logit_sd,

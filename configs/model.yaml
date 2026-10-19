@@ -69,6 +69,9 @@ bayesian:
     parameterization: noncentered
     initial_state_logit_sd: 0.5
     election_day_extra_sd: 0.025
+    # Audit P1-3: race-specific floor on each option's election-day share SD. Shared
+    # national/regional error is drawn in the simulation (see correlation below).
+    race_forecast_floor_sd: 0.02
     forecast_drift_sd_per_sqrt_day: 0.006
     poll_half_life_days: 7
     geography_effect_sd: 0.06
@@ -80,6 +83,11 @@ bayesian:
     prior_strength: 0.5
     structural_sd: 0.05
     fallback_sd_logit: 0.30
+    # Audit P1-3: cap on the prior SD in share points. The cross-validated SD comes from the
+    # synthetic panel (~12-14 pts per House seat). Real Senate results minus the state's
+    # presidential share, demeaned by year, have SD 6.7 pts (robust 3.9) in the MIT EDSL
+    # 2012-2020 files; 6 pts is a conservative race-level cap. TODO(verify) on real House data.
+    max_share_sd: 0.06
   senate:
     enabled: true
     class_effect_prior_sd: 0.01
@@ -157,19 +165,26 @@ uncertainty:
   tier_b_sigma: 0.075
   heavy_tail_df: 5
   turnout_sigma: 0.05
+  # Audit P1-3: posterior draws already include race-level error; add no extra local noise.
+  posterior_local_sigma_scale: 0.0
 correlation:
-  national_sigma: 0.015
+  # Audit P1-3: explicit national (2.5 pts of share = 5 pts of margin) and regional
+  # (1.5 pts) polling error, shared across races. See docs/error_model.md for sources.
+  national_sigma: 0.025
   # Floor on the learned national-factor sd (share scale): correlated national
   # polling misses of ~2pp are historically routine and cannot be estimated
   # away from a handful of cycles (or from synthetic panels).
   national_error_floor_sd: 0.02
-  region_sigma: 0.010
-  office_sigma: 0.008
+  region_sigma: 0.015
+  office_sigma: 0.0
   residual_covariance_shrinkage: 0.60
   residual_min_variance: 0.0004
   residual_same_region_correlation: 0.35
   residual_cross_region_correlation: 0.12
-  residual_covariance_mode: residual_covariance_only
+  # national_regional: national + Census-region + office errors from the sigmas above; the
+  # covariance learned from synthetic panels is not used. residual_covariance_only (old
+  # default) zeroes the national error and uses only the learned covariance.
+  residual_covariance_mode: national_regional
   geographic_groups:
     # Census Bureau 4-region map. Unmapped geographies fall into their own per-state group.
     CT: northeast

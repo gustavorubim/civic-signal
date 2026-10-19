@@ -53,6 +53,11 @@ class SimulationEngine:
             "A": float(uncertainty.get("tier_a_sigma", 0.035)),
             "B": float(uncertainty.get("tier_b_sigma", 0.075)),
         }
+        # Audit P1-3: posterior draws already carry race-level nonsampling and
+        # election-day error, so extra local noise is scaled by this factor (0 = none).
+        self.posterior_local_sigma_scale = float(
+            uncertainty.get("posterior_local_sigma_scale", 1.0)
+        )
         self.heavy_tail_df = max(float(uncertainty.get("heavy_tail_df", 5)), 2.5)
         self.heavy_tail_scale = float(np.sqrt(self.heavy_tail_df / (self.heavy_tail_df - 2.0)))
         self.turnout_sigma = float(uncertainty.get("turnout_sigma", 0.05))
@@ -368,7 +373,7 @@ class SimulationEngine:
         )
 
     def _posterior_local_sigma(self, race: dict[str, object], estimate: dict[str, object]) -> float:
-        return self._race_sigma(race, estimate)
+        return self.posterior_local_sigma_scale * self._race_sigma(race, estimate)
 
     def _race_sigma(self, race: dict[str, object], estimate: dict[str, object]) -> float:
         tier_floor = self.tier_sigma.get(str(race["tier"]), 0.08)
@@ -384,8 +389,16 @@ class SimulationEngine:
             and self.residual_covariance_mode == "residual_covariance_only"
         )
 
+    def _uses_learned_covariance(self) -> bool:
+        """``national_regional`` mode ignores the covariance learned from synthetic panels."""
+        return (
+            self.residual_covariance is not None
+            and not self.residual_covariance.is_empty()
+            and self.residual_covariance_mode != "national_regional"
+        )
+
     def _systematic_error_mode(self) -> str:
-        if self.residual_covariance is None or self.residual_covariance.is_empty():
+        if not self._uses_learned_covariance():
             return "configured_national_region_office"
         return self.residual_covariance_mode
 
@@ -491,7 +504,7 @@ class SimulationEngine:
         self,
         catalog: dict[str, dict[str, object]],
     ) -> dict[str, np.ndarray]:
-        if self.residual_covariance is not None and not self.residual_covariance.is_empty():
+        if self._uses_learned_covariance():
             return self._covariance_systematic_errors(catalog)
         regions = sorted(
             {self._region_for_race(row) for row in catalog.values() if row.get("tier") != "C"}
