@@ -579,9 +579,10 @@ def _margin_state_space_model(
             legacy_obs = [index for index in legacy if int(data.poll_s[index]) in residual_set]
             if legacy_obs:
                 obs_idx = np.array(legacy_obs, dtype=np.int64)
-                mu = state_logit[jnp.asarray(data.poll_s[obs_idx])] + pollster_effect[
-                    jnp.asarray(data.poll_j[obs_idx])
-                ]
+                mu = (
+                    state_logit[jnp.asarray(data.poll_s[obs_idx])]
+                    + pollster_effect[jnp.asarray(data.poll_j[obs_idx])]
+                )
                 numpyro.sample(
                     "poll_logit_y",
                     dist.Normal(mu, jnp.asarray(data.poll_kappa[obs_idx])),

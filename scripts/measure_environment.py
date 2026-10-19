@@ -22,8 +22,7 @@ from statistics import median
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "fixtures" / "measured_environment.json"
 SOURCE_URL = (
-    "https://en.wikipedia.org/wiki/"
-    "2026_United_States_House_of_Representatives_elections?action=raw"
+    "https://en.wikipedia.org/wiki/2026_United_States_House_of_Representatives_elections?action=raw"
 )
 USER_AGENT = "civic-signal/0.1 (election forecasting research; +https://github.com/gustavorubim/civic-signal)"
 SECTION_PATTERN = re.compile(

@@ -343,9 +343,7 @@ class BayesianPollingModel(KalmanPollingModel):
         # Races on the reverse random walk already carry poll-to-election-day
         # drift inside the posterior; adding the analytic horizon term would
         # double-count that uncertainty.
-        walk_covered_races = (
-            set(data.margin_race_ids) if data.margin_poll_y.size else set()
-        )
+        walk_covered_races = set(data.margin_race_ids) if data.margin_poll_y.size else set()
         fitted_keys = set(data.race_option_keys)
         poll_counts = np.bincount(data.poll_s, minlength=len(data.race_option_keys))
         draw_rows: list[dict[str, object]] = []

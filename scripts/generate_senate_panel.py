@@ -467,13 +467,9 @@ def _generate_row(cycle: int, state: str) -> dict[str, object]:
     incumbent_advantage = 3.5 if incumbent_party in {"DEM", "REP"} else 0.0
 
     state_lean_pp = STATE_LEAN[state]
-    environment_pp = CYCLE_D_ENVIRONMENT[cycle]
-    candidate_quality_pp = (rng.random() - 0.5) * 5.0  # ±2.5pp
-
-    incumbent_pp = incumbent_advantage if incumbent_party == "DEM" else -incumbent_advantage
-    expected_d_share_pp = (
-        50.0 + state_lean_pp + environment_pp + candidate_quality_pp + incumbent_pp
-    )
+    # Historical rows use the recorded actual share below; this draw is kept only so the
+    # RNG stream (and therefore every generated fixture value) stays byte-identical.
+    rng.random()
     actual_d = _actual_d_share(cycle, state)
     actual_r = round(1.0 - actual_d, 4)
     actual_d = round(actual_d, 4)

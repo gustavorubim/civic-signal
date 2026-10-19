@@ -262,7 +262,12 @@ class FundamentalsModel:
         options = bundle.options.select(
             ["race_id", "option_id", "party", "incumbent", "previous_vote_share", "fundraising_usd"]
         )
-        fundamentals_columns = ["race_id", "partisan_lean", "economic_index", "demographic_turnout_index"]
+        fundamentals_columns = [
+            "race_id",
+            "partisan_lean",
+            "economic_index",
+            "demographic_turnout_index",
+        ]
         if "national_swing" in bundle.fundamentals.columns:
             fundamentals_columns.insert(3, "national_swing")
         fundamentals = bundle.fundamentals.select(fundamentals_columns)
