@@ -38,3 +38,9 @@ the design contract, update `SPEC.md` too.
   Numba/parallel kernels for repeated numerical loops when practical, and run
   `uv run civic-signal benchmark run --as-of 2026-05-08 --run-id perf` after
   substantial simulation or scoring changes.
+
+## Current Work Queue
+
+Active audit-fix work for the 2026 midterm forecast is specified in `CODEX_TASKS.md` (repo root),
+with evidence in `docs/audit-2026-10-19.md`. Coding agents should follow it task by task on branch
+`audit-fixes-2026-10` and must never push to `main`.
