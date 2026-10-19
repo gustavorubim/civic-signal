@@ -1,0 +1,43 @@
+Sources for the cycle == 2026 rows of fixtures/house_district_panel.csv
+Built by scripts/build_house_2026_panel.py (audit task P0-5). Rows for 2014-2024 are the
+synthetic backtest panel from scripts/generate_house_panel.py and carry synthetic=True.
+
+1. 2024 presidential result for each district on the 2026 maps
+   The Downballot, "2024 presidential results by congressional district" (2026 lines tab).
+   https://docs.google.com/spreadsheets/d/1eZfaFI-c-PFOoKx1-zZA2MP0_dxRq_LVK0re3BOQqy0 (gid 1491069057)
+   Free to use with attribution to The Downballot. Snapshot:
+   data/snapshots/sources/downballot_pres2024_by_cd_2026_maps.csv (sha256 in data/snapshots/sources/SHA256SUMS).
+   A district whose 2020 columns are blank was redrawn for 2026 (map_changed_2026=True, 173 seats).
+   Fields: pres_2024_dem_two_party, pres_2024_margin, partisan_lean, previous_*_vote_share.
+
+2. National 2024 two-party presidential share (0.4925 DEM)
+   MIT Election Data and Science Lab, "U.S. President 1976-2024", doi:10.7910/DVN/42MVDX (CC0).
+   partisan_lean = 100 * (district DEM two-party share - national DEM two-party share).
+   QA: within about 2 points of the Cook PVI in fixtures/ballot_2026_seats.csv for every seat.
+
+3. Seats, incumbents, open seats, nominees, Cook PVI
+   fixtures/ballot_2026_seats.csv and fixtures/ballot_2026_candidates.csv (Wikipedia 2026 House
+   elections article, CC BY-SA 4.0). QA reproduces the source incumbent-party counts
+   (REP 177, DEM 184, IND 1, open/none 73).
+   Cross-check: unitedstates/congress-legislators legislators-current.json (CC0):
+   433 voting members (218 R, 214 D, 1 I) at snapshot time.
+
+4. national_swing (share points)
+   (measured 2026 generic-ballot margin from fixtures/measured_environment.json
+    - 2024 national presidential two-party margin) / 2.
+   It is in share points because the fundamentals model adds it to a two-party share.
+
+Known gaps / proxies (TODO(verify))
+- previous_*_vote_share is the 2024 PRESIDENTIAL two-party share in the district, not the 2024
+  House result: MIT's "U.S. House 1976-2024" (doi:10.7910/DVN/IG0UN2) is behind a Dataverse
+  guestbook and could not be fetched non-interactively, and the 173 redrawn seats have no
+  comparable previous House result anyway.
+- Seats with several same-party candidates still listed (mostly Louisiana, pre-primary) take the
+  incumbent or the first listed name; nominee_note says "TODO(verify)".
+- California top-two same-party generals (DEM v DEM, CA-40 REP v REP) come from the ballot file;
+  re-check after certification.
+- Seats with no DEM/REP/IND opponent get a placeholder "No major-party opponent" (party OTH);
+  the major-party candidate's previous share is set to 1.0.
+- Fundraising, economic, demographic and turnout fields and the panel poll columns are carried
+  from the synthetic 2026 rows and are listed per row in synthetic_fields. The live configs
+  exclude the 2026 panel polls.

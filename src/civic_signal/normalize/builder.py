@@ -680,12 +680,14 @@ class CuratedDataBuilder:
         expressions: list[pl.Expr | str] = []
         for column in output_columns:
             if column == "party":
-                if party == "DEM" and "dem_party" in frame.columns:
-                    # Panel override for anti-REP independents with no Democratic nominee
-                    # (e.g. NE Osborn, SD Bengs, ID Achilles in 2026; audit P0-4).
+                override = {"DEM": "dem_party", "REP": "rep_party"}.get(party)
+                if override and override in frame.columns:
+                    # Panel party overrides: anti-REP independents with no Democratic
+                    # nominee (NE Osborn, SD Bengs, ID Achilles), same-party House races
+                    # (CA-40 R v R, CA top-two D v D) and IND/minor opponents (P0-4/P0-5).
                     expressions.append(
                         pl.coalesce(
-                            pl.col("dem_party").cast(pl.Utf8).str.strip_chars().replace("", None),
+                            pl.col(override).cast(pl.Utf8).str.strip_chars().replace("", None),
                             pl.lit(party),
                         ).alias(column)
                     )

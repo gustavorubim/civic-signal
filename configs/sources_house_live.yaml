@@ -32,8 +32,21 @@ sources:
       party_map_path: fixtures/candidates_2026_parties.csv
       require_nominees: true
       dedupe_versions: true
-      # Top-two general with two Republicans (Wikipedia 2026 House table, 2026-10-19).
-      same_party_races: [US-HOUSE-CA-40-2026]
+      # Same-party top-two generals (Wikipedia 2026 House table, 2026-10-19): CA-40 is
+      # R v R; the rest are D v D. Their seats are decided by party; polls are skipped.
+      same_party_races:
+        - US-HOUSE-CA-40-2026
+        - US-HOUSE-CA-04-2026
+        - US-HOUSE-CA-07-2026
+        - US-HOUSE-CA-11-2026
+        - US-HOUSE-CA-12-2026
+        - US-HOUSE-CA-14-2026
+        - US-HOUSE-CA-29-2026
+        - US-HOUSE-CA-34-2026
+        - US-HOUSE-CA-37-2026
+      # Incumbent Kevin Kiley is listed as an independent (Wikipedia 2026 House table).
+      race_parties:
+        US-HOUSE-CA-06-2026: [DEM, IND]
   - id: wikipedia_house_2026_race_presence
     table: public_signals
     type: http_text

@@ -205,7 +205,8 @@ def test_repo_uses_measured_environment() -> None:
     env = resolve_environment(ROOT / "fixtures")
     assert env["kind"] == "measured"
     rows = {row["state"]: row for row in _panel_2026()}
-    expected = round(env["generic_ballot_margin_d"] - 2.0, 4)
+    # share points: (measured - 1 pt Senate temper - 2020 House margin D+3.1) / 2
+    expected = round((env["generic_ballot_margin_d"] - 1.0 - 3.1) / 2.0, 4)
     assert float(rows["GA"]["national_swing"]) == expected
 
 

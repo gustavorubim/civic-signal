@@ -35,11 +35,14 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from civic_signal.features.environment import resolve_environment  # noqa: E402
 
-# Synthetic-panel conventions (scripts/generate_senate_panel.py): the Senate environment is
-# the generic-ballot margin tempered 1 pt for candidate effects, and national_swing is the
-# change versus the same class six years earlier (2020 convention: D+1.0).
+# national_swing is in points of two-party SHARE (= margin change / 2), the units the
+# fundamentals model applies it in. It is the change from the environment of the seat's
+# previous election (U.S. House national popular-vote margin that year, from the Wikipedia
+# "<year> United States House of Representatives elections" infoboxes: 2020 D+3.1,
+# 2022 R+2.7, 2024 R+2.6) to the measured 2026 generic-ballot margin, tempered 1 pt for
+# Senate candidate effects (same convention as scripts/generate_senate_panel.py).
 SENATE_TEMPER = 1.0
-ENVIRONMENT_2020 = 1.0
+HOUSE_POPULAR_VOTE_MARGIN_D = {"2020": 3.1, "2021": 3.1, "2022": -2.7, "2024": -2.6}
 
 STATE_NAMES = {
     "AK": "Alaska", "AL": "Alabama", "AR": "Arkansas", "CO": "Colorado", "DE": "Delaware",
@@ -237,8 +240,9 @@ def build_rows(
         old = old_2026.get(state)
         carried = {field: (old or {}).get(field) or medians[field] for field in CARRIED_FIELDS}
         if environment_margin_d is not None:
+            reference = HOUSE_POPULAR_VOTE_MARGIN_D[prev_label[:4]]
             carried["national_swing"] = str(
-                round(environment_margin_d - SENATE_TEMPER - ENVIRONMENT_2020, 4)
+                round((environment_margin_d - SENATE_TEMPER - reference) / 2.0, 4)
             )
         else:
             carried["national_swing"] = (old or {}).get("national_swing") or medians.get(
