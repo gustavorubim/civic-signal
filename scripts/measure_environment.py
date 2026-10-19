@@ -12,6 +12,8 @@ script before regenerating panels to pick up the latest polling.
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import re
 import urllib.request
@@ -32,10 +34,14 @@ SECTION_PATTERN = re.compile(
 MARGIN_PATTERN = re.compile(r"'''(Democrats|Republicans) \+([0-9.]+)%'''")
 
 
-def measure() -> dict[str, object]:
-    request = urllib.request.Request(SOURCE_URL, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        text = response.read().decode("utf-8", errors="replace")
+def measure(
+    text: str | None = None, measured_at: str | None = None, source: str = SOURCE_URL
+) -> dict[str, object]:
+    """Median generic-ballot margin. ``text`` lets a frozen wikitext snapshot be measured."""
+    if text is None:
+        request = urllib.request.Request(SOURCE_URL, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            text = response.read().decode("utf-8", errors="replace")
     section = SECTION_PATTERN.search(text)
     if section is None:
         raise RuntimeError("GenericBallotAgg section not found on the 2026 House page")
@@ -60,14 +66,23 @@ def measure() -> dict[str, object]:
         "generic_ballot_margin_d": measured,
         "aggregators": aggregators,
         "aggregator_count": len(aggregators),
-        "source": SOURCE_URL,
-        "measured_at": datetime.now(UTC).isoformat(),
+        "source": source,
+        "measured_at": measured_at or datetime.now(UTC).isoformat(),
+        "input_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         "method": "median_of_public_aggregators",
     }
 
 
-def main() -> None:
-    payload = measure()
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", help="frozen wikitext snapshot instead of a live fetch")
+    parser.add_argument("--measured-at", help="timestamp to record (snapshot fetch time)")
+    args = parser.parse_args(argv)
+    if args.input:
+        text = Path(args.input).read_text(encoding="utf-8")
+        payload = measure(text, args.measured_at, source=f"{SOURCE_URL} (snapshot {args.input})")
+    else:
+        payload = measure()
     OUTPUT.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(
         f"measured generic ballot: D+{payload['generic_ballot_margin_d']} "

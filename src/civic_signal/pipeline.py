@@ -18,6 +18,7 @@ from civic_signal.features import (
     filter_results_before_cycle,
     subset_bundle,
 )
+from civic_signal.features.environment import resolve_environment
 from civic_signal.inference.daily_update import run_daily_update
 from civic_signal.inference.fundamentals_prior import build_fundamentals_prior
 from civic_signal.ingest import SyncRunner
@@ -191,6 +192,9 @@ class ForecastPipeline:
             model_config,
             residual_covariance=residual_covariance,
             holdovers=scenario_obj.holdover_caucus_seats if scenario_obj else None,
+            independent_caucus=scenario_obj.payload.get("independent_caucus")
+            if scenario_obj
+            else None,
         ).run(bundle, ensemble, posterior_draws=posterior_draws)
         race_forecasts = self._attach_lineage(outputs.race_forecasts, model_config, source_manifest)
         race_catalog = self._attach_model_hash(bundle.race_catalog, model_config)
@@ -269,6 +273,10 @@ class ForecastPipeline:
                 out_dir / "posterior_diagnostics.json",
             )
         write_json(outputs.performance, out_dir / "performance.json")
+        # Audit P0-6: record the national environment the panels were built with.
+        write_json(
+            resolve_environment(self.context.root / "fixtures"), out_dir / "environment.json"
+        )
         write_parquet(
             source_manifest.with_columns(pl.lit("forecast_artifacts").alias("downstream_usage")),
             out_dir / "source_manifest.parquet",

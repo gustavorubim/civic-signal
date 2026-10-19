@@ -680,7 +680,17 @@ class CuratedDataBuilder:
         expressions: list[pl.Expr | str] = []
         for column in output_columns:
             if column == "party":
-                expressions.append(pl.lit(party).alias(column))
+                if party == "DEM" and "dem_party" in frame.columns:
+                    # Panel override for anti-REP independents with no Democratic nominee
+                    # (e.g. NE Osborn, SD Bengs, ID Achilles in 2026; audit P0-4).
+                    expressions.append(
+                        pl.coalesce(
+                            pl.col("dem_party").cast(pl.Utf8).str.strip_chars().replace("", None),
+                            pl.lit(party),
+                        ).alias(column)
+                    )
+                else:
+                    expressions.append(pl.lit(party).alias(column))
             elif column == "option_id":
                 source_column = column_map.get("option_id")
                 if source_column is None:

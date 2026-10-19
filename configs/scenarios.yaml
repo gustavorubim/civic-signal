@@ -405,13 +405,26 @@ scenarios:
     simulation_count: 20000
     senate_class: II
     # 2024 outcome carried forward: DEM 47, REP 53 (incl. IND caucusing). Class I + III
-    # senators who are NOT up in 2026 form holdovers.
+    # senators who are NOT up in 2026 form holdovers. The FL and OH Class III specials
+    # (Moody, Husted appointees) are modeled races, so REP holdovers are 31 (audit P0-4):
+    # 32 + 31 + 2 holdovers + 35 modeled seats = 100.
     holdovers:
       DEM: 32
-      REP: 33
+      REP: 31
       IND: 2
     caucus_with:
       IND: DEM
+    # Independents running with no Democrat on the ballot. Control is reported both ways
+    # (control_probability_with/without_independents). Headline = exclude: Osborn, Bengs and
+    # Achilles have each said they will not caucus with either party (Nebraska Examiner
+    # 2026-10-17; CNN 2026-09-05; joint statement reported by South Dakota Searchlight
+    # 2026-10-12). TODO(verify) after the election; "include" is the D-leaning upper bound.
+    independent_caucus:
+      headline: exclude
+      races:
+        US-SEN-NE-2026: DEM
+        US-SEN-SD-2026: DEM
+        US-SEN-ID-2026: DEM
 
   # ---------------- House district-level scenarios ----------------
   house_district:

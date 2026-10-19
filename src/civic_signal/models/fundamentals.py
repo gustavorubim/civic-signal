@@ -149,6 +149,19 @@ class FundamentalsModel:
         }
         return pl.DataFrame(rows, schema=schema) if rows else pl.DataFrame(schema=schema)
 
+    @staticmethod
+    def party_sign(party: str, race_parties: set[str]) -> float:
+        """+1 for the DEM-side option, -1 otherwise.
+
+        An independent in a race with no Democratic option (NE Osborn, SD Bengs, ID Achilles
+        in 2026) takes the DEM side of the partisan-lean features (audit P0-4).
+        """
+        if party in {"DEM", "YES"}:
+            return 1.0
+        if party == "IND" and not race_parties & {"DEM", "YES"}:
+            return 1.0
+        return -1.0
+
     def _raw_shares(
         self, options: pl.DataFrame, fundamental: dict[str, object]
     ) -> dict[str, float]:
@@ -158,10 +171,11 @@ class FundamentalsModel:
         demographic = float(fundamental.get("demographic_turnout_index") or 0.0)
         coef = self.coefficients
         shares: dict[str, float] = {}
+        parties = {str(row.get("party") or "") for row in options.iter_rows(named=True)}
         for row in options.iter_rows(named=True):
             base = float(row.get("previous_vote_share") or 0.5)
             party = str(row.get("party") or "")
-            sign = 1.0 if party in {"DEM", "YES"} else -1.0
+            sign = self.party_sign(party, parties)
             incumbent = 1.0 if bool(row.get("incumbent")) else 0.0
             finance = float(row.get("fundraising_usd") or 0.0)
             prediction = (
@@ -283,7 +297,13 @@ class FundamentalsModel:
         if "cycle" not in joined.columns:
             joined = joined.with_columns(pl.lit(None, dtype=pl.Int64).alias("cycle"))
         joined = joined.with_columns(
-            pl.when(pl.col("party").is_in(["DEM", "YES"]))
+            pl.when(
+                pl.col("party").is_in(["DEM", "YES"])
+                | (
+                    (pl.col("party") == "IND")
+                    & ~pl.col("party").is_in(["DEM", "YES"]).any().over("race_id")
+                )
+            )
             .then(1.0)
             .otherwise(-1.0)
             .alias("party_sign"),

@@ -31,8 +31,17 @@ class SimulationEngine:
         config: dict[str, object],
         residual_covariance: pl.DataFrame | None = None,
         holdovers: dict[str, int] | None = None,
+        independent_caucus: dict[str, object] | None = None,
     ) -> None:
         self.config = config
+        # Optional caucus assumption for independents in specific races (audit P0-4), e.g.
+        # {"races": {"US-SEN-NE-2026": "DEM"}, "headline": "exclude"}. Control is always
+        # reported both ways; ``headline`` picks which one fills ``control_probability``.
+        caucus = dict(independent_caucus or {})
+        self.independent_caucus_races = {
+            str(key): str(value).upper() for key, value in dict(caucus.get("races", {})).items()
+        }
+        self.independent_caucus_headline = str(caucus.get("headline", "exclude")).lower()
         self.residual_covariance = residual_covariance
         self.holdovers: dict[str, int] = {
             str(key).upper(): int(value) for key, value in (holdovers or {}).items()
@@ -803,9 +812,29 @@ class SimulationEngine:
                 party=str(party),
                 threshold=threshold,
             )
+            caucus_races = [
+                race
+                for race, target in self.independent_caucus_races.items()
+                if target == str(party).upper()
+            ]
+            counts_with = counts + self._independent_wins(winner_draws, caucus_races)
+            counts_without = counts
+            if caucus_races and self.independent_caucus_headline == "include":
+                counts = counts_with
             seats_to_majority = max(threshold - int(np.mean(counts)), 0)
             rows.append(
                 {
+                    "control_probability_with_independents": float(
+                        np.mean(counts_with >= threshold)
+                    ),
+                    "control_probability_without_independents": float(
+                        np.mean(counts_without >= threshold)
+                    ),
+                    "seat_count_mean_with_independents": float(np.mean(counts_with)),
+                    "independent_caucus_races": json.dumps(sorted(caucus_races)),
+                    "independent_caucus_headline": self.independent_caucus_headline
+                    if caucus_races
+                    else "none",
                     "control_body": control_body,
                     "party": party,
                     "control_threshold": threshold,
@@ -829,6 +858,20 @@ class SimulationEngine:
                 }
             )
         return pl.DataFrame(rows)
+
+    def _independent_wins(self, winner_draws: pl.DataFrame, races: list[str]) -> np.ndarray:
+        """Seats won by IND options in ``races``, per draw."""
+        wins = np.zeros(self.draw_count)
+        if not races:
+            return wins
+        ind = winner_draws.filter(pl.col("race_id").is_in(races) & (pl.col("party") == "IND"))
+        if ind.is_empty():
+            return wins
+        draw_ids = ind["draw_id"].to_numpy().astype(np.int64)
+        seats = ind["seats"].fill_null(1).to_numpy().astype(np.float64)
+        keep = (draw_ids >= 0) & (draw_ids < self.draw_count)
+        np.add.at(wins, draw_ids[keep], seats[keep])
+        return wins
 
     def _control_threshold(self, control_body: str, modeled_seats: int, party: str = "") -> int:
         threshold = self.control_thresholds.get(control_body, max(modeled_seats // 2 + 1, 1))
