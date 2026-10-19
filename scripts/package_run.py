@@ -97,6 +97,28 @@ def seat_distribution(seat_posterior: pl.DataFrame, party: str) -> dict[str, Any
     }
 
 
+def anti_rep_options(rf: pl.DataFrame) -> pl.DataFrame:
+    """One row per race: the DEM option, else IND (races where the Democrat withdrew,
+    e.g. NE Osborn), else another non-REP option. Races with no such option (CA-40,
+    REP v REP) are left out."""
+    rank = (
+        pl.when(pl.col("party") == "DEM")
+        .then(0)
+        .when(pl.col("party") == "IND")
+        .then(1)
+        .when(pl.col("party") != "REP")
+        .then(2)
+        .otherwise(None)
+    )
+    return (
+        rf.with_columns(rank.alias("_rank"))
+        .filter(pl.col("_rank").is_not_null() & pl.col("winner_probability").is_not_null())
+        .sort(["race_id", "_rank", "winner_probability"], descending=[False, False, True])
+        .unique("race_id", keep="first", maintain_order=True)
+        .drop("_rank")
+    )
+
+
 def tipping_rates(
     control_row: dict[str, Any],
     forecast_draws: pl.DataFrame | None = None,
@@ -400,9 +422,17 @@ def main() -> None:
         "control_probability",
     ]
     cf.select(csv_cols).write_csv(out / "control_summary.csv")
-    dem = rf.filter(pl.col("party") == "DEM").sort("winner_probability", descending=True)
+    dem = anti_rep_options(rf).sort("winner_probability", descending=True)
     dem.select(
-        ["race_id", "state", "winner_probability", "vote_share_mean", "tier", "top_drivers"]
+        [
+            "race_id",
+            "state",
+            "party",
+            "winner_probability",
+            "vote_share_mean",
+            "tier",
+            "top_drivers",
+        ]
     ).write_csv(out / "dem_race_probabilities.csv")
 
     # control block
@@ -462,6 +492,8 @@ def main() -> None:
             {
                 "race_id": r["race_id"],
                 "state": r["state"],
+                # anti-REP option: DEM, else IND (NE/ID/SD), else another non-REP party
+                "dem_option_party": r["party"],
                 "dem_win_prob": _r(r["winner_probability"], 4),
                 "rep_win_prob": _r(rep_map.get(r["race_id"]), 4),
                 "dem_win_prob_raw": _r(r.get("raw_winner_probability"), 4),

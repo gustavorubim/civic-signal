@@ -186,3 +186,16 @@ def test_race_table_uses_anti_rep_option() -> None:
     table = compare_runs.race_table({"rf": pl.DataFrame(rows), "polls": None}).sort("race_id")
     assert table["option_party"].to_list() == ["DEM", "DEM", "IND"]
     assert table["p"].to_list() == [0.95, 0.7, 0.4]
+
+
+def test_package_run_keeps_independent_races() -> None:
+    rf = pl.DataFrame(
+        {
+            "race_id": ["NE", "NE", "CA-40", "CA-40", "MI", "MI"],
+            "party": ["IND", "REP", "REP", "REP", "DEM", "REP"],
+            "winner_probability": [0.4, 0.6, 0.7, 0.3, 0.6, 0.4],
+        }
+    )
+    out = package_run.anti_rep_options(rf).sort("race_id")
+    assert out["race_id"].to_list() == ["MI", "NE"]
+    assert out["party"].to_list() == ["DEM", "IND"]
