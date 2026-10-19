@@ -273,6 +273,7 @@ class ForecastPipeline:
                 out_dir / "posterior_diagnostics.json",
             )
         write_json(outputs.performance, out_dir / "performance.json")
+        write_json(self._data_hashes(model_config, source_manifest), out_dir / "data_hashes.json")
         # Audit P0-6: record the national environment the panels were built with.
         write_json(
             resolve_environment(self.context.root / "fixtures"), out_dir / "environment.json"
@@ -1997,15 +1998,54 @@ class ForecastPipeline:
             pl.lit(ForecastPipeline._config_hash(model_config)).alias("model_config_hash")
         )
 
+    # Audit P1-8: keys injected into model_config from the data at run time. They are not
+    # configuration, so they stay out of model_config_hash and go to data_hashes.json.
+    DATA_DERIVED_CONFIG_KEYS = frozenset(
+        {"_fundamentals_prior_rows", "_learned_horizon_drift_sd_per_sqrt_day"}
+    )
+
     @staticmethod
     def _config_hash(model_config: dict[str, Any]) -> str:
-        stable_config = ForecastPipeline._stable_json_payload(model_config)
+        static = {
+            key: value
+            for key, value in model_config.items()
+            if key not in ForecastPipeline.DATA_DERIVED_CONFIG_KEYS
+        }
+        stable_config = ForecastPipeline._stable_json_payload(static)
         return hashlib.sha256(
             json.dumps(stable_config, sort_keys=True, default=str).encode()
         ).hexdigest()
 
     @staticmethod
+    def _data_hashes(model_config: dict[str, Any], source_manifest: pl.DataFrame) -> dict[str, Any]:
+        """Hashes of the data a run used, kept apart from model_config_hash (audit P1-8)."""
+        prior_rows = model_config.get("_fundamentals_prior_rows")
+        sources = {}
+        if not source_manifest.is_empty() and "content_hash" in source_manifest.columns:
+            for row in source_manifest.iter_rows(named=True):
+                sources[str(row["source_id"])] = {
+                    "sha256": row.get("content_hash"),
+                    "fetch_status": row.get("fetch_status"),
+                    "fetched_at": row.get("fetched_at"),
+                }
+        return {
+            "model_config_hash": ForecastPipeline._config_hash(model_config),
+            "source_manifest_hash": ForecastPipeline._source_manifest_hash(source_manifest),
+            "fundamentals_prior_sha256": hashlib.sha256(
+                json.dumps(prior_rows, sort_keys=True, default=str).encode()
+            ).hexdigest()
+            if prior_rows is not None
+            else None,
+            "learned_horizon_drift_sd_per_sqrt_day": model_config.get(
+                "_learned_horizon_drift_sd_per_sqrt_day"
+            ),
+            "sources": sources,
+        }
+
+    @staticmethod
     def _source_manifest_hash(source_manifest: pl.DataFrame) -> str:
+        if "content_hash" not in source_manifest.columns:
+            return hashlib.sha256(b"").hexdigest()
         source_hashes = ",".join(sorted(source_manifest["content_hash"].drop_nulls().to_list()))
         return hashlib.sha256(source_hashes.encode()).hexdigest()
 

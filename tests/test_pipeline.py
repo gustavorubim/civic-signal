@@ -662,6 +662,7 @@ def test_forecast_run_writes_required_artifacts_and_rewards(tmp_path: Path) -> N
         "environment.json",
         "recalibration_map.parquet",
         "reproducibility_fingerprint.json",
+        "data_hashes.json",
         "plots",
         "race_detail_index.json",
         "races",
