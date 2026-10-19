@@ -14,3 +14,6 @@ __pycache__/
 .env.local
 
 .claude/
+
+# Local forecast run artifacts (large; regenerate with the CLI). The audit lives in docs/.
+runs/
