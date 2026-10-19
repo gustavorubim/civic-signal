@@ -41,6 +41,8 @@ polling:
   pollster_house_effects: {}
 bayesian:
   enabled: true
+  # Default for runs without --bayesian-backend. The production live runs pass
+  # --bayesian-backend analytic; performance.json records bayesian_backend_used (audit P1-9).
   backend: nuts
   posterior_draw_count: 1000
   polling:

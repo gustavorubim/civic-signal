@@ -601,7 +601,8 @@ def test_simulation_outputs_forecasts_control_and_ecosystem(tmp_path: Path) -> N
     assert {"raw_winner_probability", "probability_calibration_status"}.issubset(
         outputs.race_forecasts.columns
     )
-    assert trusted["probability_calibration_status"].unique().to_list() == ["fitted"]
+    (label,) = trusted["probability_calibration_status"].unique().to_list()
+    assert label.endswith("_on_synthetic_backtest")  # honest label (audit P1-9)
     assert trusted["winner_probability"].round(8).unique().to_list() == [0.5]
     assert {"top_drivers", "component_contributions", "uncertainty_explanation"}.issubset(
         outputs.race_forecasts.columns
@@ -1811,7 +1812,8 @@ def test_presidential_scenario_writes_ec_plot_and_latest_backtest_artifacts(
     ).exists()
     assert (out_dir / "recalibration_map.parquet").exists()
     forecasts = pl.read_parquet(out_dir / "race_forecasts.parquet")
-    assert forecasts["probability_calibration_status"].drop_nulls().unique().to_list() == ["fitted"]
+    (label,) = forecasts["probability_calibration_status"].drop_nulls().unique().to_list()
+    assert label.endswith("_on_synthetic_backtest")  # honest label (audit P1-9)
     reward_card = json.loads((out_dir / "reward_card.json").read_text(encoding="utf-8"))
     assert reward_card["rewards"]["R14_calibrated_publication"]["passed"] is True
     verification = pipeline.verify_run("pres-scenario")

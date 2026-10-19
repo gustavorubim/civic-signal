@@ -7,6 +7,15 @@ from typing import Any, ClassVar
 import polars as pl
 
 
+def effective_bayesian_backend(model_config: dict) -> str:
+    """Backend actually used: the CLI override (``_bayesian_backend``) wins over
+    ``bayesian.backend`` in model.yaml (audit P1-9)."""
+    override = model_config.get("_bayesian_backend")
+    if override:
+        return str(override).lower()
+    return str(dict(model_config.get("bayesian", {})).get("backend", "")).lower()
+
+
 class SilverStyleBenchmark:
     """Compare the current engine with public Silver/FiveThirtyEight methodology traits."""
 
@@ -63,7 +72,7 @@ class SilverStyleBenchmark:
         bayes_nuts = (
             active_engine == "bayes"
             and bool(bayesian.get("enabled"))
-            and str(bayesian.get("backend")) == "nuts"
+            and effective_bayesian_backend(model_config) == "nuts"
         )
         trusted_polling = bool(trusted_components.get("polling"))
         trusted_validation = bool(backtest_payload.get("rolling_origin_executed")) and not (
@@ -359,7 +368,7 @@ class SilverStyleBenchmark:
             if (
                 active_engine == "bayes"
                 and bool(bayesian.get("enabled"))
-                and str(bayesian.get("backend")) == "nuts"
+                and effective_bayesian_backend(model_config) == "nuts"
             ):
                 return {
                     "tier": "production",

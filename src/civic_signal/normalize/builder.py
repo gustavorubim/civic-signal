@@ -925,6 +925,21 @@ class CuratedDataBuilder:
             (pl.col("vote_share") == pl.col("vote_share").max().over("race_id")).alias("winner")
         )
 
+    @staticmethod
+    def _synthetic_inputs_expr(base: pl.DataFrame) -> pl.Expr:
+        """Which fundamentals inputs are synthetic (audit P1-9): the row's ``synthetic_fields``
+        list, ``all`` for a fully synthetic row, empty for a fully cited row."""
+        if "synthetic_fields" in base.columns:
+            fields = pl.col("synthetic_fields").cast(pl.Utf8).fill_null("")
+        else:
+            fields = pl.lit("")
+        if "synthetic" in base.columns:
+            flag = pl.col("synthetic").cast(pl.Utf8).str.to_lowercase().is_in(["true", "1"])
+            return pl.when(flag).then(pl.lit("all")).otherwise(fields).alias("synthetic_inputs")
+        if "synthetic_fields" in base.columns:
+            return fields.alias("synthetic_inputs")
+        return pl.lit(None, dtype=pl.Utf8).alias("synthetic_inputs")
+
     def _senate_state_panel_fundamentals(
         self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
     ) -> pl.DataFrame:
@@ -956,6 +971,7 @@ class CuratedDataBuilder:
             "demographic_turnout_index",
             "historical_turnout_rate",
             "registered_voters",
+            self._synthetic_inputs_expr(base),
         )
 
     def _senate_state_panel_polls(
@@ -1188,6 +1204,7 @@ class CuratedDataBuilder:
             "demographic_turnout_index",
             "historical_turnout_rate",
             "registered_voters",
+            self._synthetic_inputs_expr(base),
         )
 
     def _house_district_panel_polls(

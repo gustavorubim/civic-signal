@@ -120,9 +120,16 @@ class SimulationEngine:
             "systematic_error_mode": self._systematic_error_mode(),
             "posterior_draws_used": self._posterior_draws_used,
             "posterior_draw_uncertainty_mode": self._posterior_draw_uncertainty_mode,
-            "probability_calibration_status": str(
+            "probability_calibration_status": self._calibration_label(),
+            "probability_calibration_fit_status": str(
                 self.probability_calibration.get("status", "not_configured")
             ),
+            "bayesian_backend_used": str(
+                self.config.get("_bayesian_backend")
+                or dict(self.config.get("bayesian", {})).get("backend", "")
+            )
+            if str(self.config.get("_inference_engine") or "") == "bayes"
+            else None,
             "close_margin_ecosystem_included": self.include_close_margin_ecosystem,
         }
 
@@ -723,9 +730,42 @@ class SimulationEngine:
             .otherwise(pl.lit("trusted_probability"))
             .alias("data_quality_flags"),
         )
+        # Audit P1-9: flag races whose fundamentals carry synthetic inputs.
+        synthetic = self._synthetic_fundamentals_races(bundle)
+        if synthetic:
+            forecast = forecast.with_columns(
+                pl.when(pl.col("race_id").is_in(sorted(synthetic)))
+                .then(
+                    pl.concat_str([pl.col("data_quality_flags"), pl.lit(";synthetic_fundamentals")])
+                )
+                .otherwise(pl.col("data_quality_flags"))
+                .alias("data_quality_flags")
+            )
         return self._apply_probability_calibration(
             self._attach_forecast_explainability(forecast, drivers)
         )
+
+    def _calibration_label(self) -> str:
+        """Honest calibration label (audit P1-9). The calibration is fit on the synthetic
+        backtest panels, so a 'fitted' map is labelled by its training basis, and a map
+        within 0.05 of slope 1 / intercept 0 is labelled identity."""
+        status = str(self.probability_calibration.get("status", "not_configured"))
+        if status != "fitted":
+            return status
+        basis = str(self.probability_calibration.get("training_basis", "synthetic_backtest"))
+        slope = float(self.probability_calibration.get("slope", 1.0))
+        intercept = float(self.probability_calibration.get("intercept", 0.0))
+        kind = "identity" if abs(slope - 1.0) < 0.05 and abs(intercept) < 0.05 else "fitted"
+        return f"{kind}_on_{basis}"
+
+    def _synthetic_fundamentals_races(self, bundle: FeatureBundle) -> set[str]:
+        fundamentals = getattr(bundle, "fundamentals", None)
+        if fundamentals is None or "synthetic_inputs" not in fundamentals.columns:
+            return set()
+        flagged = fundamentals.filter(
+            pl.col("synthetic_inputs").is_not_null() & (pl.col("synthetic_inputs") != "")
+        )
+        return {str(value) for value in flagged["race_id"].unique().to_list()}
 
     def _apply_probability_calibration(self, forecast: pl.DataFrame) -> pl.DataFrame:
         if forecast.is_empty() or "winner_probability" not in forecast.columns:
@@ -748,7 +788,7 @@ class SimulationEngine:
         return forecast.with_columns(
             pl.Series("raw_winner_probability", raw_values, dtype=pl.Float64),
             pl.Series("winner_probability", calibrated_values, dtype=pl.Float64),
-            pl.lit(status).alias("probability_calibration_status"),
+            pl.lit(self._calibration_label()).alias("probability_calibration_status"),
             pl.lit(method).alias("probability_calibration_method"),
         )
 
