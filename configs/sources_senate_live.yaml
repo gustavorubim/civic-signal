@@ -19,7 +19,7 @@ sources:
     table: polls
     type: http_json
     path: votehub_senate_polls_2026.json
-    parser_version: votehub-race-polls-v1
+    parser_version: votehub-race-polls-v2
     license: VoteHub Polling API data under CC BY 4.0; attribute VoteHub (https://votehub.com/polls/api/).
     auth_mode: public
     url: https://api.votehub.com/polls?poll_type=us-senator
@@ -29,6 +29,11 @@ sources:
       poll_type: us-senator
       parties: [DEM, REP]
       party_map_path: fixtures/candidates_2026_parties.csv
+      require_nominees: true
+      dedupe_versions: true
+      # Nebraska: no Democratic nominee; independent Dan Osborn is the anti-REP option.
+      race_parties:
+        US-SEN-NE-2026: [IND, REP]
   - id: wikipedia_senate_2026_race_presence
     table: public_signals
     type: http_text

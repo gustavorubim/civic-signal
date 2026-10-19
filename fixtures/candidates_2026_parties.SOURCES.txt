@@ -1,72 +1,66 @@
-Party affiliations for fixtures/candidates_2026_parties.csv were derived from:
-- Wikipedia CC BY-SA pages for 2026 U.S. Senate/House elections (candidate party labels)
-- VoteHub primary-subject labels (CC BY 4.0) when a candidate appears under a
-  Democratic/Republican primary subject
-- Wikipedia article infobox/lead party fields for remaining names
-- Generic Dem/Rep poll-choice labels mapped to DEM/REP
-Typos in VoteHub choice strings (e.g. Dan Sullvian, Thom Thillis) are aliased to the
-canonical public name when the identity is unambiguous.
-Unmapped VoteHub general-election names (skipped at ingest): 63
-- senate: Alani Bankhead (Montana)
-- senate: Alexander Vindman (Florida)
-- senate: David Williams (Virginia)
-- senate: Derek Dooley (Georgia)
-- senate: Don Brown (North Carolina)
-- senate: Douglas P. Marsh (Michigan)
-- senate: Dustin Darden (Alaska)
-- senate: Gerald Heikes (Alaska)
-- senate: Hallie Shoffner (Arkansas)
-- senate: Jeff Wadlin (Arkansas)
-- senate: Kim Farington (Virginia)
-- senate: Kyle Austin (Montana)
-- senate: Lydia Christensen (Michigan)
-- senate: Marisa Simonetti (Minnesota)
-- senate: Mark Moran (Virginia)
-- senate: Matt Loesby (Idaho)
-- senate: Michael Dublin (North Carolina)
-- senate: Rebecca Whiting (Minnesota)
-- senate: Shannon Bray (North Carolina)
-- senate: Ted Brown (Texas)
-- senate: Tom Jandron (Montana)
-- senate: Walter P. Kristy (Michigan)
-- house: Adam Ortiz (VT-01)
-- house: Alex Fornino (FL-27)
-- house: Alex Kelloff (CO-03)
-- house: Bill Hill (AK-01)
-- house: Blake Gendebien (NY-21)
-- house: Bob Harvie (PA-01)
-- house: Brennan Barrington (OH-15)
-- house: Brian Poindexter (OH-07)
-- house: Brinker Harding (NE-02)
-- house: Carlos De La Cruz (TX-35)
-- house: Casey Askar (FL-22)
-- house: Chris Backemeyer (NE-01)
-- house: Chris Getty (IL-04)
-- house: Chris Royal (TX-34)
-- house: Chris Schmidt (NY-21)
-- house: Christina Hines (MI-10)
-- house: Clay Strickland (AK-01)
-- house: Denise Powell (NE-02)
-- house: Eddie Espinoza (TX-34)
-- house: Eric Conroy (OH-01)
-- house: Eric Flores (TX-34)
-- house: Hector Mujica (FL-28)
-- house: Jenny Honeycutt (SC-01)
-- house: JoAnna Mendoza (AZ-06)
-- house: John Williams (AK-01)
-- house: Johnny Garcia (TX-35)
-- house: Jordan Wood (ME-02)
-- house: Leela Gray (FL-13)
-- house: Lupe Castillo (IL-04)
-- house: Marlón Durán (TX-28)
-- house: Matt Dunlap (ME-02)
-- house: Matt Maasdam (MI-07)
-- house: Matt Rains (MT-01)
-- house: Michael Bouchard (MI-10)
-- house: Michael Bridgford (IA-01)
-- house: Patty Garcia (IL-04)
-- house: Pia Dandiya (FL-22)
-- house: Rebecca Bennett (NJ-07)
-- house: Robin Peguero (FL-27)
-- house: Tano Tijerina (TX-28)
-- house: Tony D'Arrigo (FL-13)
+fixtures/candidates_2026_parties.csv: VoteHub choice name -> party + general-election status
+==============================================================================================
+
+License: derived from Wikipedia article text, CC BY-SA 4.0 (ShareAlike). This file and
+fixtures/ballot_2026_candidates.csv / fixtures/ballot_2026_seats.csv must stay under
+CC BY-SA 4.0 if redistributed. Repository code remains MIT.
+
+Columns: office, jurisdiction, name, party, status, source
+  party  : DEM | REP | IND | LIB | GRN | OTH (OTH = any other minor party label)
+  status : nominee        on the seat's general-election ballot as DEM/REP/IND
+           minor          on the general-election ballot for a minor party
+           not_on_ballot  appears in VoteHub polls / the previous map but is NOT listed on
+                          the seat's general-election ballot (primary loser, withdrawn, or
+                          hypothetical matchup). Party is the previous label, kept only
+                          for audit; the v2 parser drops polls that include such a
+                          candidate when require_nominees is on.
+  source : wikipedia-2026-summary-table | prior-map
+
+Primary source (2026-10-19 snapshot, fetched by the live configs' wikipedia_*_race_presence
+sources and saved under data/snapshots/2026-10-19/):
+  - https://en.wikipedia.org/wiki/2026_United_States_Senate_elections?action=raw
+    sha256 e9ec0978e5f951c1604b6025dfa0dfb8c09d0804eba1723f4e58c81e1b6cc6e5
+  - https://en.wikipedia.org/wiki/2026_United_States_House_of_Representatives_elections?action=raw
+    sha256 488506a99eda2950d4544b89bd079dfc61252a70911dfbde7b1a946098fc9eaf
+  The summary tables list each seat's general-election candidates with party labels and
+  cite state election offices (e.g. Michigan Dept. of State 2026 November General Election
+  Candidate Listing; Florida DOS Candidate Listing for 2026 General Election; Ohio SOS
+  statewide candidate list; Nebraska SOS 2026 Elections; Maine SOS).
+
+Rebuild:
+  uv run python scripts/parse_wikipedia_2026_ballots.py \
+      --senate-wikitext data/snapshots/<date>/wikipedia_2026_senate.wikitext \
+      --house-wikitext  data/snapshots/<date>/wikipedia_2026_house.wikitext
+  uv run python scripts/build_party_map.py --prior <previous candidates_2026_parties.csv>
+
+Corrections versus the previous map (audit P0-2), all from the Wikipedia ballot listing:
+  - Everett Wess (AL Senate): REP -> DEM
+  - Larry Marker (NM Senate): DEM -> REP
+  - Bob Brooks (PA-07): REP -> DEM
+  - Gerald Malloy (VT-01): DEM -> REP
+  - Tom Kean Jr. (NJ-07): DEM -> REP (VoteHub spelling aliased to "Thomas Kean Jr.")
+  - Joe Tache (MA): REP -> OTH (Party for Socialism and Liberation), minor
+  - Tim Long (MI): DEM -> OTH (U.S. Taxpayers), minor
+  - Michael Bahry (RI): REP -> IND; Raymond McKay (RI) REP confirmed
+  - John Deaton (MA): REP confirmed (nominee)
+  - Dan Osborn (NE): added as IND nominee; Pete Ricketts REP nominee
+  - Troy Jackson (ME): DEM nominee confirmed
+  - Nominees used by the filter: MI El-Sayed (D) / Rogers (R); NC Cooper / Whatley;
+    GA Ossoff / Collins; TX Talarico / Paxton (Cornyn lost the runoff); IA Turek / Hinson;
+    ME Jackson / Collins; NH Pappas / John E. Sununu; FL Nixon / Moody; OH Brown / Husted.
+  - CA-40: Ken Calvert (R) and Young Kim (R) both advanced to the general (top-two) ->
+    configured as a same-party race (P(D) = 0) in configs/sources_house_live.yaml.
+
+Seat-specific spelling aliases (same person; see scripts/build_party_map.py SEAT_ALIASES):
+  Dan Sullivan -> Dan S. Sullivan (AK; the ballot also lists a different Dan J. Sullivan),
+  John Sununu -> John E. Sununu, Bill Redpath -> William Redpath, Matt Dunlap -> Matthew
+  Dunlap, Michael Bouchard -> Mike Bouchard Jr., Stephany Shaheen -> Stefany Shaheen,
+  Ndidiamaka Okpareke -> Didi Okpareke, Kent S. Udell -> Kent Udell.
+
+TODO(verify):
+  - Matt Schultz (AK-01): not on the AK-01 general ballot (Begich R, Hafner D, Bill Hill I,
+    McDermott L), so his party no longer matters to the model; the prior label (REP) was
+    not independently verified.
+  - AK-01: VoteHub's Begich-vs-Bill Hill (I) polls omit Hafner (D) and are dropped as
+    missing the DEM side; whether Hill is the de-facto anti-Begich candidate is unverified.
+  - Wikipedia is a secondary source; spot-check close races against state election offices.

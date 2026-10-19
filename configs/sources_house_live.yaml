@@ -19,7 +19,7 @@ sources:
     table: polls
     type: http_json
     path: votehub_house_polls_2026.json
-    parser_version: votehub-race-polls-v1
+    parser_version: votehub-race-polls-v2
     license: VoteHub Polling API data under CC BY 4.0; attribute VoteHub (https://votehub.com/polls/api/).
     auth_mode: public
     url: https://api.votehub.com/polls?poll_type=us-representative
@@ -30,6 +30,10 @@ sources:
       parties: [DEM, REP]
       house_race_id_format: hyphenated
       party_map_path: fixtures/candidates_2026_parties.csv
+      require_nominees: true
+      dedupe_versions: true
+      # Top-two general with two Republicans (Wikipedia 2026 House table, 2026-10-19).
+      same_party_races: [US-HOUSE-CA-40-2026]
   - id: wikipedia_house_2026_race_presence
     table: public_signals
     type: http_text

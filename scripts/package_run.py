@@ -24,7 +24,6 @@ import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -69,7 +68,7 @@ def _r(x: float | None, nd: int = 4) -> float | None:
 
 
 def poll_stem(poll_id: str) -> str:
-    for suffix in ("-DEM", "-REP"):
+    for suffix in ("-DEM", "-REP", "-IND"):
         if poll_id.endswith(suffix):
             return poll_id[: -len(suffix)]
     return poll_id
@@ -135,75 +134,67 @@ def full_pivotal_rates(
     ]
 
 
-def classify_raw_votehub(
-    raw_path: Path, parser_args: dict[str, Any], curated_stems: set[str], modeled: set[str]
-) -> dict[str, Any]:
-    """Account for every raw VoteHub poll (used, primary, unresolved, unmapped, not modeled)."""
-    from civic_signal.normalize.builder import CuratedDataBuilder as B
+OUTCOME_CLASSES = {
+    "polls_used": "used",
+    "skipped_primary": "primary",
+    "skipped_unknown_race": "race_unresolved",
+    "dropped_unmapped": "unmapped_candidate",
+    "dropped_same_party": "same_party",
+    "dropped_missing_side": "missing_side",
+    "dropped_non_nominee": "non_nominee",
+    "dropped_duplicate": "duplicate",
+    "skipped_same_party_race": "same_party_race",
+}
 
-    office = str(parser_args.get("office", "")).lower()
-    fake = SimpleNamespace(
-        context=SimpleNamespace(root=ROOT), _votehub_normalize_name=B._votehub_normalize_name
-    )
-    party_map = B._load_votehub_party_map(fake, str(parser_args["party_map_path"]), office)
-    parties = [str(p).upper() for p in parser_args.get("parties", ["DEM", "REP"])]
+
+def classify_raw_votehub(
+    raw_path: Path,
+    parser_args: dict[str, Any],
+    curated_stems: set[str],
+    modeled: set[str],
+    parser_version: str = "votehub-race-polls-v2",
+) -> dict[str, Any]:
+    """Account for every raw VoteHub poll by re-running the production parser on it.
+
+    Classes: used, primary, race_unresolved, unmapped_candidate (v1 only), same_party,
+    missing_side, non_nominee, duplicate, same_party_race, parsed_not_modeled, other.
+    """
+    from civic_signal.normalize.builder import US_STATE_ABBREVIATIONS, US_STATE_LOOKUP
+    from civic_signal.normalize.votehub import parse_votehub_polls
+
     payload = json.loads(raw_path.read_text(encoding="utf-8"))
-    out: dict[str, list] = {
-        k: []
-        for k in (
-            "used",
-            "primary",
-            "race_unresolved",
-            "unmapped_candidate",
-            "parsed_not_modeled",
-            "other",
-        )
+    frame, accounting = parse_votehub_polls(
+        json.dumps(payload),
+        parser_args,
+        root=ROOT,
+        state_lookup=US_STATE_LOOKUP,
+        state_abbreviations=set(US_STATE_ABBREVIATIONS.values()),
+        parser_version=parser_version,
+    )
+    race_by_poll = {
+        poll_stem(str(pid)): str(race)
+        for pid, race in zip(frame["poll_id"], frame["race_id"], strict=True)
     }
-    unmapped_names: dict[str, int] = {}
-    for poll in payload:
-        pid = f"votehub-{poll.get('id')}"
-        subject = str(poll.get("subject") or "")
-        if str(poll.get("poll_type") or "") != parser_args.get("poll_type"):
-            out["other"].append(pid)
-            continue
-        if B._votehub_is_primary_subject(subject):
-            out["primary"].append(pid)
-            continue
-        race_id = B._votehub_race_id(
-            subject=subject,
-            seat_name=poll.get("seat_name"),
-            office=office,
-            cycle=int(parser_args.get("cycle", 2026)),
-            house_format=str(parser_args.get("house_race_id_format", "hyphenated")),
-        )
-        if race_id is None:
-            out["race_unresolved"].append(pid)
-            continue
-        missing = []
-        for a in poll.get("answers") or []:
-            ch = str((a or {}).get("choice") or "")
-            party = B._votehub_lookup_party(party_map, ch, subject)
-            if party is None or party not in parties:
-                missing.append(ch)
-        if missing:
-            out["unmapped_candidate"].append(pid)
-            for m in missing:
-                unmapped_names[m] = unmapped_names.get(m, 0) + 1
-            continue
-        if pid in curated_stems and race_id in modeled:
-            out["used"].append(pid)
-        elif race_id not in modeled:
-            out["parsed_not_modeled"].append(pid)
-        else:
-            out["other"].append(pid)
+    classes = ["used", *sorted(set(OUTCOME_CLASSES.values()) - {"used"})]
+    out: dict[str, list] = {k: [] for k in [*classes, "parsed_not_modeled", "other"]}
+    for pid, outcome in accounting.outcomes.items():
+        cls = OUTCOME_CLASSES.get(outcome, "other")
+        if cls == "used":
+            race = race_by_poll.get(pid)
+            if race is not None and race not in modeled:
+                cls = "parsed_not_modeled"
+            elif pid not in curated_stems:
+                cls = "other"
+        out[cls].append(pid)
+    unmapped = dict(accounting.unmapped_names.most_common())
     return {
         "raw_poll_count": len(payload),
+        "parser_version": parser_version,
         "counts": {k: len(v) for k, v in out.items()},
+        "parser_accounting": accounting.to_dict(),
         "ids": out,
-        "unmapped_candidate_name_count": len(unmapped_names),
-        "unmapped_candidate_names": dict(
-            sorted(unmapped_names.items(), key=lambda kv: (-kv[1], kv[0]))
-        ),
+        "unmapped_candidate_name_count": len(unmapped),
+        "unmapped_candidate_names": unmapped,
     }
 
 
@@ -392,7 +383,11 @@ def main() -> None:
     for row in vh.iter_rows(named=True):
         stems = set(p26["poll_stem"].to_list())
         raw_accounting[row["source_id"]] = classify_raw_votehub(
-            Path(row["raw_path"]), json.loads(row["parser_args"]), stems, modeled
+            Path(row["raw_path"]),
+            json.loads(row["parser_args"]),
+            stems,
+            modeled,
+            parser_version=str(row["parser_version"]),
         )
     poll_diag = {
         "poll_count": diag.get("poll_count"),

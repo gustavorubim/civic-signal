@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import json
 import re
 from dataclasses import dataclass
@@ -10,7 +9,8 @@ from typing import ClassVar
 import polars as pl
 
 from civic_signal.config import ProjectContext
-from civic_signal.storage.io import write_parquet
+from civic_signal.normalize.votehub import parse_votehub_polls
+from civic_signal.storage.io import write_json, write_parquet
 
 US_STATE_ABBREVIATIONS: dict[str, str] = {
     "ALABAMA": "AL",
@@ -189,6 +189,7 @@ class CuratedDataBuilder:
 
     def __init__(self, context: ProjectContext) -> None:
         self.context = context
+        self.parser_accounting: dict[str, dict[str, object]] = {}
 
     def run(self) -> CuratedBuildResult:
         manifest_path = self.context.raw_dir / "source_manifest.parquet"
@@ -217,6 +218,8 @@ class CuratedDataBuilder:
             pl.concat_str([pl.lit("curated:"), pl.col("table")]).alias("downstream_usage")
         )
         write_parquet(usage_manifest, self.context.curated_dir / "source_manifest.parquet")
+        if self.parser_accounting:
+            write_json(self.parser_accounting, self.context.curated_dir / "votehub_accounting.json")
         return CuratedBuildResult(tables)
 
     def _read_source(self, row: dict[str, object]) -> pl.DataFrame:
@@ -228,10 +231,12 @@ class CuratedDataBuilder:
                 Path(str(row["raw_path"])).read_text(encoding="utf-8"),
                 parser_args,
             )
-        elif parser_version == "votehub-race-polls-v1":
+        elif parser_version in {"votehub-race-polls-v1", "votehub-race-polls-v2"}:
             frame = self._normalize_votehub_race_polls(
                 Path(str(row["raw_path"])).read_text(encoding="utf-8"),
                 parser_args,
+                parser_version=parser_version,
+                source_id=str(row["source_id"]),
             )
         else:
             frame = pl.read_csv(
@@ -1520,261 +1525,30 @@ class CuratedDataBuilder:
         )
 
     def _normalize_votehub_race_polls(
-        self, raw_text: str, parser_args: dict[str, object] | None = None
-    ) -> pl.DataFrame:
-        args = parser_args or {}
-        required_args = {"cycle", "office", "poll_type", "parties", "party_map_path"}
-        missing_args = required_args.difference(args)
-        if missing_args:
-            raise ValueError(
-                f"votehub-race-polls-v1 parser_args missing required keys: {sorted(missing_args)}"
-            )
-        cycle = int(args["cycle"])
-        office = str(args["office"]).lower().strip()
-        poll_type = str(args["poll_type"]).strip()
-        parties = [str(party).upper() for party in list(args["parties"])]
-        if office not in {"senate", "house"}:
-            raise ValueError("votehub-race-polls-v1 parser_args.office must be senate or house")
-        if not parties:
-            raise ValueError("votehub-race-polls-v1 parser_args.parties must be non-empty")
-        try:
-            payload = json.loads(raw_text)
-        except json.JSONDecodeError as exc:
-            raise ValueError("votehub-race-polls-v1 raw payload is not valid JSON") from exc
-        if not isinstance(payload, list):
-            raise ValueError("votehub-race-polls-v1 expects a JSON array of poll objects")
-
-        party_map = self._load_votehub_party_map(str(args["party_map_path"]), office)
-        include_primaries = bool(args.get("include_primaries", False))
-        house_format = str(args.get("house_race_id_format", "hyphenated"))
-        rows: list[dict[str, object]] = []
-        for poll in payload:
-            if not isinstance(poll, dict):
-                continue
-            if str(poll.get("poll_type") or "").strip() != poll_type:
-                continue
-            subject = str(poll.get("subject") or "").strip()
-            if not subject:
-                continue
-            if not include_primaries and self._votehub_is_primary_subject(subject):
-                continue
-            race_id = self._votehub_race_id(
-                subject=subject,
-                seat_name=poll.get("seat_name"),
-                office=office,
-                cycle=cycle,
-                house_format=house_format,
-            )
-            if race_id is None:
-                continue
-            answers = poll.get("answers")
-            if not isinstance(answers, list) or not answers:
-                continue
-            party_pct: dict[str, float] = {}
-            unmapped = False
-            for answer in answers:
-                if not isinstance(answer, dict):
-                    unmapped = True
-                    break
-                choice = str(answer.get("choice") or "").strip()
-                pct_raw = answer.get("pct")
-                if choice == "" or pct_raw is None:
-                    unmapped = True
-                    break
-                party = self._votehub_lookup_party(party_map, choice, subject)
-                if party is None or party not in parties:
-                    unmapped = True
-                    break
-                try:
-                    pct = float(pct_raw)
-                except (TypeError, ValueError):
-                    unmapped = True
-                    break
-                party_pct[party] = party_pct.get(party, 0.0) + pct
-            if unmapped or not party_pct:
-                continue
-            # Require at least one requested party; drop polls that only map to one side
-            # when both DEM and REP were requested and only one is present (still usable),
-            # but skip empty. Keep single-party rows when present so head-to-head generics work.
-            poll_id_base = str(poll.get("id") or "").strip() or "unknown"
-            population = str(poll.get("population") or "a").strip().lower() or "a"
-            if population == "v":
-                population = "lv"
-            if poll.get("internal") is True:
-                sponsor_class = "internal"
-            elif poll.get("partisan") not in (None, "", False):
-                sponsor_class = "partisan"
-            else:
-                sponsor_class = "nonpartisan"
-            sample_size = poll.get("sample_size")
-            try:
-                sample_size_f = float(sample_size) if sample_size is not None else None
-            except (TypeError, ValueError):
-                sample_size_f = None
-            start_date = str(poll.get("start_date") or "").strip() or None
-            end_date = str(poll.get("end_date") or "").strip() or None
-            pollster = str(poll.get("pollster") or "unknown").strip() or "unknown"
-            for party, pct in sorted(party_pct.items()):
-                option_suffix = party[:1]
-                rows.append(
-                    {
-                        "poll_id": f"votehub-{poll_id_base}-{party}",
-                        "cycle": cycle,
-                        "office_type": office,
-                        "race_id": race_id,
-                        "pollster": pollster,
-                        "start_date": start_date,
-                        "end_date": end_date,
-                        "population": population,
-                        "sample_size": sample_size_f,
-                        "sponsor_class": sponsor_class,
-                        "methodology": "mixed",
-                        "option_id": f"{race_id}-{option_suffix}",
-                        "pct": pct,
-                    }
-                )
-        if not rows:
-            return pl.DataFrame(
-                schema={
-                    "poll_id": pl.Utf8,
-                    "cycle": pl.Int64,
-                    "office_type": pl.Utf8,
-                    "race_id": pl.Utf8,
-                    "pollster": pl.Utf8,
-                    "start_date": pl.Date,
-                    "end_date": pl.Date,
-                    "population": pl.Utf8,
-                    "sample_size": pl.Float64,
-                    "sponsor_class": pl.Utf8,
-                    "methodology": pl.Utf8,
-                    "option_id": pl.Utf8,
-                    "pct": pl.Float64,
-                }
-            )
-        frame = pl.DataFrame(rows).with_columns(
-            self._date_expr("start_date"),
-            self._date_expr("end_date"),
-        )
-        return (
-            frame.unique(subset=["poll_id", "race_id", "option_id"], keep="last", maintain_order=True)
-            .sort(["race_id", "option_id", "end_date", "poll_id"])
-        )
-
-    def _load_votehub_party_map(self, relative_path: str, office: str) -> dict[str, str]:
-        path = Path(relative_path)
-        if not path.is_absolute():
-            path = self.context.root / path
-        if not path.exists():
-            raise FileNotFoundError(f"votehub party map not found: {path}")
-        mapping: dict[str, str] = {}
-        with path.open(newline="", encoding="utf-8") as handle:
-            reader = csv.DictReader(handle)
-            required = {"name", "party"}
-            if reader.fieldnames is None or not required.issubset(set(reader.fieldnames)):
-                raise ValueError(
-                    "votehub party map must include at least name,party columns"
-                )
-            for row in reader:
-                name = str(row.get("name") or "").strip()
-                party = str(row.get("party") or "").strip().upper()
-                row_office = str(row.get("office") or "").strip().lower()
-                if not name or party not in {"DEM", "REP"}:
-                    continue
-                if row_office and row_office != office:
-                    # Allow cross-office reuse only when office column blank; otherwise filter.
-                    continue
-                key = self._votehub_normalize_name(name)
-                # Later rows for same name+office win only if party agrees; conflicts skip.
-                if key in mapping and mapping[key] != party:
-                    mapping.pop(key, None)
-                    mapping[f"__conflict__{key}"] = party
-                    continue
-                if f"__conflict__{key}" in mapping:
-                    continue
-                mapping[key] = party
-        # Always recognize generic party labels used as VoteHub choices.
-        mapping.setdefault("dem", "DEM")
-        mapping.setdefault("democrat", "DEM")
-        mapping.setdefault("democratic", "DEM")
-        mapping.setdefault("rep", "REP")
-        mapping.setdefault("republican", "REP")
-        mapping.setdefault("gop", "REP")
-        return mapping
-
-    @staticmethod
-    def _votehub_normalize_name(name: str) -> str:
-        text = re.sub(r"\s+", " ", str(name or "").strip().lower())
-        aliases = {
-            "dan sullvian": "dan sullivan",
-            "thom thillis": "thom tillis",
-            "janelle stetson": "janelle stelson",
-            "nick begich iii": "nick begich",
-        }
-        return aliases.get(text, text)
-
-    @classmethod
-    def _votehub_lookup_party(
-        cls, party_map: dict[str, str], choice: str, subject: str
-    ) -> str | None:
-        key = cls._votehub_normalize_name(choice)
-        if f"__conflict__{key}" in party_map:
-            return None
-        if key in party_map:
-            return party_map[key]
-        # Accent-insensitive fallback.
-        key_ascii = key.encode("ascii", "ignore").decode()
-        for map_key, party in party_map.items():
-            if map_key.startswith("__conflict__"):
-                continue
-            if map_key.encode("ascii", "ignore").decode() == key_ascii:
-                return party
-        return None
-
-    @staticmethod
-    def _votehub_is_primary_subject(subject: str) -> bool:
-        return bool(
-            re.search(r"(?i)\b(democratic|democrat|republican|gop)\b", subject or "")
-        )
-
-    @classmethod
-    def _votehub_race_id(
-        cls,
+        self,
+        raw_text: str,
+        parser_args: dict[str, object] | None = None,
         *,
-        subject: str,
-        seat_name: object,
-        office: str,
-        cycle: int,
-        house_format: str,
-    ) -> str | None:
-        text = re.sub(r"(?i)^20\d{2}\s+", "", str(subject or "").strip())
-        text = re.sub(r"(?i)\s*(democratic|democrat|republican|gop)\s*$", "", text).strip()
-        if office == "senate":
-            state = US_STATE_LOOKUP.get(text.upper())
-            if state is None:
-                # Accept already-abbreviated subjects like "GA".
-                state = US_STATE_LOOKUP.get(text.upper().replace(".", ""))
-            if state is None:
-                return None
-            return f"US-SEN-{state}-{cycle}"
-        # House: prefer seat_name like CA-22, else parse from subject.
-        seat = str(seat_name or "").strip().upper()
-        if not seat:
-            seat = text.upper()
-        match = re.fullmatch(r"([A-Z]{2})[-\s]?(\d{1,2})", seat.replace(" ", ""))
-        if not match:
-            # At-large / odd forms: try STATE-NN inside subject tokens.
-            match = re.search(r"\b([A-Z]{2})-(\d{1,2})\b", seat)
-        if not match:
-            return None
-        state, number = match.group(1), int(match.group(2))
-        if state not in US_STATE_ABBREVIATIONS.values():
-            return None
-        nn = f"{number:02d}"
-        if house_format == "hyphenated":
-            return f"US-HOUSE-{state}-{nn}-{cycle}"
-        if house_format != "compact":
-            raise ValueError("house_race_id_format must be compact or hyphenated")
-        return f"US-HOUSE-{state}{str(number)}-{cycle}"
+        parser_version: str = "votehub-race-polls-v2",
+        source_id: str = "votehub",
+    ) -> pl.DataFrame:
+        frame, accounting = parse_votehub_polls(
+            raw_text,
+            parser_args or {},
+            root=self.context.root,
+            state_lookup=US_STATE_LOOKUP,
+            state_abbreviations=set(US_STATE_ABBREVIATIONS.values()),
+            parser_version=parser_version,
+        )
+        self.parser_accounting[source_id] = {
+            "parser_version": parser_version,
+            **accounting.to_dict(),
+        }
+        if frame.is_empty():
+            return frame.with_columns(
+                pl.col("start_date").cast(pl.Date), pl.col("end_date").cast(pl.Date)
+            )
+        return frame.with_columns(self._date_expr("start_date"), self._date_expr("end_date"))
 
     @staticmethod
     def _normalize_wikipedia_race_presence(

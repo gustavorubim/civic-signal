@@ -17,3 +17,4 @@ __pycache__/
 
 # Local forecast run artifacts (large; regenerate with the CLI). The audit lives in docs/.
 runs/
+configs/frozen_*.yaml
