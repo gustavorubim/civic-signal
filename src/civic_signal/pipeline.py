@@ -60,6 +60,27 @@ class ForecastPipeline:
     def __init__(self, context: ProjectContext) -> None:
         self.context = context
 
+    @staticmethod
+    def _apply_scenario_simulation_count(
+        model_config: dict[str, Any], scenario_obj: Any
+    ) -> dict[str, Any]:
+        """Scenario-level ``simulation_count`` override (audit P1-1).
+
+        The Bayesian posterior draw count is raised with it so the simulation can use one
+        posterior draw per simulated election.
+        """
+        count = scenario_obj.payload.get("simulation_count") if scenario_obj else None
+        if not count:
+            return model_config
+        model_config = dict(model_config)
+        model_config["simulation_count"] = int(count)
+        bayesian = dict(model_config.get("bayesian", {}))
+        bayesian["posterior_draw_count"] = max(
+            int(bayesian.get("posterior_draw_count", 0) or 0), int(count)
+        )
+        model_config["bayesian"] = bayesian
+        return model_config
+
     def sync(self) -> pl.DataFrame:
         return SyncRunner(self.context).run().manifest
 
@@ -91,7 +112,9 @@ class ForecastPipeline:
         training_bundle = filter_bundle_by_date(
             filter_results_before_cycle(training_source, target_cycle), as_of
         )
-        model_config = self.context.read_yaml("model.yaml")
+        model_config = self._apply_scenario_simulation_count(
+            self.context.read_yaml("model.yaml"), scenario_obj
+        )
         backtest_artifacts = BacktestRunner(self.context)._evaluate(
             scenario_obj.family if scenario_obj else None,
             inference_engine="kalman",
@@ -2194,9 +2217,16 @@ class ForecastPipeline:
             if ignored:
                 frame = frame.drop(ignored)
             if frame.columns:
+                frame = frame.select(sorted(frame.columns))
                 frame = frame.sort(frame.columns)
-            rows = frame.to_dicts()
-            payload = json.dumps(rows, sort_keys=True, default=str)
+            # Streamed in chunks so 10k-draw House artifacts hash without materialising
+            # millions of Python dicts (audit P1-1 memory fix).
+            digest = hashlib.sha256()
+            digest.update(json.dumps(frame.columns).encode())
+            chunk = 250_000
+            for offset in range(0, frame.height, chunk):
+                digest.update(frame.slice(offset, chunk).write_csv(include_header=False).encode())
+            return digest.hexdigest()
         elif path.suffix == ".json":
             with path.open("r", encoding="utf-8") as handle:
                 payload_obj = json.load(handle)

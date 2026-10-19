@@ -401,6 +401,8 @@ scenarios:
     # only the fallback when as_of_policy is not "today" (fixtures/backtests).
     as_of_policy: today
     default_as_of: "2026-11-02"
+    # MC SE of a probability at 20k sims <= 0.0035 (audit P1-1).
+    simulation_count: 20000
     senate_class: II
     # 2024 outcome carried forward: DEM 47, REP 53 (incl. IND caucusing). Class I + III
     # senators who are NOT up in 2026 form holdovers.
@@ -487,6 +489,8 @@ scenarios:
     election_date: "2026-11-03"
     as_of_policy: today
     default_as_of: "2026-11-02"
+    # MC SE of a probability at 10k sims <= 0.005 (audit P1-1).
+    simulation_count: 10000
     redistricting_era: "2022_plus"
 
   # ---------------- Multi-office verification scenarios ----------------

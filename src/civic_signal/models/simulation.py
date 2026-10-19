@@ -7,6 +7,7 @@ import numpy as np
 import polars as pl
 
 from civic_signal.features import FeatureBundle
+from civic_signal.models.common import stable_hash
 from civic_signal.performance.kernels import (
     NUMBA_AVAILABLE,
     configure_numba_threads,
@@ -119,7 +120,6 @@ class SimulationEngine:
     ) -> pl.DataFrame:
         if ensemble.is_empty():
             return pl.DataFrame()
-        rng = np.random.default_rng(self.seed)
         catalog = {row["race_id"]: row for row in bundle.race_catalog.iter_rows(named=True)}
         options_by_race = {}
         for key, group in bundle.options.group_by("race_id", maintain_order=True):
@@ -138,14 +138,14 @@ class SimulationEngine:
         national_error = (
             np.zeros(self.draw_count)
             if self._uses_residual_covariance_only()
-            else rng.normal(0, self.national_sigma, self.draw_count)
+            else self._stream("national").normal(0, self.national_sigma, self.draw_count)
         )
         # Turnout has its own national shock; it is not a function of the
         # partisan vote-share error.
         turnout_multipliers = np.maximum(
-            1.0 + rng.normal(0, self.turnout_sigma, self.draw_count), 0.6
+            1.0 + self._stream("turnout").normal(0, self.turnout_sigma, self.draw_count), 0.6
         )
-        systematic_errors = self._systematic_errors(catalog, rng)
+        systematic_errors = self._systematic_errors(catalog)
         posterior_frame = self._posterior_draw_frame(
             bundle,
             ensemble,
@@ -155,7 +155,6 @@ class SimulationEngine:
             national_error=national_error,
             systematic_errors=systematic_errors,
             turnout_multipliers=turnout_multipliers,
-            rng=rng,
         )
         posterior_races = (
             set(posterior_frame["race_id"].unique().to_list())
@@ -181,9 +180,7 @@ class SimulationEngine:
                         "party_sign": first_sign,
                         "turnout_base": self._turnout_base(str(race_id), fundamentals),
                         "local_error": first_sign * systematic_errors[race_id]
-                        + rng.standard_t(df=self.heavy_tail_df, size=self.draw_count)
-                        * sigma
-                        / self.heavy_tail_scale,
+                        + self._local_noise(race_id, sigma),
                     }
                 )
                 continue
@@ -194,9 +191,7 @@ class SimulationEngine:
                     "estimate_rows": estimate_rows,
                     "turnout_base": self._turnout_base(str(race_id), fundamentals),
                     "systematic_error": systematic_errors[race_id],
-                    "local_error": rng.standard_t(df=self.heavy_tail_df, size=self.draw_count)
-                    * sigma
-                    / self.heavy_tail_scale,
+                    "local_error": self._local_noise(race_id, sigma),
                 }
             )
 
@@ -212,7 +207,7 @@ class SimulationEngine:
         if not binary_frame.is_empty():
             frames.append(binary_frame)
         multi_frame = self._multi_option_draw_frame(
-            multi_option_specs, national_error, turnout_multipliers, rng
+            multi_option_specs, national_error, turnout_multipliers
         )
         if not multi_frame.is_empty():
             frames.append(multi_frame)
@@ -229,7 +224,6 @@ class SimulationEngine:
         national_error: np.ndarray,
         systematic_errors: dict[str, np.ndarray],
         turnout_multipliers: np.ndarray,
-        rng: np.random.Generator,
     ) -> pl.DataFrame:
         required = {"draw_id", "race_id", "option_id", "latent_share"}
         if (
@@ -268,13 +262,7 @@ class SimulationEngine:
         frame = frame.with_columns(
             pl.max_horizontal(pl.col("latent_share"), pl.lit(1e-6)).alias("latent_share")
         )
-        frame = frame.with_columns(
-            (
-                pl.col("latent_share")
-                / pl.col("latent_share").sum().over(["simulation_draw_id", "race_id"])
-            ).alias("latent_share")
-        )
-        rows: list[dict[str, object]] = []
+        frames: list[pl.DataFrame] = []
         zeros = np.zeros(self.draw_count)
         for race_key, race_frame in frame.group_by("race_id", maintain_order=True):
             race_id = str(race_key[0] if isinstance(race_key, tuple) else race_key)
@@ -291,27 +279,19 @@ class SimulationEngine:
             )
             if not race_options:
                 continue
-            shares_by_option = {
-                str(option["option_id"]): np.zeros(self.draw_count, dtype=np.float64)
-                for option in race_options
-            }
-            for row in race_frame.iter_rows(named=True):
-                draw_id = int(row["simulation_draw_id"])
-                option_id = str(row["option_id"])
-                if option_id in shares_by_option and 0 <= draw_id < self.draw_count:
-                    shares_by_option[option_id][draw_id] = float(row["latent_share"])
-            base_shares = np.column_stack(
-                [shares_by_option[str(option["option_id"])] for option in race_options]
+            option_index = {str(option["option_id"]): i for i, option in enumerate(race_options)}
+            base_shares = np.zeros((self.draw_count, len(race_options)), dtype=np.float64)
+            draw_ids = race_frame["simulation_draw_id"].to_numpy().astype(np.int64)
+            opt_ids = np.array(
+                [option_index[str(value)] for value in race_frame["option_id"].to_list()],
+                dtype=np.int64,
             )
+            base_shares[draw_ids, opt_ids] = race_frame["latent_share"].to_numpy()
             row_sums = np.clip(base_shares.sum(axis=1), 1e-9, None)
             base_shares = base_shares / row_sums[:, None]
             first = estimate_rows.row(0, named=True)
-            sigma = self._race_sigma(catalog[race_id], first)
-            local_noise = (
-                rng.standard_t(df=self.heavy_tail_df, size=self.draw_count)
-                * sigma
-                / self.heavy_tail_scale
-            )
+            sigma = self._posterior_local_sigma(catalog[race_id], first)
+            local_noise = self._local_noise(race_id, sigma)
             shared_error = national_error + systematic_errors.get(race_id, zeros)
             option_signs = [self._party_sign(option.get("party")) for option in race_options]
             adjusted_shares = np.empty_like(base_shares)
@@ -324,31 +304,62 @@ class SimulationEngine:
                 adjusted_shares[:, 0] = first_share
                 adjusted_shares[:, 1] = 1.0 - first_share
             else:
-                total_error = shared_error + local_noise
-                for draw_id in range(self.draw_count):
-                    adjusted_shares[draw_id, :] = self._apply_multi_option_error(
-                        base_shares[draw_id, :].tolist(),
-                        float(total_error[draw_id]),
-                        option_signs,
-                    )
+                adjusted_shares = self._apply_multi_option_error_matrix(
+                    base_shares, shared_error + local_noise, option_signs
+                )
             winner_indices = np.argmax(adjusted_shares, axis=1)
             turnout_base = self._turnout_base(race_id, fundamentals)
-            turnouts = np.rint(turnout_base * turnout_multipliers).astype(int)
-            for draw_id in range(self.draw_count):
-                for option_index, option in enumerate(race_options):
-                    rows.append(
-                        {
-                            "draw_id": draw_id,
-                            "correlated_error_draw_id": draw_id,
-                            "race_id": race_id,
-                            "option_id": option["option_id"],
-                            "party": option["party"],
-                            "turnout": int(turnouts[draw_id]),
-                            "vote_share": float(adjusted_shares[draw_id, option_index]),
-                            "winner": option_index == int(winner_indices[draw_id]),
-                        }
-                    )
-        return pl.DataFrame(rows) if rows else pl.DataFrame()
+            turnouts = np.rint(turnout_base * turnout_multipliers).astype(np.int64)
+            frames.append(
+                self._draw_matrix_frame(
+                    race_id, race_options, adjusted_shares, winner_indices, turnouts
+                )
+            )
+        return pl.concat(frames, how="vertical") if frames else pl.DataFrame()
+
+    def _draw_matrix_frame(
+        self,
+        race_id: str,
+        race_options: list[dict[str, object]],
+        shares: np.ndarray,
+        winner_indices: np.ndarray,
+        turnouts: np.ndarray,
+    ) -> pl.DataFrame:
+        draws, k = shares.shape
+        draw_ids = np.repeat(np.arange(draws, dtype=np.int64), k)
+        option_positions = np.tile(np.arange(k, dtype=np.int64), draws)
+        return pl.DataFrame(
+            {
+                "draw_id": draw_ids,
+                "correlated_error_draw_id": draw_ids,
+                "race_id": [race_id] * (draws * k),
+                "option_id": [str(race_options[i]["option_id"]) for i in range(k)] * draws,
+                "party": [race_options[i]["party"] for i in range(k)] * draws,
+                "turnout": np.repeat(turnouts.astype(np.int64), k),
+                "vote_share": shares.reshape(-1).astype(np.float64),
+                "winner": option_positions == np.repeat(winner_indices, k),
+            }
+        )
+
+    def _stream(self, *keys: str) -> np.random.Generator:
+        """Named RNG stream from the config seed (audit P1-1): per-race draws are
+        independent of every other race's inputs, so a new poll in race A leaves
+        race B's draws byte-identical."""
+        return np.random.default_rng(
+            np.random.SeedSequence([self.seed, *(stable_hash(key) for key in keys)])
+        )
+
+    def _local_noise(self, race_id: str, sigma: float) -> np.ndarray:
+        if sigma <= 0.0:
+            return np.zeros(self.draw_count)
+        return (
+            self._stream("local", race_id).standard_t(df=self.heavy_tail_df, size=self.draw_count)
+            * sigma
+            / self.heavy_tail_scale
+        )
+
+    def _posterior_local_sigma(self, race: dict[str, object], estimate: dict[str, object]) -> float:
+        return self._race_sigma(race, estimate)
 
     def _race_sigma(self, race: dict[str, object], estimate: dict[str, object]) -> float:
         tier_floor = self.tier_sigma.get(str(race["tier"]), 0.08)
@@ -450,51 +461,29 @@ class SimulationEngine:
         specs: list[dict[str, object]],
         national_error: np.ndarray,
         turnout_multipliers: np.ndarray,
-        rng: np.random.Generator,
     ) -> pl.DataFrame:
-        rows: list[dict[str, object]] = []
+        frames: list[pl.DataFrame] = []
         for spec in specs:
             race_id = str(spec["race_id"])
-            options = spec["options"]
-            option_signs = [
-                self._party_sign(option.get("party")) for option in options.iter_rows(named=True)
-            ]
-            option_shares = self._multi_option_shares(spec["estimate_rows"], rng)
-            turnout_base = float(spec["turnout_base"])
-            systematic_error = spec["systematic_error"]
-            local_error = spec["local_error"]
-            for draw_id in range(self.draw_count):
-                shares = self._apply_multi_option_error(
-                    [float(series[draw_id]) for series in option_shares],
-                    float(
-                        national_error[draw_id] + systematic_error[draw_id] + local_error[draw_id]
-                    ),
-                    option_signs,
-                )
-                winner_index = int(np.argmax(shares))
-                turnout = round(turnout_base * turnout_multipliers[draw_id])
-                for index, option in enumerate(options.iter_rows(named=True)):
-                    rows.append(
-                        {
-                            "draw_id": draw_id,
-                            "correlated_error_draw_id": draw_id,
-                            "race_id": race_id,
-                            "option_id": option["option_id"],
-                            "party": option["party"],
-                            "turnout": turnout,
-                            "vote_share": shares[index],
-                            "winner": index == winner_index,
-                        }
-                    )
-        return pl.DataFrame(rows)
+            options = list(spec["options"].iter_rows(named=True))
+            option_signs = [self._party_sign(option.get("party")) for option in options]
+            option_shares = self._multi_option_shares(
+                spec["estimate_rows"], self._stream("dirichlet", race_id)
+            )
+            base = np.column_stack(option_shares)
+            error = national_error + spec["systematic_error"] + spec["local_error"]
+            shares = self._apply_multi_option_error_matrix(base, error, option_signs)
+            winners = np.argmax(shares, axis=1)
+            turnouts = np.rint(float(spec["turnout_base"]) * turnout_multipliers).astype(np.int64)
+            frames.append(self._draw_matrix_frame(race_id, options, shares, winners, turnouts))
+        return pl.concat(frames, how="vertical") if frames else pl.DataFrame()
 
     def _systematic_errors(
         self,
         catalog: dict[str, dict[str, object]],
-        rng: np.random.Generator,
     ) -> dict[str, np.ndarray]:
         if self.residual_covariance is not None and not self.residual_covariance.is_empty():
-            return self._covariance_systematic_errors(catalog, rng)
+            return self._covariance_systematic_errors(catalog)
         regions = sorted(
             {self._region_for_race(row) for row in catalog.values() if row.get("tier") != "C"}
         )
@@ -502,10 +491,12 @@ class SimulationEngine:
             {str(row.get("office_type")) for row in catalog.values() if row.get("tier") != "C"}
         )
         region_errors = {
-            region: rng.normal(0, self.region_sigma, self.draw_count) for region in regions
+            region: self._stream("region", region).normal(0, self.region_sigma, self.draw_count)
+            for region in regions
         }
         office_errors = {
-            office: rng.normal(0, self.office_sigma, self.draw_count) for office in offices
+            office: self._stream("office", office).normal(0, self.office_sigma, self.draw_count)
+            for office in offices
         }
         return {
             race_id: region_errors[self._region_for_race(row)]
@@ -517,7 +508,6 @@ class SimulationEngine:
     def _covariance_systematic_errors(
         self,
         catalog: dict[str, dict[str, object]],
-        rng: np.random.Generator,
     ) -> dict[str, np.ndarray]:
         active = {race_id: row for race_id, row in catalog.items() if row.get("tier") != "C"}
         groups = sorted({self._covariance_group_for_race(row) for row in active.values()})
@@ -537,9 +527,11 @@ class SimulationEngine:
                 )
         matrix = (matrix + matrix.T) / 2.0
         matrix += np.eye(len(groups)) * 1e-8
-        group_draws = rng.multivariate_normal(
-            mean=np.zeros(len(groups)), cov=matrix, size=self.draw_count
-        ).T
+        group_draws = (
+            self._stream("covariance")
+            .multivariate_normal(mean=np.zeros(len(groups)), cov=matrix, size=self.draw_count)
+            .T
+        )
         group_errors = {group: group_draws[index] for index, group in enumerate(groups)}
         if self.residual_covariance_mode == "residual_covariance_only":
             return {
@@ -547,10 +539,12 @@ class SimulationEngine:
                 for race_id, row in active.items()
             }
         region_errors = {
-            region: rng.normal(0, self.region_sigma, self.draw_count) for region in regions
+            region: self._stream("region", region).normal(0, self.region_sigma, self.draw_count)
+            for region in regions
         }
         office_errors = {
-            office: rng.normal(0, self.office_sigma, self.draw_count) for office in offices
+            office: self._stream("office", office).normal(0, self.office_sigma, self.draw_count)
+            for office in offices
         }
         return {
             race_id: group_errors[self._covariance_group_for_race(row)]
@@ -592,28 +586,26 @@ class SimulationEngine:
         return 0.0
 
     @staticmethod
-    def _apply_multi_option_error(
-        shares: list[float], error: float, signs: list[float] | None = None
-    ) -> list[float]:
-        """Shift shares by a party-signed logistic-normal perturbation.
+    def _apply_multi_option_error_matrix(
+        shares: np.ndarray, error: np.ndarray, signs: list[float]
+    ) -> np.ndarray:
+        """Shift shares by a party-signed logistic-normal perturbation, per draw (row).
 
         The shared error moves DEM-like options up and REP-like options down in
-        log-share space (or vice versa), so a national swing has a consistent
-        partisan direction. Unsigned options (independents) are unmoved by the
-        shared error and only renormalize.
+        log-share space, so a national swing has a consistent partisan direction.
+        Unsigned options (independents) are unmoved by the shared error and only
+        renormalize.
         """
-        if len(shares) <= 1:
-            return list(shares)
-        arr = np.clip(np.array(shares, dtype=np.float64), 1e-6, None)
-        if signs is None:
-            signs = [0.0] * len(shares)
-        sign_arr = np.array(signs[: len(shares)], dtype=np.float64)
-        log_shares = np.log(arr) + sign_arr * error
-        log_shares = log_shares - log_shares.max()
+        arr = np.clip(np.asarray(shares, dtype=np.float64), 1e-6, None)
+        if arr.shape[1] <= 1:
+            return arr
+        sign_arr = np.asarray(signs[: arr.shape[1]], dtype=np.float64)
+        log_shares = np.log(arr) + np.asarray(error, dtype=np.float64)[:, None] * sign_arr
+        log_shares = log_shares - log_shares.max(axis=1, keepdims=True)
         new_shares = np.exp(log_shares)
-        new_shares = new_shares / new_shares.sum()
+        new_shares = new_shares / new_shares.sum(axis=1, keepdims=True)
         new_shares = np.clip(new_shares, 0.02, 0.98)
-        return (new_shares / new_shares.sum()).tolist()
+        return new_shares / new_shares.sum(axis=1, keepdims=True)
 
     def _multi_option_shares(
         self,
@@ -874,19 +866,16 @@ class SimulationEngine:
         for race_id, group in body_party.group_by("race_id", maintain_order=True):
             race_key = str(race_id[0] if isinstance(race_id, tuple) else race_id)
             seat_count = int(group.select(pl.col("seats").max()).item() or 1)
-            wins = {
-                row["draw_id"]: bool(row["winner"])
-                for row in group.select(["draw_id", "winner"]).iter_rows(named=True)
-            }
-            pivotal = 0
-            for draw_id in range(self.draw_count):
-                party_won_race = wins.get(draw_id, False)
-                count = counts[draw_id]
-                if party_won_race and count >= threshold and count - seat_count < threshold:
-                    pivotal += 1
-                elif (not party_won_race) and count < threshold and count + seat_count >= threshold:
-                    pivotal += 1
-            rows.append({"race_id": race_key, "pivotal_rate": pivotal / self.draw_count})
+            won = np.zeros(self.draw_count, dtype=bool)
+            draw_ids = group["draw_id"].to_numpy().astype(np.int64)
+            in_range = (draw_ids >= 0) & (draw_ids < self.draw_count)
+            won[draw_ids[in_range]] = group["winner"].to_numpy().astype(bool)[in_range]
+            pivotal_mask = (won & (counts >= threshold) & (counts - seat_count < threshold)) | (
+                ~won & (counts < threshold) & (counts + seat_count >= threshold)
+            )
+            rows.append(
+                {"race_id": race_key, "pivotal_rate": float(pivotal_mask.sum()) / self.draw_count}
+            )
         return sorted(rows, key=lambda item: item["pivotal_rate"], reverse=True)
 
     def _ecosystem_forecasts(self, bundle: FeatureBundle, draws: pl.DataFrame) -> pl.DataFrame:

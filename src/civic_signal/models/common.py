@@ -47,3 +47,10 @@ def normalize_rows(rows: Iterable[dict[str, object]]) -> pl.DataFrame:
     if frame.is_empty():
         return empty_estimates("empty")
     return frame
+
+
+def stable_hash(text: str) -> int:
+    """Process-independent 32-bit hash of a string (for seeding per-key RNG streams)."""
+    import hashlib
+
+    return int(hashlib.sha256(str(text).encode("utf-8")).hexdigest()[:8], 16)

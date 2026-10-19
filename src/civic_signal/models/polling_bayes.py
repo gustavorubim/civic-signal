@@ -11,7 +11,13 @@ import polars as pl
 from civic_signal.features import FeatureBundle
 from civic_signal.inference.failover import FailoverPolicy
 from civic_signal.inference.state_space import _recency_weight
-from civic_signal.models.common import inv_logit, logit, normal_cdf, normalize_rows
+from civic_signal.models.common import (
+    inv_logit,
+    logit,
+    normal_cdf,
+    normalize_rows,
+    stable_hash,
+)
 from civic_signal.models.polling_kalman import (
     HouseEffectEstimate,
     KalmanPollingModel,
@@ -53,7 +59,8 @@ class BayesianPollingModel(KalmanPollingModel):
         self.posterior_draw_count = int(
             bayesian_config.get("posterior_draw_count", config.get("simulation_count", 1000))
         )
-        self.posterior_draw_count = max(min(self.posterior_draw_count, 5000), 100)
+        self.posterior_draw_count = max(min(self.posterior_draw_count, 50000), 100)
+        self.seed = int(config.get("seed", 20260508))
         self.initial_state_logit_sd = float(state_space.get("initial_state_logit_sd", 0.5))
         self.election_day_extra_sd = float(state_space.get("election_day_extra_sd", 0.025))
         self.forecast_drift_sd_per_sqrt_day = float(
@@ -142,11 +149,9 @@ class BayesianPollingModel(KalmanPollingModel):
         election_day_by_race = self._election_day_by_race(bundle.race_catalog)
         house_effects = self._estimate_house_effects(polls, option_priors)
         trajectory_rows: list[dict[str, object]] = []
-        draw_rows: list[dict[str, object]] = []
+        draw_rows: list[pl.DataFrame] = []
         fitted_keys: set[tuple[str, str]] = set()
 
-        seed = self._draw_seed(bundle, as_of)
-        rng = np.random.default_rng(seed)
         sort_columns = [
             column
             for column in ["race_id", "option_id", "_poll_end_date", "pollster", "poll_id"]
@@ -183,8 +188,8 @@ class BayesianPollingModel(KalmanPollingModel):
             horizon_sd = self._forecast_horizon_logit_sd(race_id, as_of, election_day_by_race)
             forecast_sd_logit = math.sqrt(forecast_sd_logit**2 + horizon_sd**2)
             posterior_sds.append(forecast_sd_logit)
+            rng = self._option_rng(race_id, option_id)
             latent_logits = rng.normal(mean_logit, forecast_sd_logit, self.posterior_draw_count)
-            latent_shares = np.array([inv_logit(float(value)) for value in latent_logits])
             trajectory_rows.extend(
                 self._trajectory_rows_for_option(
                     race_id=race_id,
@@ -199,28 +204,21 @@ class BayesianPollingModel(KalmanPollingModel):
             mean_house_effect = self._mean_or_zero(
                 [observation.house_effect for observation in observations]
             )
-            draw_rows.extend(
-                {
-                    "draw_id": draw_id,
-                    "chain_id": 0,
-                    "race_id": race_id,
-                    "option_id": option_id,
-                    "geography": geography,
-                    "trajectory_date": as_of,
-                    "latent_logit": float(latent_logit),
-                    "latent_share": float(latent_share),
-                    "systematic_error": float(latent_logit - mean_logit),
-                    "pollster_effect": mean_house_effect,
-                    "diagnostic_only": False,
-                }
-                for draw_id, (latent_logit, latent_share) in enumerate(
-                    zip(latent_logits, latent_shares, strict=True)
+            draw_rows.append(
+                self._draw_block(
+                    race_id=race_id,
+                    option_id=option_id,
+                    geography=geography,
+                    as_of=as_of,
+                    latent_logits=latent_logits,
+                    mean_logit=mean_logit,
+                    pollster_effect=mean_house_effect,
+                    diagnostic_only=False,
                 )
             )
 
         prior_only_count = self._append_prior_only_draws(
             bundle=bundle,
-            rng=rng,
             as_of=as_of,
             fitted_keys=fitted_keys,
             office_by_race=office_by_race,
@@ -436,19 +434,20 @@ class BayesianPollingModel(KalmanPollingModel):
                     }
                 )
 
-        rng = np.random.default_rng(self._draw_seed(bundle, as_of) + 1)
+        draw_frames: list[pl.DataFrame] = (
+            [pl.DataFrame(draw_rows, schema=self.POSTERIOR_SCHEMA)] if draw_rows else []
+        )
         prior_only_count = self._append_prior_only_draws(
             bundle=bundle,
-            rng=rng,
             as_of=as_of,
             fitted_keys=fitted_keys,
             office_by_race=office_by_race,
             geography_by_race=geography_by_race,
-            draw_rows=draw_rows,
+            draw_rows=draw_frames,
             posterior_sds=posterior_sds,
             election_day_by_race=election_day_by_race,
         )
-        self._cached_posterior_draws = self._posterior_frame(draw_rows, bundle.options)
+        self._cached_posterior_draws = self._posterior_frame(draw_frames, bundle.options)
         estimate_rows = self._estimate_rows_from_posterior(
             self._cached_posterior_draws,
             (
@@ -529,12 +528,11 @@ class BayesianPollingModel(KalmanPollingModel):
         self,
         *,
         bundle: FeatureBundle,
-        rng: np.random.Generator,
         as_of: date,
         fitted_keys: set[tuple[str, str]],
         office_by_race: dict[str, str],
         geography_by_race: dict[str, str],
-        draw_rows: list[dict[str, object]],
+        draw_rows: list[pl.DataFrame],
         posterior_sds: list[float],
         election_day_by_race: dict[str, date],
     ) -> int:
@@ -555,25 +553,18 @@ class BayesianPollingModel(KalmanPollingModel):
             horizon_sd = self._forecast_horizon_logit_sd(race_id, as_of, election_day_by_race)
             forecast_sd_logit = math.sqrt(sd_logit**2 + horizon_sd**2)
             posterior_sds.append(forecast_sd_logit)
+            rng = self._option_rng(race_id, option_id)
             latent_logits = rng.normal(mean_logit, forecast_sd_logit, self.posterior_draw_count)
-            latent_shares = np.array([inv_logit(float(value)) for value in latent_logits])
-            geography = geography_by_race.get(race_id, "")
-            draw_rows.extend(
-                {
-                    "draw_id": draw_id,
-                    "chain_id": 0,
-                    "race_id": race_id,
-                    "option_id": option_id,
-                    "geography": geography,
-                    "trajectory_date": as_of,
-                    "latent_logit": float(latent_logit),
-                    "latent_share": float(latent_share),
-                    "systematic_error": float(latent_logit - mean_logit),
-                    "pollster_effect": 0.0,
-                    "diagnostic_only": True,
-                }
-                for draw_id, (latent_logit, latent_share) in enumerate(
-                    zip(latent_logits, latent_shares, strict=True)
+            draw_rows.append(
+                self._draw_block(
+                    race_id=race_id,
+                    option_id=option_id,
+                    geography=geography_by_race.get(race_id, ""),
+                    as_of=as_of,
+                    latent_logits=latent_logits,
+                    mean_logit=mean_logit,
+                    pollster_effect=0.0,
+                    diagnostic_only=True,
                 )
             )
             prior_only_count += 1
@@ -766,8 +757,50 @@ class BayesianPollingModel(KalmanPollingModel):
         return rows
 
     def _draw_seed(self, bundle: FeatureBundle, as_of: date) -> int:
+        """Legacy data-dependent seed (kept for the NUTS path; analytic draws use streams)."""
         payload = f"{self._bundle_fingerprint(bundle)}:{as_of}:{self.posterior_draw_count}:bayes"
         return int(hashlib.sha256(payload.encode()).hexdigest()[:16], 16) % (2**32)
+
+    def _option_rng(self, race_id: str, option_id: str) -> np.random.Generator:
+        """Independent stream per (race, option) from the config seed only (audit P1-1).
+
+        Adding a poll to race A no longer changes race B's draws.
+        """
+        return np.random.default_rng(
+            np.random.SeedSequence(
+                [self.seed, stable_hash(race_id), stable_hash(option_id), stable_hash("bayes")]
+            )
+        )
+
+    def _draw_block(
+        self,
+        *,
+        race_id: str,
+        option_id: str,
+        geography: str,
+        as_of: date,
+        latent_logits: np.ndarray,
+        mean_logit: float,
+        pollster_effect: float,
+        diagnostic_only: bool,
+    ) -> pl.DataFrame:
+        count = len(latent_logits)
+        return pl.DataFrame(
+            {
+                "draw_id": np.arange(count, dtype=np.int64),
+                "chain_id": np.zeros(count, dtype=np.int64),
+                "race_id": [race_id] * count,
+                "option_id": [option_id] * count,
+                "geography": [geography] * count,
+                "trajectory_date": [as_of] * count,
+                "latent_logit": latent_logits.astype(np.float64),
+                "latent_share": 1.0 / (1.0 + np.exp(-latent_logits.astype(np.float64))),
+                "systematic_error": latent_logits.astype(np.float64) - mean_logit,
+                "pollster_effect": np.full(count, float(pollster_effect)),
+                "diagnostic_only": np.full(count, diagnostic_only),
+            },
+            schema=self.POSTERIOR_SCHEMA,
+        )
 
     def _selected_posterior_indices(
         self, sample_count: int, rng: np.random.Generator
@@ -799,10 +832,15 @@ class BayesianPollingModel(KalmanPollingModel):
         }
 
     @classmethod
-    def _posterior_frame(cls, rows: list[dict[str, object]], options: pl.DataFrame) -> pl.DataFrame:
+    def _posterior_frame(
+        cls, rows: list[pl.DataFrame] | list[dict[str, object]], options: pl.DataFrame
+    ) -> pl.DataFrame:
         if not rows:
             return cls._empty_posterior_draws()
-        frame = pl.DataFrame(rows, schema=cls.POSTERIOR_SCHEMA)
+        if isinstance(rows[0], pl.DataFrame):
+            frame = pl.concat(rows, how="vertical")
+        else:
+            frame = pl.DataFrame(rows, schema=cls.POSTERIOR_SCHEMA)
         if options.is_empty() or not {"race_id", "option_id"}.issubset(options.columns):
             return frame.sort(["race_id", "option_id", "draw_id"])
         option_counts = options.group_by("race_id").agg(
