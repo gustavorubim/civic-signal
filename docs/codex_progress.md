@@ -77,3 +77,12 @@ Phase-3 attribution (frozen 2026-10-19 payloads):
 | 4.7 (P2-7/9) | `2a83c82` | README: VoteHub live procedure, digest fields, synthetic-baseline caveat; the 538 path is marked DEPRECATED (README and `configs/sources_live.yaml`); `models/ecosystem.py` stub documented. |
 | 4.8 (P2-8) | `899656e` | License notes: Wikipedia-derived fixtures are CC BY-SA 4.0; VoteHub data is CC BY 4.0 (`tests/golden_fixtures/votehub_race_polls_sample.SOURCES.txt`); code is MIT. |
 | weekly routine | see `chore: weekly_run.sh` | `scripts/weekly_run.sh` runs the fixed weekly command set: no `--as-of`, `--prior`, `--run-kind`, optional `--allow-cached`. |
+
+## Phase 5
+- `runs/adhoc/after-fixes`: fixed code on the same frozen 2026-10-19 payloads. Senate DEM 0.314 → 0.501 (0.503 counting Osborn), seats 45/49/53 → 45/51/55. House DEM 0.831 → 0.717, seats 213/231.5/247 → 209/226/250.
+- `runs/adhoc/2026-10-19-postfix`: fresh fetch through `scripts/weekly_run.sh`. VoteHub returned identical payloads, so it reproduces after-fixes exactly (no movers). Compared against `runs/weekly/2026-10-19` and against after-fixes.
+- Full write-up: `docs/codex_fix_impact.md`.
+- Fixes found during Phase 5:
+  - compare_runs crashed on races present in only one run, and on NE/ID/SD, which have no DEM option. It now compares the anti-REP option and lists added/removed races (`b4c0add`).
+  - package_run dropped IND races from its race tables (`56cc0ae`).
+- New open issue: NE Osborn's prior uses the presidential share (0.374), not his 2024 Senate result, so P(Osborn) = 0.081 despite two near-tied polls. TODO.

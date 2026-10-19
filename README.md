@@ -722,6 +722,19 @@ uv run civic-signal forecast run --run-id house-2026-midterm-live \
   paginated: per https://votehub.com/polls/api/ it documents only filters, and
   `page`/`offset`/`limit` don't change the result (checked 2026-10-19).
 
+### Weekly routine
+
+```bash
+scripts/weekly_run.sh weekly 2026-10-26 runs/weekly/2026-10-19            # fresh fetch, strict
+scripts/weekly_run.sh weekly 2026-10-26 runs/weekly/2026-10-19 --allow-cached   # tolerate a failed fetch
+```
+
+Changes from the pre-audit routine: no `--as-of 2026-11-02` (the forecast date defaults to
+today); `package_run.py` takes `--run-kind` and `--prior` (not `--as-of`) and writes the
+top-level `summary.json`; a failed live fetch stops the run unless `--allow-cached` is passed.
+The script copies itself to `runs/<kind>/<date>/logs/commands.sh`. `OUT_DIR` and `RUN_TAG`
+override the output folder and data/artifact tag for ad hoc runs.
+
 ### Packaging, comparison and digest fields
 
 ```bash
