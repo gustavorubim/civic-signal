@@ -79,6 +79,11 @@ class KalmanPollingModel:
         self.house_effect_prior_polls = float(polling_config.get("house_effect_prior_polls", 5))
         self.house_effect_iterations = max(int(polling_config.get("house_effect_iterations", 2)), 1)
         self.max_house_effect = float(polling_config.get("max_house_effect", 0.08))
+        # Partisan-sponsor adjustment (audit P1-4): a sponsored poll's margin moves
+        # ``partisan_sponsor_shift`` against the sponsor (half from each side) and its
+        # effective sample size is multiplied by ``partisan_weight``.
+        self.partisan_sponsor_shift = float(polling_config.get("partisan_sponsor_shift", 0.0))
+        self.partisan_weight = float(polling_config.get("partisan_weight", 0.85))
         self.pollster_house_effects = {
             str(key): float(value)
             for key, value in dict(polling_config.get("pollster_house_effects", {})).items()
@@ -311,7 +316,8 @@ class KalmanPollingModel:
         option_id = str(row.get("option_id"))
         observed_share = clamp(float(row["pct"]) / 100.0, 0.001, 0.999)
         house_effect = self._house_effect_from_estimates(pollster, option_id, house_effects)
-        adjusted_share = clamp(observed_share - house_effect, 0.001, 0.999)
+        sponsor_adjustment = self._sponsor_adjustment(row)
+        adjusted_share = clamp(observed_share - house_effect - sponsor_adjustment, 0.001, 0.999)
         effective_sample_size = self._effective_sample_size(row)
         observation_variance = self._observation_variance(observed_share, effective_sample_size)
         return PollObservation(
@@ -490,11 +496,32 @@ class KalmanPollingModel:
             self.pollster_house_effects.get(pollster, 0.0),
         )
 
+    @staticmethod
+    def _option_side(option_id: str) -> float:
+        """+1 for DEM / anti-REP independent options (-D, -I), -1 for REP (-R), else 0."""
+        suffix = option_id.rsplit("-", 1)[-1].upper() if "-" in option_id else ""
+        return {"D": 1.0, "I": 1.0, "R": -1.0}.get(suffix, 0.0)
+
+    def _sponsor_adjustment(self, row: dict[str, object]) -> float:
+        """Share to subtract for a partisan sponsor: +shift/2 on the sponsor's side."""
+        sponsor = str(row.get("sponsor_party") or "").upper()
+        if not self.partisan_sponsor_shift or sponsor not in {"DEM", "REP"}:
+            return 0.0
+        sponsor_side = 1.0 if sponsor == "DEM" else -1.0
+        side = self._option_side(str(row.get("option_id") or ""))
+        return 0.5 * self.partisan_sponsor_shift * side * sponsor_side
+
     def _effective_sample_size(self, row: dict[str, object]) -> float:
         sample = max(float(row.get("sample_size") or self.default_sample_size), 1.0)
         population_weight = self.POPULATION_WEIGHTS.get(str(row.get("population")), 1.0)
         methodology_weight = self.METHODOLOGY_WEIGHTS.get(str(row.get("methodology")), 1.0)
-        sponsor_weight = 1.0 if str(row.get("sponsor_class")) == "nonpartisan" else 0.85
+        sponsor_class = str(row.get("sponsor_class"))
+        if sponsor_class == "nonpartisan":
+            sponsor_weight = 1.0
+        elif sponsor_class == "partisan" and row.get("sponsor_party"):
+            sponsor_weight = self.partisan_weight
+        else:
+            sponsor_weight = 0.85
         return max(sample * population_weight * methodology_weight * sponsor_weight, 1.0)
 
     def _observation_variance(self, share: float, effective_sample_size: float) -> float:

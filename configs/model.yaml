@@ -33,6 +33,10 @@ baseline:
 polling:
   half_life_days: 21
   min_nonsampling_error: 0.035
+  # Audit P1-4: DEM/REP-sponsored polls move 2 pts of margin against the sponsor and
+  # count with half the effective sample size (internal polls keep 0.85).
+  partisan_sponsor_shift: 0.02
+  partisan_weight: 0.5
   house_effect_iterations: 2
   pollster_house_effects: {}
 bayesian:
