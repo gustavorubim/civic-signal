@@ -53,7 +53,7 @@ from civic_signal.scoring import (
 from civic_signal.storage.io import read_json, write_json, write_parquet, write_text
 
 _FINGERPRINT_EXCLUDED_FIELDS = frozenset(
-    {"generated_at", "retrieved_at", "status", "elapsed_seconds", "fit_at"}
+    {"generated_at", "retrieved_at", "fetched_at", "status", "elapsed_seconds", "fit_at"}
 )
 
 

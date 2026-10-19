@@ -31,13 +31,21 @@ def _context(
     sources_config: str = "sources.yaml",
     data_dir: Path | None = None,
     artifacts_dir: Path | None = None,
+    allow_cached: bool | None = None,
 ) -> ProjectContext:
     return ProjectContext.create(
         root=root,
         sources_config=sources_config,
         data_dir=data_dir,
         artifacts_dir=artifacts_dir,
+        allow_cached=allow_cached,
     )
+
+
+ALLOW_CACHED_HELP = (
+    "Reuse the last raw snapshot when an HTTP source fails. Live source configs "
+    "(*live*.yaml) otherwise exit non-zero on a fetch failure."
+)
 
 
 def _parse_cycles(cycles: str) -> list[int]:
@@ -52,9 +60,15 @@ def sync(
     root: Path | None = typer.Option(None, help="Project root."),
     sources_config: str = typer.Option("sources.yaml", help="Source registry config file."),
     data_dir: Path | None = typer.Option(None, help="Data directory override."),
+    allow_cached: bool = typer.Option(False, "--allow-cached", help=ALLOW_CACHED_HELP),
 ) -> None:
     """Snapshot configured sources into the raw lake."""
-    context = _context(root=root, sources_config=sources_config, data_dir=data_dir)
+    context = _context(
+        root=root,
+        sources_config=sources_config,
+        data_dir=data_dir,
+        allow_cached=True if allow_cached else None,
+    )
     manifest = ForecastPipeline(context).sync()
     console.print(f"[green]Synced[/green] {manifest.height} sources into {context.raw_dir}")
 
@@ -87,6 +101,7 @@ def forecast_run(
     sources_config: str = typer.Option("sources.yaml", help="Source registry config file."),
     data_dir: Path | None = typer.Option(None, help="Data directory override."),
     artifacts_dir: Path | None = typer.Option(None, help="Artifacts directory override."),
+    allow_cached: bool = typer.Option(False, "--allow-cached", help=ALLOW_CACHED_HELP),
 ) -> None:
     """Refresh data and emit the full forecast artifact contract."""
     context = _context(
@@ -94,6 +109,7 @@ def forecast_run(
         sources_config=sources_config,
         data_dir=data_dir,
         artifacts_dir=artifacts_dir,
+        allow_cached=True if allow_cached else None,
     )
     out_dir = ForecastPipeline(context).run_forecast(
         as_of=as_of,

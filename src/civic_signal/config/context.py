@@ -16,6 +16,9 @@ class ProjectContext:
     sources_config: str
     data_dir: Path
     artifacts_dir: Path
+    # Audit P1-7: None = strict for live source configs (file name contains "live"):
+    # an HTTP fetch failure is fatal. True reuses the cached raw snapshot instead.
+    allow_cached: bool | None = None
 
     @classmethod
     def create(
@@ -25,6 +28,7 @@ class ProjectContext:
         sources_config: str = "sources.yaml",
         data_dir: str | Path | None = None,
         artifacts_dir: str | Path | None = None,
+        allow_cached: bool | None = None,
     ) -> ProjectContext:
         project_root = Path(root or Path.cwd()).resolve()
         resolved_config = Path(config_dir or project_root / "configs").resolve()
@@ -34,6 +38,7 @@ class ProjectContext:
             sources_config=sources_config,
             data_dir=Path(data_dir or project_root / "data").resolve(),
             artifacts_dir=Path(artifacts_dir or project_root / "artifacts").resolve(),
+            allow_cached=allow_cached,
         )
 
     def read_yaml(self, name: str) -> dict[str, Any]:

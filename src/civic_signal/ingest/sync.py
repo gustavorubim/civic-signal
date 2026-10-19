@@ -34,6 +34,10 @@ HTTP_ALLOWED_CONTENT_TYPES = (
 )
 
 
+class SourceFetchError(RuntimeError):
+    """A live HTTP source could not be fetched and cached data was not allowed."""
+
+
 @dataclass(frozen=True)
 class SyncResult:
     manifest: pl.DataFrame
@@ -53,9 +57,19 @@ def _sha256(path: Path) -> str:
 class SyncRunner:
     """Incremental local sync for source definitions."""
 
-    def __init__(self, context: ProjectContext, registry: SourceRegistry | None = None) -> None:
+    def __init__(
+        self,
+        context: ProjectContext,
+        registry: SourceRegistry | None = None,
+        allow_cached: bool | None = None,
+    ) -> None:
         self.context = context
         self.registry = registry or SourceRegistry.from_context(context)
+        if allow_cached is None:
+            allow_cached = getattr(context, "allow_cached", None)
+        if allow_cached is None:
+            allow_cached = "live" not in Path(str(context.sources_config)).name
+        self.allow_cached = bool(allow_cached)
 
     def run(self) -> SyncResult:
         self.context.raw_dir.mkdir(parents=True, exist_ok=True)
@@ -79,6 +93,8 @@ class SyncRunner:
                 fetched += int(did_fetch)
                 skipped += int(not did_fetch)
                 state[source.id] = str(row["content_hash"])
+            except SourceFetchError:
+                raise
             except Exception as exc:  # pragma: no cover - defensive manifest path
                 failed += 1
                 row = self._failure_row(source, retrieved_at, exc)
@@ -122,6 +138,8 @@ class SyncRunner:
                 "status": "fetched" if did_fetch else "unchanged",
                 "error": "",
                 "downstream_usage": "",
+                "fetch_status": "fixture",
+                "fetched_at": retrieved_at,
             },
             did_fetch,
         )
@@ -135,6 +153,11 @@ class SyncRunner:
         try:
             payload = self._http_get_with_retry(source.url)
         except Exception as exc:
+            if not self.allow_cached:
+                raise SourceFetchError(
+                    f"{source.id}: fetch failed and cached data is not allowed "
+                    f"(pass --allow-cached to reuse the last snapshot): {exc}"
+                ) from exc
             cached = self._cached_http_row(source, previous, retrieved_at, exc)
             if cached is not None:
                 return cached, False
@@ -161,6 +184,8 @@ class SyncRunner:
                 "status": "fetched" if did_fetch else "unchanged",
                 "error": "",
                 "downstream_usage": "",
+                "fetch_status": "fresh",
+                "fetched_at": retrieved_at,
             },
             did_fetch,
         )
@@ -179,6 +204,7 @@ class SyncRunner:
         if not raw_path.exists():
             return None
         manifest_path = self.context.raw_dir / "source_manifest.parquet"
+        fetched_at = ""
         if manifest_path.exists():
             manifest = pl.read_parquet(manifest_path)
             previous_rows = manifest.filter(pl.col("source_id") == source.id)
@@ -190,6 +216,9 @@ class SyncRunner:
                 or str(previous_row.get("parser_version") or "") != source.parser_version
             ):
                 return None
+            fetched_at = str(
+                previous_row.get("fetched_at") or previous_row.get("retrieved_at") or ""
+            )
         return {
             "source_id": source.id,
             "table": source.table,
@@ -204,6 +233,8 @@ class SyncRunner:
             "status": "stale_reused",
             "error": f"refresh failed; reused previous raw snapshot: {exc}",
             "downstream_usage": "",
+            "fetch_status": "cached",
+            "fetched_at": fetched_at,
         }
 
     @staticmethod
@@ -272,4 +303,6 @@ class SyncRunner:
             "status": "failed",
             "error": str(exc),
             "downstream_usage": "",
+            "fetch_status": "failed",
+            "fetched_at": "",
         }

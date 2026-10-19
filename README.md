@@ -692,6 +692,30 @@ uv run civic-signal forecast run \
   --artifacts-dir artifacts/house-2026
 ```
 
+### Live 2026 forecast (VoteHub polls, production path)
+
+```bash
+uv run civic-signal forecast run --run-id senate-2026-midterm-live \
+  --scenario senate_2026_state --sources-config sources_senate_live.yaml \
+  --data-dir data/senate-live-<tag> --artifacts-dir artifacts/senate-2026-live-<tag> \
+  --inference-engine bayes --bayesian-backend analytic
+uv run civic-signal forecast run --run-id house-2026-midterm-live \
+  --scenario house_2026_district --sources-config sources_house_live.yaml \
+  --data-dir data/house-live-<tag> --artifacts-dir artifacts/house-2026-live-<tag> \
+  --inference-engine bayes --bayesian-backend analytic
+```
+
+- `--as-of` defaults to today, capped at election eve (`as_of_policy: today`), so drop the
+  old hard-coded `--as-of 2026-11-02`.
+- **Fetch failures are fatal on live configs** (any `*live*.yaml`): if VoteHub or Wikipedia
+  can't be fetched, the run exits non-zero instead of silently reusing old raw files. Pass
+  `--allow-cached` to reuse the last snapshot on purpose. Each source row in
+  `source_manifest.parquet` records `fetch_status` (`fresh`, `cached`, `fixture`, `failed`)
+  and `fetched_at` (when the bytes actually used were downloaded).
+- The VoteHub `/polls` endpoint returns every matching poll in one JSON list. It is not
+  paginated: per https://votehub.com/polls/api/ it documents only filters, and
+  `page`/`offset`/`limit` don't change the result (checked 2026-10-19).
+
 ### Inspect The Midterm Outputs
 
 ```bash
