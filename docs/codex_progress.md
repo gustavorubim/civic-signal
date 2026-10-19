@@ -32,3 +32,22 @@ Every entry lists task ID, commit, what changed, tests, and open `TODO(verify)` 
   isolation is not meaningful there. NUTS is calibration-only.
 - Phase-1 attribution on frozen data (Senate DEM control): parser v2 0.314 → 0.309; + recency weighting → 0.218
   (1k sims); + 20k sims / new streams → 0.195. House: parser v2 0.831 → 0.874; with 1.5–1.7 → 0.895 (10k).
+
+## Phase 2
+| Task | Commit | Summary |
+|---|---|---|
+| 2.1–2.4 (P0-4, P0-5 Senate, P0-6) | `c2e3c96` | `scripts/build_senate_2026_panel.py` rebuilds only the 2026 Senate rows from cited data (Wikipedia 2026 seats/nominees/Cook PVI; MIT EDSL 2024 president + Senate 1976–2024, CC0). Sources: `fixtures/senate_2026_panel.SOURCES.txt`. FL and OH specials added; REP holdovers 33 → 31 (35 + 65 = 100, tested). WV incumbent is now REP; open seats have `incumbent_party=none`; history rows are `synthetic=True`. NE (Osborn), SD (Bengs) and ID (Achilles) are modeled as IND vs REP, since the Democratic nominee withdrew in each. Control is reported with and without independents (`control_probability_with/without_independents`). The headline excludes them because all three say they will caucus with neither party (cited; TODO(verify)). The environment override (D+2.5, Jul 9) is removed; the measured median is D+8.2 (5 aggregators, frozen 2026-10-19 Wikipedia snapshot). Every run writes `environment.json`. |
+| 2.5 (P1-4) | see `fix(P1-4)` | Sponsored polls (VoteHub `partisan`) move 2 pts of margin against the sponsor and count with half the effective n (`partisan_sponsor_shift: 0.02`, `partisan_weight: 0.5`). |
+
+Phase-2 attribution (frozen 2026-10-19 payloads; Senate 20k / House 10k sims):
+- After P1 (`a8b8ab0`): Senate DEM 0.195; House DEM 0.895.
+- + FL/OH, real rows, independents (environment still D+2.5): Senate DEM 0.333.
+- + measured environment D+8.2: Senate DEM 0.473 (0.495 counting the independents).
+- + sponsor adjustment: Senate DEM 0.471 (0.491); House DEM 0.889.
+- The House 2026 panel was still synthetic at this point; it is rebuilt in Phase 3. Its
+  baked `national_swing` 5.0 still reflects the old D+2.5 override.
+
+Open items:
+- Montana three-way race (Bodnar I) is modeled as D vs R. TODO.
+- Senate fundraising and economic/turnout indices for 2026 are carried-over synthetic values, flagged in `synthetic_fields`.
+- Commits `14ef1fd`, `f7dd086` and `6c2a602` predate the extra tests and sit below the 90% coverage gate (89.35% / 89.93% / 89.97%; the pre-work baseline was 89.35%). `14ef1fd` also still had 2 ruff errors in `builder.py`, fixed in `f7dd086`. Every commit from `a8b8ab0` onward passes the full gate.
