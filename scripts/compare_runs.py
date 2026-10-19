@@ -148,10 +148,27 @@ def seat_stats(sp: pl.DataFrame | None, party: str) -> dict[str, Any] | None:
 
 def race_table(r: dict[str, Any]) -> pl.DataFrame:
     rf = r["rf"]
-    dem = rf.filter(pl.col("party") == "DEM").select(
+    # The anti-REP option per race: DEM, else IND (e.g. NE Osborn), else any other non-REP.
+    rank = (
+        pl.when(pl.col("party") == "DEM")
+        .then(0)
+        .when(pl.col("party") == "IND")
+        .then(1)
+        .when(pl.col("party") != "REP")
+        .then(2)
+        .otherwise(None)
+    )
+    dem = (
+        rf.with_columns(rank.alias("_rank"))
+        .filter(pl.col("_rank").is_not_null() & pl.col("winner_probability").is_not_null())
+        .sort(["race_id", "_rank", "winner_probability"], descending=[False, False, True])
+        .unique("race_id", keep="first", maintain_order=True)
+    )
+    dem = dem.select(
         "race_id",
         "state",
         "tier",
+        pl.col("party").alias("option_party"),
         pl.col("winner_probability").alias("p"),
         pl.col("vote_share_mean").alias("vs"),
         pl.col("vote_share_p10").alias("vs_p10"),
@@ -443,6 +460,14 @@ def compare_chamber(
         how="full",
         coalesce=True,
     )
+    # Races present in only one run (e.g. special elections added later) are listed, not moved.
+    res["races_added"] = sorted(
+        j.filter(pl.col("p").is_not_null() & pl.col("p_old").is_null())["race_id"].to_list()
+    )
+    res["races_removed"] = sorted(
+        j.filter(pl.col("p").is_null() & pl.col("p_old").is_not_null())["race_id"].to_list()
+    )
+    j = j.filter(pl.col("p").is_not_null() & pl.col("p_old").is_not_null())
     j = j.with_columns(
         (pl.col("p") - pl.col("p_old")).alias("dp"), (pl.col("vs") - pl.col("vs_old")).alias("dvs")
     )
@@ -638,6 +663,12 @@ def compare_chamber(
         pchk["shared_shift_in_unpolled_races"] = shared_shift_significant
         res["posterior_resampling_check"] = pchk
     bz = bonferroni_z(j.height)
+    # Same raw VoteHub payload in both runs: "new" poll rows are parser/model changes, not new polls.
+    raw_ok = [v for v in raw_new.values() if "error" not in v]
+    same_raw = bool(raw_ok) and all(
+        v["added_raw_polls"] == 0 and v["removed_raw_polls"] == 0 for v in raw_ok
+    )
+    res["same_raw_payload"] = same_raw
     # ---- movers
     j = j.with_columns(pl.col("dp").abs().alias("adp")).sort(
         ["adp", "race_id"], descending=[True, False]
@@ -655,7 +686,11 @@ def compare_chamber(
         )
         z_dp = r["dp"] / sed_r if sed_r else 0.0
         pz = post_z.get(r["race_id"])
-        if new_p:
+        if new_p and same_raw:
+            driver = f"polls newly used by the model ({len(new_p)}; same raw payload, parser/model change)"
+            if abs(z_dp) <= 2:
+                driver += "; change still within 2 MC SE"
+        elif new_p:
             margins = [p["dem_minus_rep"] for p in new_p if p["dem_minus_rep"] is not None]
             driver = (
                 f"new polls ({len(new_p)}; mean D-R {np.mean(margins):+.1f})"
@@ -767,8 +802,9 @@ def compare_chamber(
                 if abs(r["dp"]) > bz * se_diff(r["p_old"], n_old, r["p"], n_new)
             )
         ),
-        "note": "Binomial MC SE sqrt(p(1-p)/n). The simulator seed is fixed in configs/model.yaml, but posterior-draw "
-        "seeds are derived from the data fingerprint, so draws differ whenever inputs change; treat SEs as approximate.",
+        "note": "Binomial MC SE sqrt(p(1-p)/n). Since audit P1-1 the analytic backend draws each race from its own "
+        "stream seeded by configs/model.yaml, so unchanged races repeat exactly; older runs seeded posterior draws "
+        "from the data fingerprint. Treat SEs as approximate.",
     }
     if noise_runs:
         res["seed_noise_check"] = noise_run_stats(ch, new, noise_runs)
@@ -880,6 +916,14 @@ def to_markdown(res: dict[str, Any]) -> str:
         L.append(
             f"- Chamber-wide shift: median Δ DEM vote share (races w/o new polls) {cs['median_dvs_races_without_new_polls']:+.4f}; mean Δ P(DEM) {cs['mean_dp_all_races']:+.4f}; mean |Δ P| {cs['mean_abs_dp_all_races']:.4f}"
         )
+        if c.get("races_added") or c.get("races_removed"):
+            L.append(
+                f"- Races only in the new run: {', '.join(c.get('races_added') or []) or 'none'}; "
+                f"only in the old run: {', '.join(c.get('races_removed') or []) or 'none'}"
+            )
+        L.append(
+            "- Race P is the anti-REP option: DEM, else IND (e.g. NE Osborn), else another non-REP party."
+        )
         L.append("")
         L += [
             f"### Top {len(c['top_movers'])} movers by |Δ DEM win prob|",
@@ -902,7 +946,14 @@ def to_markdown(res: dict[str, Any]) -> str:
         L.append("")
         for m in c["top_movers"]:
             if m["new_polls"] or m["removed_polls"] or m["revised_polls"]:
-                L.append(f"**{m['race_id']}** new polls since baseline:")
+                L.append(
+                    f"**{m['race_id']}** "
+                    + (
+                        "poll rows newly used (same raw payload):"
+                        if c.get("same_raw_payload")
+                        else "new polls since baseline:"
+                    )
+                )
                 for p in m["new_polls"]:
                     L.append(
                         f"- {p['pollster']} ({p['field_dates']}, n={p['sample_size']} {p['population']}, {p['sponsor_class']}): D {p['dem_pct']} / R {p['rep_pct']} → D{p['dem_minus_rep']:+.1f}"
@@ -917,7 +968,9 @@ def to_markdown(res: dict[str, Any]) -> str:
         allnew = inp.get("new_polls_by_race") or {}
         if allnew:
             L += [
-                "### All new polls since baseline (modeled races)",
+                "### All poll rows newly used (same raw payload; parser/model change)"
+                if c.get("same_raw_payload")
+                else "### All new polls since baseline (modeled races)",
                 "",
                 "| Race | Pollster | Field dates | n / pop | D | R | D−R |",
                 "|---|---|---|---|---:|---:|---:|",

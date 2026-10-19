@@ -157,3 +157,32 @@ def test_weekly_run_script_uses_fixed_pipeline() -> None:
     assert "--prior" in commands and "--run-kind" in commands
     assert "sources_${CH}_live.yaml" in commands
     assert "--bayesian-backend analytic" in commands
+
+
+def test_race_table_uses_anti_rep_option() -> None:
+    rows = []
+    for race, party, p in [
+        ("NE", "IND", 0.4),
+        ("NE", "REP", 0.6),
+        ("MI", "DEM", 0.7),
+        ("MI", "REP", 0.3),
+        ("MA", "DEM", 0.95),
+        ("MA", "OTH", 0.01),
+        ("MA", "REP", 0.04),
+    ]:
+        rows.append(
+            {
+                "race_id": race,
+                "state": race,
+                "tier": "A",
+                "party": party,
+                "winner_probability": p,
+                "vote_share_mean": p,
+                "vote_share_p10": p - 0.05,
+                "vote_share_p90": p + 0.05,
+                "incumbent": False,
+            }
+        )
+    table = compare_runs.race_table({"rf": pl.DataFrame(rows), "polls": None}).sort("race_id")
+    assert table["option_party"].to_list() == ["DEM", "DEM", "IND"]
+    assert table["p"].to_list() == [0.95, 0.7, 0.4]
