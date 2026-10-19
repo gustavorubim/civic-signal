@@ -1,0 +1,7 @@
+tests/golden_fixtures/votehub_race_polls_sample.json
+====================================================
+
+Source: VoteHub Polling API, https://api.votehub.com/polls (docs: https://votehub.com/polls/api/).
+License: Creative Commons Attribution 4.0 International (CC BY 4.0). Attribution: VoteHub.
+This is a small sample of VoteHub poll records, kept as a parser test fixture. If you
+redistribute it, keep this attribution. The repository code is MIT.

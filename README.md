@@ -1324,4 +1324,15 @@ Remaining live-adapter implementation order:
 
 ## License
 
-Civic Signal is released under the MIT License. See [`LICENSE`](LICENSE).
+Civic Signal's code is released under the MIT License. See [`LICENSE`](LICENSE).
+
+Data files carry their own licenses (audit P2-8):
+- `fixtures/candidates_2026_parties.csv`, `fixtures/ballot_2026_candidates.csv`,
+  `fixtures/ballot_2026_seats.csv`: derived from Wikipedia, **CC BY-SA 4.0 (ShareAlike)**.
+  See `fixtures/candidates_2026_parties.SOURCES.txt`.
+- VoteHub poll data (live configs, `tests/golden_fixtures/votehub_race_polls_sample.json`):
+  **CC BY 4.0**, attribute VoteHub (https://votehub.com/polls/api/).
+- MIT Election Data and Science Lab files used by the panel builders: CC0.
+  `unitedstates/congress-legislators`: CC0.
+- The Downballot 2024 presidential results by congressional district: free to use with
+  attribution. See `fixtures/house_2026_panel.SOURCES.txt`.
