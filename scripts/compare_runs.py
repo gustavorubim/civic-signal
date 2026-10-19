@@ -252,15 +252,31 @@ def posterior_shift(
         return None
 
     def agg(d: pl.DataFrame) -> pl.DataFrame:
+        # Audit P2-5: a race is polled if ANY option has poll-bearing draws, not only the
+        # "-D" option (which mislabelled AL and AK-01 and dropped IND-v-REP races like NE).
+        status = d.group_by("race_id").agg(
+            pl.col("diagnostic_only").fill_null(False).all().alias("prior_only")
+        )
+        side = d.with_columns(
+            pl.when(pl.col("option_id").str.ends_with("-D"))
+            .then(0)
+            .when(pl.col("option_id").str.ends_with("-I"))
+            .then(1)
+            .otherwise(2)
+            .alias("_rank")
+        )
+        best = side.group_by("race_id").agg(pl.col("_rank").min().alias("_best"))
+        side = side.join(best, on="race_id").filter(pl.col("_rank") == pl.col("_best"))
+        first = side.group_by("race_id").agg(pl.col("option_id").min().alias("_opt"))
+        side = side.join(first, on="race_id").filter(pl.col("option_id") == pl.col("_opt"))
         return (
-            d.filter(pl.col("option_id").str.ends_with("-D"))
-            .group_by("race_id")
+            side.group_by("race_id")
             .agg(
                 pl.col("latent_logit").mean().alias("m"),
                 pl.col("latent_logit").std().alias("s"),
                 pl.len().alias("n"),
-                pl.col("diagnostic_only").fill_null(False).all().alias("prior_only"),
             )
+            .join(status, on="race_id")
         )
 
     o, n = agg(old_pd), agg(new_pd)
@@ -487,7 +503,7 @@ def compare_chamber(
         inp["races_with_revised_polls"] = {k: len(v) for k, v in sorted(revised_by_race.items())}
         inp["unpolled_to_polled"] = sorted(polled_new - polled_old)
         inp["polled_to_unpolled"] = sorted(polled_old - polled_new)
-        # new polls parsed but not modeled (e.g., FL/OH senate)
+        # new polls parsed but not modeled (races outside the scenario's race catalog)
         so_all, sn_all = set(old["polls_all"]["poll_stem"]), set(new["polls_all"]["poll_stem"])
         unmod = new["polls_all"].filter(
             ~pl.col("race_id").is_in(list(set(rn["race_id"])))
@@ -627,7 +643,8 @@ def compare_chamber(
         ["adp", "race_id"], descending=[True, False]
     )
     movers = []
-    for r in j.head(TOP_N[ch]).iter_rows(named=True):
+    # Audit P2-5: only races that actually moved (|dP| > 0) can be movers.
+    for r in j.filter(pl.col("adp") > 0).head(TOP_N[ch]).iter_rows(named=True):
         sed_r = se_diff(r["p_old"], n_old, r["p"], n_new)
         vs_sd = (r["vs_p90"] - r["vs_p10"]) / 2.5631 if r.get("vs_p90") is not None else None
         vs_se_diff = math.sqrt(2) * vs_sd / math.sqrt(n_new) if vs_sd else None
@@ -694,6 +711,9 @@ def compare_chamber(
             }
         )
     res["top_movers"] = movers
+    res["significant_mover_count"] = sum(
+        1 for m in movers if m["z"] is not None and abs(m["z"]) > 2
+    )
     # ---- band / favourite
     lo, hi = BAND
     inb = lambda p: p is not None and lo <= p <= hi  # noqa: E731
@@ -864,6 +884,14 @@ def to_markdown(res: dict[str, Any]) -> str:
         L += [
             f"### Top {len(c['top_movers'])} movers by |Δ DEM win prob|",
             "",
+        ]
+        if not c.get("significant_mover_count"):
+            L += [
+                "No significant movers: no race moved by more than 2 MC SE"
+                + (" (no race moved at all)." if not c["top_movers"] else "."),
+                "",
+            ]
+        L += [
             "| Race | Old P | New P | Δ | z (vs MC SE) | Δ vote share | Posterior z | Status | Polls old→new | Driver |",
             "|---|---:|---:|---:|---:|---:|---:|---|---|---|",
         ]
@@ -989,7 +1017,7 @@ def dumbbell(res: dict[str, Any], path: Path) -> None:
     import matplotlib.pyplot as plt
 
     chambers = [ch for ch in ("senate", "house") if res.get(ch)]
-    heights = [len(res[ch]["top_movers"]) for ch in chambers]
+    heights = [max(len(res[ch]["top_movers"]), 1) for ch in chambers]
     fig, axes = plt.subplots(
         len(chambers),
         1,

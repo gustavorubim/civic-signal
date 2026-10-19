@@ -228,6 +228,101 @@ def classify_raw_votehub(
     }
 
 
+def source_fetch_status(manifest: pl.DataFrame) -> list[dict[str, Any]]:
+    """fetch_status / fetched_at per source (audit P1-7); older manifests lack them."""
+    rows = []
+    for r in manifest.iter_rows(named=True):
+        rows.append(
+            {
+                "source_id": r.get("source_id"),
+                "fetch_status": r.get("fetch_status") or r.get("status"),
+                "fetched_at": r.get("fetched_at") or r.get("retrieved_at"),
+                "sha256": r.get("content_hash"),
+            }
+        )
+    return rows
+
+
+def _chamber_headline(block: dict[str, Any]) -> dict[str, Any]:
+    dem = block["control"]["DEM"]
+    rep = block["control"].get("REP", {})
+    return {
+        "dem_control_prob": dem["control_probability"],
+        "dem_control_prob_with_independents": dem.get("control_probability_with_independents"),
+        "dem_seats_mean": dem["seat_count_mean"],
+        "p10": dem["seat_count_p10"],
+        "p50": dem["seat_count_p50"],
+        "p90": dem["seat_count_p90"],
+        "rep_control_prob": rep.get("control_probability"),
+        "rep_seats_mean": rep.get("seat_count_mean"),
+    }
+
+
+def _delta(old: float | None, new: float | None) -> dict[str, Any]:
+    d = None if old is None or new is None else round(new - old, 4)
+    return {"old": old, "new": new, "delta": d}
+
+
+def write_top_summary(
+    run_dir: Path, run_kind: str | None = None, prior: Path | None = None
+) -> Path:
+    """Top-level ``<run>/summary.json`` combining the chamber summaries (audit P2-5).
+
+    Same headline schema as the weekly digest; adds a week-over-week block when ``prior``
+    (an earlier packaged run folder) is given.
+    """
+    run_dir = Path(run_dir)
+    chambers = {}
+    for ch in ("senate", "house"):
+        path = run_dir / ch / "summary.json"
+        if path.exists():
+            chambers[ch] = json.loads(path.read_text())
+    if not chambers:
+        raise FileNotFoundError(f"no chamber summaries under {run_dir}")
+    any_block = next(iter(chambers.values()))
+    payload: dict[str, Any] = {
+        "digest_date": any_block.get("run_date"),
+        "as_of": any_block.get("as_of"),
+        "run_kind": run_kind or run_dir.parent.name,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "inference": {
+            "engine": any_block["inference"].get("engine"),
+            "backend": any_block["inference"].get("bayesian_backend"),
+            "sims": {ch: b["inference"].get("simulation_count") for ch, b in chambers.items()},
+            "as_of": any_block.get("as_of"),
+        },
+        "source_fetch_status": {ch: b.get("source_fetch_status", []) for ch, b in chambers.items()},
+    }
+    for ch, block in chambers.items():
+        payload[ch] = _chamber_headline(block)
+    if prior is not None:
+        wow: dict[str, Any] = {}
+        for ch in chambers:
+            prior_path = Path(prior) / ch / "summary.json"
+            if not prior_path.exists():
+                continue
+            old = _chamber_headline(json.loads(prior_path.read_text()))
+            new = payload[ch]
+            wow[ch] = {
+                "vs": Path(prior).name,
+                "dem_control_prob": _delta(old["dem_control_prob"], new["dem_control_prob"]),
+                "dem_seats": {
+                    k: _delta(old[key], new[key])
+                    for k, key in (
+                        ("mean", "dem_seats_mean"),
+                        ("p10", "p10"),
+                        ("p50", "p50"),
+                        ("p90", "p90"),
+                    )
+                },
+            }
+        payload["compared_against"] = str(prior)
+        payload["week_over_week"] = wow
+    out = run_dir / "summary.json"
+    out.write_text(json.dumps(payload, indent=2, default=str))
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -245,6 +340,15 @@ def main() -> None:
     ap.add_argument("--command-file", type=Path, default=None)
     ap.add_argument("--sources-config", default=None)
     ap.add_argument("--scenario", default=None)
+    ap.add_argument(
+        "--run-kind", default=None, help="weekly/adhoc; defaults to the parent folder name."
+    )
+    ap.add_argument(
+        "--prior",
+        type=Path,
+        default=None,
+        help="Previous packaged run folder for the week-over-week block of summary.json.",
+    )
     args = ap.parse_args()
 
     ch = args.chamber
@@ -316,6 +420,12 @@ def main() -> None:
             "control_threshold": row["control_threshold"],
             "modeled_seats": row["modeled_seats"],
             "holdover_seats": row["holdover_seats"],
+            "control_probability_with_independents": row.get(
+                "control_probability_with_independents"
+            ),
+            "control_probability_without_independents": row.get(
+                "control_probability_without_independents"
+            ),
             "tipping_point_races": json.loads(row["tipping_point_races"]),
             "tipping_point_probability": json.loads(row.get("tipping_point_probability") or "[]"),
             "decisive_probability": json.loads(
@@ -534,17 +644,17 @@ def main() -> None:
     }
     if ch == "senate":
         states = set(catalog["state"].to_list())
-        summary["class_ii_panel"] = {
-            "fl_oh_present": {"FL": "FL" in states, "OH": "OH" in states},
-            "missing_fl_oh": [s for s in ("FL", "OH") if s not in states],
+        summary["senate_panel"] = {
             "senate_state_count": len(states),
-            "note": (
-                "FL and OH special/Class III 2026 seats are absent from the senate_2026_state "
-                "race_catalog; their VoteHub polls parse but are not modeled."
+            "special_elections_modeled": sorted(
+                str(r) for r in catalog["race_id"].to_list() if "SPECIAL" in str(r).upper()
             ),
         }
+    summary["source_fetch_status"] = source_fetch_status(manifest)
     (out / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
     print(f"wrote {out / 'summary.json'}")
+    top = write_top_summary(args.out, run_kind=args.run_kind, prior=args.prior)
+    print(f"wrote {top}")
 
 
 if __name__ == "__main__":
