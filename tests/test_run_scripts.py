@@ -148,3 +148,12 @@ def test_scripts_have_no_hard_coded_election_eve_or_fl_oh_caveat() -> None:
         text = (ROOT / "scripts" / name).read_text()
         assert "2026-11-02" not in text
         assert "FL/OH" not in text and "FL and OH" not in text
+
+
+def test_weekly_run_script_uses_fixed_pipeline() -> None:
+    text = (ROOT / "scripts" / "weekly_run.sh").read_text()
+    commands = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    assert "--as-of" not in commands  # forecast date defaults to today
+    assert "--prior" in commands and "--run-kind" in commands
+    assert "sources_${CH}_live.yaml" in commands
+    assert "--bayesian-backend analytic" in commands

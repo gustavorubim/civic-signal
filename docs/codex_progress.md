@@ -64,3 +64,16 @@ Phase-3 attribution (frozen 2026-10-19 payloads):
 - p3b, swing in share units: Senate DEM 0.373 (0.391 with independents), mean 49.4; House DEM 0.887, mean 238.7 (216/238/261).
 - p3c, error structure: Senate DEM 0.455, mean 49.7 (45/50/54); House DEM 0.711, mean 227.3 (209/225/248).
 - p3d, tipping point: no change to probabilities (the metric only). Senate tipping top 3: IA 15.1%, TX 13.8%, ME 12.0%.
+
+## Phase 4
+| Task | Commit | Summary |
+|---|---|---|
+| 4.1 (P1-7) | `91cb8c9` | Live configs (filename contains `live`) raise `SourceFetchError` on a failed fetch unless `--allow-cached` is passed (`sync` and `forecast run`). The manifest records `fetch_status` (fixture/fresh/cached/failed) and `fetched_at`, which package_run copies into summary.json. VoteHub `/polls` is **not paginated**: the docs list only filters, and `page`/`offset`/`limit` leave the 479-poll result unchanged (checked 2026-10-19). |
+| 4.2 (P1-8) | `342897e` | `model_config_hash` ignores data-derived keys (`_fundamentals_prior_rows`, `_learned_horizon_drift_sd_per_sqrt_day`). Data hashes go to `data_hashes.json`. `fetched_at` is excluded from the reproducibility fingerprint. |
+| 4.3 (P1-9) | `595f9e5` | `probability_calibration_status` is `identity_on_synthetic_backtest` or `fitted_on_synthetic_backtest`. `performance.json` gets `bayesian_backend_used` and `probability_calibration_fit_status`. Races with synthetic fundamentals are flagged (`synthetic_inputs` column; `;synthetic_fundamentals` quality flag). **P1-6 (one latent two-party share per race) is deferred:** it is an optional, M-effort model change, and the D/R options are already coupled through the shared national/regional error. |
+| 4.4 (P2-2/3) | `2fc692f` (ruff fixes were in `14ef1fd`) | `.github/workflows/ci.yml` runs uv sync, ruff check, ruff format --check, and pytest with the 90% gate. Pyright is not added (optional). |
+| 4.5 (P2-4) | spread over earlier commits plus `5222081` | Edge cases are covered in `tests/test_votehub_parser.py`: one-sided and same-party polls, minor parties, nominee filter, dedupe, NE independent, at-large AK-01/VT-01. FL/OH specials and the 100-seat total are in `tests/test_senate_2026_structure.py`. Script unit tests are in `tests/test_run_scripts.py`. |
+| 4.6 (P2-5/6) | `5222081` | package_run writes the top-level `runs/<kind>/<date>/summary.json` (`--run-kind`, `--prior` week-over-week). compare_runs requires a nonzero change for a mover and reports "No significant movers". The polled status checks every option. The 2026-11-02 and FL/OH caveat hard-codes are removed. |
+| 4.7 (P2-7/9) | `2a83c82` | README: VoteHub live procedure, digest fields, synthetic-baseline caveat; the 538 path is marked DEPRECATED (README and `configs/sources_live.yaml`); `models/ecosystem.py` stub documented. |
+| 4.8 (P2-8) | `899656e` | License notes: Wikipedia-derived fixtures are CC BY-SA 4.0; VoteHub data is CC BY 4.0 (`tests/golden_fixtures/votehub_race_polls_sample.SOURCES.txt`); code is MIT. |
+| weekly routine | see `chore: weekly_run.sh` | `scripts/weekly_run.sh` runs the fixed weekly command set: no `--as-of`, `--prior`, `--run-kind`, optional `--allow-cached`. |
