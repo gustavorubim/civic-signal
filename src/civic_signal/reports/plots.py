@@ -13,7 +13,7 @@ import polars as pl
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.ticker import PercentFormatter
+from matplotlib.ticker import MaxNLocator, PercentFormatter
 
 
 PARTY_COLORS = {
@@ -78,7 +78,7 @@ class PlotGenerator:
         self._add(
             manifest,
             "drivers",
-            self._tipping_point_bars(plot_dir, control_forecasts),
+            self._tipping_point_bars(plot_dir, control_forecasts, race_forecasts),
             "Tipping-point race ranking",
         )
         self._add(
@@ -1103,7 +1103,13 @@ class PlotGenerator:
         forecast_draws: pl.DataFrame,
         control_forecasts: pl.DataFrame,
     ) -> Path | None:
-        """Histogram of total seats per party across draws with majority threshold."""
+        """Distribution of DEM seats (modeled wins + holdovers) with the majority line.
+
+        One-seat bins, y-axis in percent of simulations, x-range clipped to the
+        p0.5-p99.5 window around the distribution. Bars at or above the DEM control
+        threshold are blue, the rest red. Minor parties (IND/OTH) are not drawn as
+        their own histogram: their 0-2 seat spikes stretched the x-axis to zero.
+        """
         if race_catalog.is_empty() or forecast_draws.is_empty() or control_forecasts.is_empty():
             return None
         catalog = race_catalog.select(["race_id", "control_body", "seats"])
@@ -1112,66 +1118,134 @@ class PlotGenerator:
         )
         if joined.is_empty():
             return None
-        bodies = control_forecasts.select(["control_body", "control_threshold"]).unique()
-        if bodies.is_empty():
-            return None
-        body = str(bodies.row(0, named=True)["control_body"])
-        threshold = int(bodies.row(0, named=True)["control_threshold"])
-        body_draws = joined.filter(pl.col("control_body") == body).filter(pl.col("winner"))
-        if body_draws.is_empty():
-            return None
-        per_draw = (
-            body_draws.group_by(["draw_id", "party"])
-            .agg(pl.col("seats").sum().alias("seat_count"))
-            .sort("draw_id")
-        )
-        holdovers = {
-            str(row["party"]).upper(): int(row.get("holdover_seats") or 0)
+        body = str(control_forecasts.row(0, named=True)["control_body"])
+        control = {
+            str(row["party"]).upper(): row
             for row in control_forecasts.iter_rows(named=True)
             if str(row["control_body"]) == body
         }
-        parties_present = sorted(per_draw["party"].unique().to_list())
-        if not parties_present:
+        focus = "DEM" if "DEM" in control else sorted(control)[0]
+        focus_row = control[focus]
+        threshold = int(focus_row["control_threshold"])
+        holdover = int(focus_row.get("holdover_seats") or 0)
+        counts = self._party_seat_counts(joined, body, focus) + holdover
+        if counts.size == 0:
             return None
-        fig, ax = plt.subplots(figsize=(9.6, 4.0), dpi=150)
-        all_max = 0
-        for party in parties_present:
-            slice_ = per_draw.filter(pl.col("party") == party)["seat_count"].to_numpy()
-            slice_ = slice_ + holdovers.get(party.upper(), 0)
-            if slice_.size == 0:
-                continue
-            bins = max(15, int(slice_.max() - slice_.min()) + 1)
-            color = PARTY_COLORS.get(str(party).upper(), ACCENT_FALLBACK)
-            ax.hist(
-                slice_,
-                bins=bins,
-                alpha=0.55,
-                color=color,
-                edgecolor=color,
-                linewidth=1.0,
-                label=str(party).upper(),
-            )
-            all_max = max(all_max, int(slice_.max()))
-        ax.axvline(threshold, color=MUTED_COLOR, linestyle="--", linewidth=1.2)
+        values, freq = np.unique(counts, return_counts=True)
+        share = freq / counts.size
+        lo, hi = self._seat_window(counts)
+        fig, ax = plt.subplots(figsize=(9.6, 4.6), dpi=150)
+        other = "REP" if focus == "DEM" else "DEM"
+        colors = [
+            PARTY_COLORS.get(focus, ACCENT_FALLBACK)
+            if value >= threshold
+            else PARTY_COLORS.get(other, MUTED_COLOR)
+            for value in values
+        ]
+        ax.bar(values, share, width=0.9, color=colors, alpha=0.85, linewidth=0)
+        ax.axvline(threshold - 0.5, color=TEXT_COLOR, linestyle="--", linewidth=1.3)
+        ymax = float(share.max()) * 1.45
+        ax.set_ylim(0, ymax)
+        mean = float(focus_row.get("seat_count_mean") or np.mean(counts))
+        p10 = float(focus_row.get("seat_count_p10") or np.quantile(counts, 0.10))
+        p50 = float(focus_row.get("seat_count_p50") or np.quantile(counts, 0.50))
+        p90 = float(focus_row.get("seat_count_p90") or np.quantile(counts, 0.90))
+        band_y = ymax * 0.74
+        ax.plot([p10, p90], [band_y, band_y], color=MUTED_COLOR, linewidth=2.2)
+        ax.plot([p10, p90], [band_y, band_y], "|", color=MUTED_COLOR, markersize=12)
+        ax.plot([mean], [band_y], "o", color=TEXT_COLOR, markersize=6)
         ax.text(
-            threshold,
-            ax.get_ylim()[1] * 0.95,
-            f"  threshold = {threshold}",
-            color=MUTED_COLOR,
+            mean,
+            band_y + ymax * 0.035,
+            f"mean {mean:.1f} | median {p50:.0f} | 80% range {p10:.0f}-{p90:.0f}",
+            ha="center",
+            va="bottom",
             fontsize=9,
-            va="top",
+            color=TEXT_COLOR,
         )
-        ax.set_xlabel(f"Total {body} seats per draw")
-        ax.set_ylabel("Simulation draws")
+        control_probability = float(focus_row.get("control_probability") or 0.0)
+        other_probability = float((control.get(other) or {}).get("control_probability") or 0.0)
+        summary = f"P({focus} control) = {control_probability:.1%}"
+        if other in control:
+            summary += f"   P({other} control) = {other_probability:.1%}"
+        with_ind = focus_row.get("control_probability_with_independents")
+        caucus = str(focus_row.get("independent_caucus_races") or "[]")
+        if with_ind is not None and caucus not in ("", "[]"):
+            summary += f"\nIf independents caucus with {focus}: {float(with_ind):.1%}"
+        summary += f"\nDashed line = majority ({threshold}+ {focus} seats)"
+        ax.text(
+            0.01,
+            0.97,
+            summary,
+            transform=ax.transAxes,
+            fontsize=10,
+            va="top",
+            ha="left",
+            color=TEXT_COLOR,
+            fontweight="bold",
+        )
+        ax.set_xlim(lo - 0.5, hi + 0.5)
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=12))
+        ax.set_xlabel(
+            f"{focus} {body} seats (incl. {holdover} not up)"
+            if holdover
+            else f"{focus} {body} seats"
+        )
+        ax.set_ylabel("Share of simulations")
+        ax.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=1 if ymax < 0.05 else 0))
         ax.set_title(
-            f"{body.title()} Seat-Count Distribution",
+            f"{body.title()} Seat Distribution ({counts.size:,} simulations)",
             loc="left",
             fontweight="bold",
         )
-        ax.legend(frameon=False, fontsize=9)
         self._style_axis(ax)
         ax.grid(axis="y", color=GRID_COLOR, linewidth=0.8, alpha=0.9)
         return self._save(fig, plot_dir / "seat_count_histogram.png")
+
+    @staticmethod
+    def _party_seat_counts(joined: pl.DataFrame, body: str, party: str) -> np.ndarray:
+        """Seats won by ``party`` in every draw, including draws where it won none."""
+        body_draws = joined.filter(pl.col("control_body") == body)
+        draws = body_draws.select("draw_id").unique()
+        wins = (
+            body_draws.filter(pl.col("winner") & (pl.col("party").str.to_uppercase() == party))
+            .group_by("draw_id")
+            .agg(pl.col("seats").sum().alias("seat_count"))
+        )
+        return (
+            draws.join(wins, on="draw_id", how="left")
+            .with_columns(pl.col("seat_count").fill_null(0))
+            .sort("draw_id")["seat_count"]
+            .to_numpy()
+            .astype(int)
+        )
+
+    @staticmethod
+    def _seat_window(counts: np.ndarray, pad: int = 2, min_width: int = 12) -> tuple[int, int]:
+        """Integer x-window covering p0.5-p99.5 of the draws, padded, at least min_width."""
+        lo = int(np.floor(np.quantile(counts, 0.005))) - pad
+        hi = int(np.ceil(np.quantile(counts, 0.995))) + pad
+        if hi - lo < min_width:
+            mid = (hi + lo) / 2
+            lo, hi = int(np.floor(mid - min_width / 2)), int(np.ceil(mid + min_width / 2))
+        return max(lo, 0), hi
+
+    @staticmethod
+    def _surname(name: str) -> str:
+        """Last name for compact labels, skipping suffixes (``Jr.``, ``III``)."""
+        suffixes = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv"}
+        parts = [part for part in name.replace(",", " ").split() if part.lower() not in suffixes]
+        return parts[-1] if parts else name
+
+    @staticmethod
+    def _short_race_label(race_id: str) -> str:
+        """US-SEN-IA-2026 -> IA, US-HOUSE-AZ-01-2026 -> AZ-01."""
+        parts = race_id.split("-")
+        if len(parts) >= 3 and parts[0] == "US":
+            parts = parts[2:]
+        if parts and parts[-1].isdigit() and len(parts[-1]) == 4:
+            parts = parts[:-1]
+        return "-".join(parts) or race_id
 
     def _race_vote_share_kde_grid(
         self,
@@ -1180,7 +1254,10 @@ class PlotGenerator:
         forecast_draws: pl.DataFrame,
         max_panels: int = 12,
     ) -> Path | None:
-        """Small multiples of vote-share KDEs for the most competitive races."""
+        """Small multiples of vote-share KDEs for the most competitive races.
+
+        All panels share one x-window (vote share in %, p0.5-p99.5 of the plotted
+        draws) so widths are comparable across races; each panel shows win odds."""
         if race_forecasts.is_empty() or forecast_draws.is_empty():
             return None
         candidates = race_forecasts.filter(pl.col("winner_probability").is_not_null())
@@ -1196,19 +1273,32 @@ class PlotGenerator:
         race_ids = ranked["race_id"].to_list()
         if not race_ids:
             return None
+        shares = (
+            forecast_draws.filter(pl.col("race_id").is_in(race_ids))["vote_share"]
+            .drop_nulls()
+            .to_numpy()
+            .astype(float)
+        )
+        if shares.size:
+            lo = float(np.quantile(shares, 0.005)) - 0.02
+            hi = float(np.quantile(shares, 0.995)) + 0.02
+            half = max(0.5 - lo, hi - 0.5, 0.1)
+            window = (max(0.0, 0.5 - half), min(1.0, 0.5 + half))
+        else:
+            window = (0.25, 0.75)
         n = len(race_ids)
         cols = min(3, n)
         rows = int(np.ceil(n / cols))
         fig, axes = plt.subplots(
-            rows, cols, figsize=(cols * 4.5, rows * 3.0), dpi=150, squeeze=False
+            rows, cols, figsize=(cols * 4.6, rows * 3.0), dpi=150, squeeze=False
         )
         for index, race_id in enumerate(race_ids):
             ax = axes[index // cols][index % cols]
-            self._render_race_kde_panel(ax, race_id, race_forecasts, forecast_draws)
+            self._render_race_kde_panel(ax, race_id, race_forecasts, forecast_draws, window)
         for index in range(n, rows * cols):
             axes[index // cols][index % cols].axis("off")
         fig.suptitle(
-            "Vote-Share Distribution — Most Competitive Races",
+            "Vote-Share Distribution — Most Competitive Races (dashed line = 50%)",
             x=0.02,
             ha="left",
             fontsize=14,
@@ -1223,6 +1313,7 @@ class PlotGenerator:
         race_id: str,
         race_forecasts: pl.DataFrame,
         forecast_draws: pl.DataFrame,
+        window: tuple[float, float] = (0.25, 0.75),
     ) -> None:
         race_draws = forecast_draws.filter(pl.col("race_id") == race_id)
         race_meta = race_forecasts.filter(pl.col("race_id") == race_id)
@@ -1231,9 +1322,12 @@ class PlotGenerator:
             ax.set_xticks([])
             ax.set_yticks([])
             return
-        for option in race_meta.iter_rows(named=True):
+        xs = np.linspace(window[0], window[1], 240)
+        odds: list[str] = []
+        for option in race_meta.sort("winner_probability", descending=True).iter_rows(named=True):
             samples = (
                 race_draws.filter(pl.col("option_id") == option["option_id"])["vote_share"]
+                .drop_nulls()
                 .to_numpy()
                 .astype(float)
             )
@@ -1241,10 +1335,11 @@ class PlotGenerator:
                 continue
             party = str(option.get("party") or "").upper()
             color = PARTY_COLORS.get(party, ACCENT_FALLBACK)
-            xs = np.linspace(max(0.0, samples.min() - 0.05), min(1.0, samples.max() + 0.05), 200)
+            name = self._surname(str(option.get("name") or party))
+            label = f"{name} ({party[:1] or '?'})"
             density = self._gaussian_kde(samples, xs)
             ax.fill_between(xs, density, alpha=0.18, color=color)
-            ax.plot(xs, density, color=color, linewidth=1.6, label=party)
+            ax.plot(xs, density, color=color, linewidth=1.6, label=label)
             ax.axvline(
                 float(option.get("vote_share_mean") or np.mean(samples)),
                 color=color,
@@ -1252,12 +1347,28 @@ class PlotGenerator:
                 linewidth=0.9,
                 alpha=0.7,
             )
-        ax.axvline(0.5, color=MUTED_COLOR, linestyle="--", linewidth=0.8)
-        ax.set_xlim(0.25, 0.75)
+            probability = option.get("winner_probability")
+            if probability is not None:
+                odds.append(f"{label} {float(probability):.0%}")
+        ax.axvline(0.5, color=MUTED_COLOR, linestyle="--", linewidth=0.9)
+        ax.set_xlim(*window)
+        ax.set_ylim(bottom=0)
         ax.set_yticks([])
-        ax.set_title(race_id, fontsize=11, color=TEXT_COLOR, loc="left")
-        ax.set_xlabel("Vote share", fontsize=9)
-        ax.legend(frameon=False, fontsize=8, loc="upper right")
+        ax.xaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
+        ax.tick_params(axis="x", labelsize=8, colors=TEXT_COLOR)
+        ax.set_title(self._short_race_label(race_id), fontsize=11, color=TEXT_COLOR, loc="left")
+        if odds:
+            ax.text(
+                0.99,
+                0.97,
+                "Win odds\n" + "\n".join(odds[:3]),
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                fontsize=7.5,
+                color=TEXT_COLOR,
+            )
+        ax.set_xlabel("Projected vote share", fontsize=9)
         for spine in ("top", "right", "left"):
             ax.spines[spine].set_visible(False)
         ax.spines["bottom"].set_color(GRID_COLOR)
@@ -1266,9 +1377,13 @@ class PlotGenerator:
         self,
         plot_dir: Path,
         control_forecasts: pl.DataFrame,
+        race_forecasts: pl.DataFrame | None = None,
+        top_n: int = 10,
     ) -> Path | None:
         """Horizontal bars of true tipping-point probabilities (audit P1-2).
 
+        Top ``top_n`` races, sorted, x-axis in percent with headroom for labels; each
+        label carries the race's DEM win probability when race forecasts are given.
         Falls back to the legacy pivotal-flip rate for control frames that predate it."""
         if control_forecasts.is_empty():
             return None
@@ -1276,7 +1391,7 @@ class PlotGenerator:
             column, key, xlabel = (
                 "tipping_point_probability",
                 "tipping_point_probability",
-                "P(race is the tipping point for control)",
+                "Chance the race is the tipping point for control (% of simulations)",
             )
         elif "pivotal_rates" in control_forecasts.columns:
             column, key, xlabel = (
@@ -1287,6 +1402,8 @@ class PlotGenerator:
         else:
             return None
         rows: list[dict[str, object]] = []
+        none_probability: float | None = None
+        body = ""
         for record in control_forecasts.iter_rows(named=True):
             if column == "tipping_point_probability" and str(record.get("party")).upper() != "DEM":
                 continue  # one chamber-wide ordering; the DEM view is the headline
@@ -1297,6 +1414,9 @@ class PlotGenerator:
                 payload = json.loads(str(raw))
             except json.JSONDecodeError:
                 continue
+            body = str(record.get("control_body") or body)
+            if record.get("tipping_point_none_probability") is not None:
+                none_probability = float(record["tipping_point_none_probability"])
             for item in payload:
                 rows.append(
                     {
@@ -1307,20 +1427,58 @@ class PlotGenerator:
                 )
         if not rows:
             return None
-        frame = pl.DataFrame(rows).sort("pivotal_rate", descending=True).head(10).reverse()
-        labels = [f"{row['race_id']} ({row['party']})" for row in frame.iter_rows(named=True)]
+        frame = pl.DataFrame(rows).sort("pivotal_rate", descending=True).head(top_n).reverse()
+        dem_odds: dict[str, float] = {}
+        if race_forecasts is not None and not race_forecasts.is_empty():
+            needed = {"race_id", "party", "winner_probability"}
+            if needed.issubset(race_forecasts.columns):
+                for row in race_forecasts.filter(
+                    (pl.col("party").str.to_uppercase() == "DEM")
+                    & pl.col("winner_probability").is_not_null()
+                ).iter_rows(named=True):
+                    dem_odds[str(row["race_id"])] = float(row["winner_probability"])
+        labels = []
+        for row in frame.iter_rows(named=True):
+            label = self._short_race_label(str(row["race_id"]))
+            if column != "tipping_point_probability":
+                label += f" ({row['party']})"
+            if str(row["race_id"]) in dem_odds:
+                label += f"  · D win {dem_odds[str(row['race_id'])]:.0%}"
+            labels.append(label)
         values = frame["pivotal_rate"].to_list()
         colors = [
             PARTY_COLORS.get(str(row["party"]).upper(), ACCENT_FALLBACK)
             for row in frame.iter_rows(named=True)
         ]
-        fig, ax = plt.subplots(figsize=(9.6, max(3.6, len(labels) * 0.42)), dpi=150)
+        fig, ax = plt.subplots(figsize=(9.6, max(3.6, len(labels) * 0.42 + 1.0)), dpi=150)
         ax.barh(labels, values, color=colors)
-        ax.set_xlabel(xlabel)
-        ax.set_title("Tipping-Point Races", loc="left", fontweight="bold")
-        ax.xaxis.set_major_formatter(PercentFormatter(1.0))
+        vmax = max(values) if values else 0.0
+        ax.set_xlim(0, max(vmax * 1.18, 0.01))
+        decimals = 1 if vmax < 0.05 else 0
+        ax.xaxis.set_major_formatter(PercentFormatter(1.0, decimals=decimals))
         for index, value in enumerate(values):
-            ax.text(value + 0.005, index, f"{value:.1%}", va="center", fontsize=9)
+            ax.text(value + vmax * 0.012, index, f"{value:.1%}", va="center", fontsize=9)
+        ax.set_xlabel(xlabel)
+        title = (
+            f"{body.title()} Tipping-Point Races (top {len(labels)})"
+            if body
+            else "Tipping-Point Races"
+        )
+        ax.set_title(title, loc="left", fontweight="bold", pad=20)
+        subtitle = (
+            "Race whose win first carries DEM to a majority when races are ordered by DEM margin"
+        )
+        if none_probability is not None and none_probability > 0.005:
+            subtitle += f"; majority out of reach in {none_probability:.1%} of simulations"
+        ax.text(
+            0.0,
+            1.01,
+            subtitle,
+            transform=ax.transAxes,
+            fontsize=8.5,
+            color=MUTED_COLOR,
+            va="bottom",
+        )
         self._style_axis(ax)
         return self._save(fig, plot_dir / "tipping_point_bars.png")
 
